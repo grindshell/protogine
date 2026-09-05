@@ -1,6 +1,6 @@
 # ADR-001: Luau scripting and the native plugin API
 
-**Status:** D1-D8 accepted; Phases 0 and 1 complete on Windows MSVC; later phases unstarted.
+**Status:** D1-D8 accepted; Phases 0, 1, and 1a complete on Windows MSVC; later phases unstarted.
 **Date:** 2026-09-05.
 **Decider:** Project owner.
 **Baseline:** `539659e` (Player, bundle discovery, built-in capture).
@@ -464,8 +464,8 @@ and migration remain game-script responsibilities, not deferred engine features.
   declares version 0.1.0. The
   [library API](https://github.com/totlang/tot/blob/2f407897f985654cdbb6201ad01ba05216a6e3d7/src/lib.rs)
   and [CLI converters](https://github.com/totlang/tot/blob/2f407897f985654cdbb6201ad01ba05216a6e3d7/cli/src/convert.rs)
-  establish the current parser/export split. Phase 0 now parses a manifest fixture
-  through this Git dependency; script data bindings remain Phase 1a.
+  establish the current parser/export split. Phase 0 parses a manifest fixture
+  through this Git dependency; Phase 1a now implements script data bindings.
 - [libloading](https://github.com/nagisa/rust_libloading)
   documents unsafe loading, initializer execution, symbol typing, and library
   lifetime. Version 0.9.0 is selected, not yet a project dependency.
@@ -560,6 +560,115 @@ not change Player rendering or capture. Other native platforms are unverified.
 The sibling-file and allocation-retry regressions both failed against `db0a7c2`
 and pass after the resolver fixes. The checks above were rerun after those fixes.
 
-Next slice: Phase 1a data/filesystem utilities, then Phase 2 kernel-facing APIs
-and frame/input timing. Do not imply that passing a constant dt implements a
+Next slice: Phase 2 kernel-facing APIs and frame/input timing. Do not imply that
+passing a constant dt implements a
 real-time accumulator or that invoking draw supplies a renderer.
+
+## Phase 1a implementation contract
+
+This slice adds scoped `ctx.data` and `ctx.fs` utilities. It does not wire the
+Player or interpret a plugin manifest; manifest schema validation remains Phase 4.
+
+- `data.parse(text)` and `data.format(value)` use the pinned tot library.
+  `data.export(value, format)` supports JSON through tot and small in-process
+  adapters to `yaml_serde` 0.10.7 and `toml` 1.1.4. These match the inspected
+  upstream CLI's adapter choices, without invoking that CLI or modifying tot.
+  TOML is only an export target; `game.tot` remains tot.
+- Ordinary Luau tables are string-keyed objects; `data.array(table)` marks a
+  dense one-based array, including empty arrays. Parsed arrays retain this tag.
+  `data.null` is a distinct immutable value; nil means an absent object member
+  and cannot stand for a data value. `data.integer(decimal_text)` preserves
+  arbitrary integers in immutable userdata with a `.text` field. All ordinary
+  Luau numbers represent finite floats; parsing floats normalizes them to f64.
+  `data.number(integer)` explicitly converts only the safe integer range
+  `[-(2^53-1), 2^53-1]`. `data.kind(value)` reports the data kind.
+  Object keys are sorted for repeatable output; source order/comments/float
+  spelling are not preserved. Mixed/sparse tables, cycles, custom metatables,
+  unsupported userdata, invalid UTF-8, and nonfinite numbers are errors.
+- JSON retains integer digits; downstream readers may round them. YAML export
+  rejects integers outside signed/unsigned 64-bit range. TOML requires an object
+  root, rejects null anywhere and integers outside signed 64-bit range. Export
+  uses f64 floats; there is no implicit omission or lossy integer conversion.
+- `ScriptHost::load` grants only bundle reads. `load_with_data_root` additionally
+  accepts an existing absolute writable directory. Both roots are canonicalized
+  and must be disjoint. The host selects the location; no process-working-directory
+  or implicit platform-data-directory policy is introduced in this slice.
+- `fs.read(root, path)` returns binary-safe Luau strings; `fs.list(root, path)`
+  returns sorted `{name, kind}` entries. Root names are `bundle` and `data`.
+  `fs.mkdir(path)` creates data subdirectories; `fs.write(path, bytes)` creates or
+  replaces a data file atomically using a synced tempfile in the destination
+  directory. Failed replacement preserves the previous file; crash durability
+  of the directory entry is not promised. Parent directories must already exist.
+  Writes/mkdir are allowed only in init/update/orderly shutdown; reads/list are
+  also available in draw. All function references expire with their callback.
+- Paths use portable relative `/` segments, at most 4096 UTF-8 bytes; absolute,
+  empty file paths, dot/parent segments, backslashes, Windows device names,
+  trailing dots/spaces, and reserved characters are rejected. Empty paths select
+  a root only for listing. Symlinks/reparse points below either root are refused.
+  Root trees must not be concurrently replaced by another process; these helpers
+  do not claim an OS security boundary against hostile filesystem races.
+- Limits: 1 MiB per file/data input/output and per converted tree's string bytes,
+  16,384 data nodes, nesting 64, 1024 directory entries, 128 utility calls and
+  8 MiB of file transfer per callback. Resource/deadline failures latch a session
+  fault; ordinary validation/conversion/I/O failures are catchable. Parsing,
+  conversion, and synchronous I/O cannot be preempted while inside native code.
+
+Immutable integer userdata retains its text as a VM string; mutable data lives
+in VM tables. This avoids a second unbounded persistent Rust-owned data heap.
+The alternative of a Rust-owned document API would preserve all source number
+lexemes but complicate ordinary Luau editing and require separate heap accounting.
+
+### Phase 1a verification record — 2026-09-05
+
+Implemented in `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and
+`utilities.rs`; bindings are added by the shared host. Cargo pins the adapter
+versions above and uses tempfile 3.27.0 for same-directory file replacement.
+The selected libraries provide in-process serializers
+([yaml_serde](https://docs.rs/yaml_serde/0.10.7/yaml_serde/),
+[toml](https://docs.rs/toml/1.1.4/toml/)) and a replacement operation
+([tempfile persist](https://docs.rs/tempfile/3.27.0/tempfile/struct.NamedTempFile.html#method.persist));
+their local implementation and actual Windows behavior were also checked.
+
+The 13 new `scripting_utilities` tests pass in debug and release. They cover
+null/empty collections, integer precision and export ranges, independent
+YAML/TOML parsing of exported output, invalid values and cycles, rooted binary
+I/O, path restrictions, junction refusal, draw permissions, expired functions,
+retained values, and byte/node/depth/call/list/transfer limits. A locked Windows
+destination rejects replacement, preserves the original bytes, and leaves no
+temporary file. A denied read is recoverable. Resource failures remain latched.
+Nesting tests cover arrays and objects at depth 64 (accepted), 65/128 (engine
+limit), and 129/256 (tot's parser limit). Catching either depth failure cannot
+permit a following write; ordinary syntax errors, including diagnostics quoting
+the parser's depth message, remain recoverable. The wrapper classifies the exact
+pinned tot diagnostic because this revision has no typed error kind; recheck the
+classification and boundary tests when updating tot.
+
+`examples/games/persistence/main.luau` owns its schema, validation, filenames,
+restoration, and write timing. Two actual example runs against
+`target/phase1a-example-data` produced `Loaded 0 ticks` / `Stored 3 ticks`, then
+`Loaded 3 ticks` / `Stored 6 ticks`. The test also proves that an unsupported
+schema leaves existing data untouched. No engine save policy was added.
+
+All passed:
+
+```text
+cargo fmt --all -- --check
+cargo check --offline --workspace --all-targets
+cargo check --offline --workspace --all-targets --all-features
+cargo test --offline --workspace
+cargo test --offline --workspace --no-default-features
+cargo test --offline --workspace --no-default-features --features scripting
+cargo clippy --offline --workspace --all-targets -- -D warnings
+cargo clippy --offline --workspace --all-targets --all-features -- -D warnings
+cargo build --offline --release --bin protogine-player
+cargo test --offline --release --no-default-features --features scripting --test scripting --test scripting_feasibility --test scripting_utilities
+cargo run --offline --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo run --offline --example script_host --no-default-features --features scripting -- examples/games/persistence target/phase1a-example-data
+```
+
+The persistence command ran twice. The existing 15 scripting behavior tests,
+17 isolated probes, and bundle/Player unit tests also pass. Player rendering and
+capture are unchanged; the opt-in GPU capture was not rerun. Filesystem behavior
+on other targets and crash durability remain unverified. Platform data-directory
+selection remains the embedding application's responsibility; plugin manifest
+interpretation is Phase 4. Phase 2 is next.

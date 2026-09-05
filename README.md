@@ -105,7 +105,8 @@ cargo run --example script_host --no-default-features --features scripting -- ex
 `ScriptHost::load` takes an absolute game-directory path and `ScriptLimits`.
 `main.luau` returns a plain table containing optional `init`, `update`, `draw`,
 and `shutdown` functions. Callbacks return no values. The host exposes
-`ctx.log(message)`; stored context functions expire when their callback ends.
+`ctx.log(message)`, `ctx.data`, and `ctx.fs`; stored context functions expire when
+their callback ends, while returned data values can be retained.
 Logs from the last call can be retrieved with `take_logs()`.
 
 Call `init()` once, then `update()` for each simulation tick and `draw(alpha)` for
@@ -134,9 +135,80 @@ uncaught allocation errors fault the session.
 Cancellation requires Rust `panic=unwind` and uses mlua's protected panic handling
 so `pcall`, `xpcall`, and metamethods cannot swallow the host's cancellation.
 This does not preempt filesystem I/O, source/JIT compilation, or native functions;
-the heap cap is not a bound on total process memory. Module preparation is checked
-against the deadline when control returns to the VM/host. There is no filesystem,
-process, network, or native-plugin API exposed to scripts in this slice.
+the heap cap is not a bound on total process memory. Native work is checked
+against the deadline when control returns to the VM/host. Process, network,
+and native-plugin APIs remain unavailable.
+
+## Script data and filesystem utilities
+
+These APIs are available on each lifecycle callback's context. Calling a retained
+function after its callback ends raises an error. Validation, conversion, and I/O
+errors can be caught with `pcall`; resource-limit failures fault the session.
+
+| Data API | Behavior |
+| --- | --- |
+| `ctx.data.parse(text)` | Parse UTF-8 tot into Luau values |
+| `ctx.data.format(value)` | Write a tot document from those values |
+| `ctx.data.export(value, format)` | Export `"json"`, `"yaml"`, or `"toml"` |
+| `ctx.data.integer(decimal_text)` | Create an exact integer with immutable `.text`; `tostring` returns its digits |
+| `ctx.data.number(value)` | Read a finite float or convert an integer within `±(2^53−1)` |
+| `ctx.data.array(table)` | Validate and mark a dense one-based array, including an empty array |
+| `ctx.data.null` | Distinct null value; unlike nil, it survives in tables |
+| `ctx.data.kind(value)` | `object`, `array`, `integer`, `float`, `null`, `boolean`, or `string` |
+
+Ordinary string-keyed Luau tables represent objects. Parsed arrays retain their
+array identity and remain mutable. All ordinary Luau numbers encode as floats;
+use `integer("42")` when integer identity matters. Integers keep their full text;
+parsed floats use f64 precision. Object keys are sorted for repeatable output.
+Comments, source key order, and float spelling are not retained. Mixed/sparse
+tables, cycles, custom metatables, unsupported userdata, invalid UTF-8 data,
+nil values, NaN, and infinities cannot be serialized.
+
+JSON preserves integer digits, though another reader may round them. YAML export
+supports signed/unsigned 64-bit integers. TOML requires an object root, signed
+64-bit integers, and no null values anywhere. Unsupported values raise errors
+with their data path; no values are silently dropped. The TOML dependency is
+used for export only; game manifests still use tot.
+
+`ScriptHost::load` grants bundle reads. To grant writes, the embedding application
+calls `ScriptHost::load_with_data_root(bundle, data, limits)` with two existing,
+absolute directories. They are canonicalized and must be disjoint. The application
+selects the data location; the engine supplies no save filename or schema.
+
+| Filesystem API | Behavior |
+| --- | --- |
+| `ctx.fs.read(root, path)` | Read a regular file as a binary-safe Luau string; root is `"bundle"` or `"data"` |
+| `ctx.fs.list(root, path)` | Sorted `{name, kind}` entries; use `""` to list the root |
+| `ctx.fs.mkdir(path)` | Create nested data directories; existing directories succeed |
+| `ctx.fs.write(path, bytes)` | Create/replace a data file atomically; parent directory must exist |
+
+Writes and directory creation are allowed in init, update, and orderly shutdown.
+Draw can read and list. Paths are relative `/`-separated names, up to 4096 UTF-8
+bytes. Absolute paths, dot/parent segments, backslashes, Windows device names,
+reserved characters, and trailing dots/spaces are rejected. Symlinks/reparse
+points below either root are refused. These roots must not be concurrently
+replaced by another process; filesystem race isolation is not promised.
+
+Writes sync a temporary file in the destination directory, then replace the
+destination. A failed replacement preserves the old file and cleans the temporary
+file. Replacement creates a new file; old file metadata is not retained. Directory
+entry crash durability is not promised. Synchronous I/O can stall a tick, so games
+choose when to perform it. A fault may skip shutdown; do not rely on it alone.
+
+Limits are 1 MiB per file/data input/output and per converted tree's string bytes,
+16,384 data nodes, nesting 64, and 1024 directory entries. Each callback allows
+128 utility calls and 8 MiB of file transfers. These bounds supplement the VM
+heap and callback deadline; native parsing, conversion, and I/O are not preemptible.
+
+The example creates a chosen data directory, then lets Luau restore and persist
+its own progress. Run this command twice to see the counter resume:
+
+```text
+cargo run --example script_host --no-default-features --features scripting -- examples/games/persistence target/example-data
+```
+
+The script writes `progress.tot` during update and rejects an unsupported schema
+version without overwriting the existing data. There is no engine save lifecycle.
 
 ## Code and checks
 
@@ -144,6 +216,8 @@ process, network, or native-plugin API exposed to scripts in this slice.
 - `src/bin/player.rs` owns the Macroquad window and startup presentation.
 - `src/bin/player/capture.rs` handles capture configuration and PNG output.
 - `src/scripting.rs` and `src/scripting/modules.rs` provide the optional Luau host.
+- `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and `utilities.rs`
+  implement scoped data/I/O services and their shared callback limits.
 - The default `player` Cargo feature enables graphics. The shared library can
   be built and tested without graphics dependencies.
 
@@ -156,6 +230,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --release --no-default-features --features scripting --test scripting --test scripting_feasibility --test scripting_utilities
 ```
 
 See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance.

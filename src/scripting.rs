@@ -1,6 +1,9 @@
 //! Headless Luau lifecycle. The Player is connected in a later implementation slice.
 
+mod data;
+mod filesystem;
 mod modules;
+mod utilities;
 
 use mlua::{
     Function, Lua, MultiValue, StdLib, Value, VmState, state::LuaOptions, thread::ThreadStatus,
@@ -102,10 +105,30 @@ pub struct ScriptHost {
     state: ScriptState,
     last_error: Option<ScriptError>,
     logs: Vec<String>,
+    data: data::Data,
+    filesystem: filesystem::FileSystem,
 }
 
 impl ScriptHost {
     pub fn load(root: &Path, limits: ScriptLimits) -> Result<Self, ScriptError> {
+        Self::load_with_roots(root, None, limits)
+    }
+
+    /// Grant filesystem writes beneath an existing, absolute directory disjoint
+    /// from the bundle. The caller selects and creates the application's location.
+    pub fn load_with_data_root(
+        root: &Path,
+        data_root: &Path,
+        limits: ScriptLimits,
+    ) -> Result<Self, ScriptError> {
+        Self::load_with_roots(root, Some(data_root), limits)
+    }
+
+    fn load_with_roots(
+        root: &Path,
+        data_root: Option<&Path>,
+        limits: ScriptLimits,
+    ) -> Result<Self, ScriptError> {
         let load_error = |error: mlua::Error| ScriptError {
             phase: "load",
             message: error.to_string(),
@@ -156,6 +179,8 @@ impl ScriptHost {
             Ok(VmState::Continue)
         });
         let modules = modules::BundleModules::new(root, budget.clone()).map_err(load_error)?;
+        let data = data::Data::new(&lua).map_err(load_error)?;
+        let filesystem = filesystem::FileSystem::new(root, data_root).map_err(load_error)?;
         globals
             .raw_set(
                 "require",
@@ -178,6 +203,8 @@ impl ScriptHost {
             state: ScriptState::Loaded,
             last_error: None,
             logs: Vec::new(),
+            data,
+            filesystem,
         };
         let result = host.execute("load", entry, MultiValue::new(), limits.startup_timeout)?;
         let table = match (result.len(), result.front()) {
@@ -295,6 +322,7 @@ impl ScriptHost {
         let budget = self.budget.clone();
         let mut logs = Vec::new();
         let mut bytes = 0;
+        let utility_budget = utilities::UtilityBudget::new(&budget);
         let result = catch_interrupt(|| {
             lua.scope(|scope| {
                 let context = lua.create_table()?;
@@ -311,6 +339,12 @@ impl ScriptHost {
                     Ok(())
                 })?;
                 context.raw_set("log", log)?;
+                context.raw_set("data", self.data.bind(&lua, scope, &utility_budget)?)?;
+                context.raw_set(
+                    "fs",
+                    self.filesystem
+                        .bind(&lua, scope, &utility_budget, phase != "draw")?,
+                )?;
                 context.set_readonly(true);
                 let mut args = MultiValue::from_vec(vec![Value::Table(context)]);
                 if let Some(number) = number {

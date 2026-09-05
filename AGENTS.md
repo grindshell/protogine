@@ -34,11 +34,15 @@ graphics; the shared library also builds with `--no-default-features`.
 
 The optional `scripting` feature adds a headless
 [Luau host](src/scripting.rs), bundle-local modules, lifecycle/fault handling,
-and bounded callback logging. Its `update()` advances one fixed 1/60-second tick;
+and bounded callback logging. [Data](src/scripting/data.rs) and
+[filesystem](src/scripting/filesystem.rs) utilities expose tot and JSON/YAML/TOML
+export, bundle reads, and explicit data-root writes through scoped callbacks.
+The [persistence example](examples/games/persistence/main.luau) owns its save schema
+and write timing. Its `update()` advances one fixed 1/60-second tick;
 frame accumulation, ECS-facing APIs, and drawing APIs remain later phases.
 Run the [headless example](examples/script_host.rs) to exercise it. The Player
 does not enable scripting or execute games yet. hecs and GitHub tot are pinned
-and exercised by dependency probes; kernel systems, script data utilities, Kira
+and exercised by dependency probes; kernel systems, Kira
 audio, native plugins, the editor, and export tooling remain unimplemented.
 
 The proposed next architecture and execution phases are in
@@ -121,6 +125,12 @@ behavior that depends on them.
   `panic=unwind` for scripting builds; test protected calls and metamethods when
   changing interruption. Ordinary caught allocation errors are recoverable;
   host-detected budget failures remain latched outside Lua.
+- `ctx.data` preserves integer text, null, and array/object identity; ordinary
+  Luau numbers encode as finite floats. Do not silently narrow integers or omit
+  unsupported export values. Data strings/tables remain in VM-owned storage.
+  `ctx.fs` reads only canonical bundle/data roots; writes use a synced temporary
+  file and atomic replacement in the configured data root. Keep draw writes and
+  stale bindings rejected. See the Phase 1a contract for limits and path policy.
 - Save handling belongs to game scripts: schema, file layout, timing, restoration,
   and migrations. The engine may expose general filesystem access, tot parsing
   and formatting, and tot-export utilities for JSON, YAML, and TOML. Do not add
@@ -174,12 +184,14 @@ mutation timing are separate contracts. Treat native plugins as trusted code.
   cargo test --workspace --no-default-features --features scripting
   cargo check --workspace --all-targets --all-features
   cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --release --no-default-features --features scripting --test scripting --test scripting_feasibility
+  cargo test --release --no-default-features --features scripting --test scripting --test scripting_feasibility --test scripting_utilities
   cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
   ```
 
   `scripting_feasibility` runs potentially runaway fixtures in child processes
   with a 10-second watchdog. Keep that outer timeout independent of the VM.
+  `scripting_utilities` verifies conversions, rooted I/O, retained-value/stale-call
+  behavior, limits, file replacement failure, and script-owned save/load.
 
   Check additional target/feature configurations as they are introduced and
   document their actual commands here. `cargo run --bin protogine-player` opens
