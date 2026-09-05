@@ -508,4 +508,5 @@ It also verifies exit code 3 for a shutdown fault. Logs remain beside the copied
 Player. Pass `-Player <executable>` to test another build. Capture/window
 environment overrides are excluded from the child process.
 
-See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance.
+See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance,
+and the [implementation archive](docs/implementation/README.md) for completed plans.

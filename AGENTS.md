@@ -57,9 +57,9 @@ supplies synchronous batch calls; the [distance-field example](examples/games/na
 includes a typed Luau wrapper and parity implementation. Kira audio, the editor,
 and export tooling remain unimplemented.
 
-The proposed next architecture and execution phases are in
-[SCRIPTING_C_API_PLAN.md](SCRIPTING_C_API_PLAN.md). D1-D8 are accepted and initial
-implementation is authorized; consult its implementation record before advancing.
+Completed plans are indexed in [docs/implementation/README.md](docs/implementation/README.md).
+The [scripting and C API plan](docs/implementation/SCRIPTING_C_API_PLAN.md) records
+accepted decisions, completed phases, verification evidence, and deferred scope.
 
 ## Required technology choices
 

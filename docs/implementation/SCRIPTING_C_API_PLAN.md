@@ -332,7 +332,7 @@ Phase 4 implements one exported bootstrap symbol, `protogine_plugin_query`, foll
 versioned function table. Use an engine-owned ABI version independent of the
 engine package version. The bootstrap accepts requested ABI, destination size,
 and a host-allocated descriptor destination. The exact ABI 1 declarations are in
-the generated [C header](include/protogine_plugin.h); the Phase 4 implementation
+the generated [C header](../../include/protogine_plugin.h); the Phase 4 implementation
 record freezes their constraints. The Phase 5 record freezes the Luau adapter.
 
 | Surface | Required contract |
@@ -863,8 +863,8 @@ Verified on `x86_64-pc-windows-msvc`:
   unavailable: `b65afdcf94f74b874e72d7254ea263fc5bc8421e17d4b510b42b4c8858a3f336`.
   Release tile and missing screenshots were visually inspected; local artifacts
   are under ignored `target/phase3-proof/`.
-- The checked-in [Windows event probe](tests/player_input.ps1) uses a
-  [Luau fixture](tests/fixtures/player_input.luau) against the copied release
+- The checked-in [Windows event probe](../../tests/player_input.ps1) uses a
+  [Luau fixture](../../tests/fixtures/player_input.luau) against the copied release
   Player. It verifies each physical key's logical mapping, held state and exact
   press/release sequence. Window-close and Escape each run shutdown once and
   exit 0; a shutdown fault on window-close exits 3 with the source traceback.
@@ -1167,7 +1167,7 @@ remain deferred pending measurements and separate lifetime/scheduling contracts.
   captures at 400x300 repeat byte-for-byte, with source/wall pixel assertions.
   The release capture was visually inspected. A native contract error caught by
   Luau still produces an update-error capture, native cleanup and Player exit 3.
-- [Published benchmark](examples/games/native_distance/BENCHMARK.md): 50 warm-ups
+- [Published benchmark](../../examples/games/native_distance/BENCHMARK.md): 50 warm-ups
   and 200 alternating samples per method/size include the complete typed call,
   buffer packing/copies/decoding, allocations, GC and runtime overhead. On BLD
   (Ryzen 7 5800X, Rust 1.95.0, Clang 20.1.6), 256x256 median was 30.636 ms pure
