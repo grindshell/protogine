@@ -2,7 +2,7 @@
 //! --no-default-features --features scripting -- examples/games/lifecycle
 //! Add a data-directory argument to grant writes (created by this example).
 
-use protogine::scripting::{ScriptHost, ScriptLimits};
+use protogine::{input::InputSnapshot, runtime::GameRuntime, scripting::ScriptLimits};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
@@ -16,18 +16,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::fs::canonicalize(root)?;
     let mut host = if let Some(data) = data {
         std::fs::create_dir_all(&data)?;
-        ScriptHost::load_with_data_root(
+        GameRuntime::load_with_data_root(
             &root,
             &std::fs::canonicalize(data)?,
             ScriptLimits::default(),
         )?
     } else {
-        ScriptHost::load(&root, ScriptLimits::default())?
+        GameRuntime::load(&root, ScriptLimits::default())?
     };
     host.init()?;
     print_logs(&mut host);
     for _ in 0..3 {
-        host.update()?;
+        host.step(InputSnapshot::default())?;
         print_logs(&mut host);
         host.draw(0.0)?;
         print_logs(&mut host);
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn print_logs(host: &mut ScriptHost) {
+fn print_logs(host: &mut GameRuntime) {
     for message in host.take_logs() {
         println!("{message}");
     }

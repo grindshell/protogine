@@ -1,6 +1,6 @@
 # ADR-001: Luau scripting and the native plugin API
 
-**Status:** D1-D8 accepted; Phases 0, 1, and 1a complete on Windows MSVC; later phases unstarted.
+**Status:** D1-D8 accepted; Phases 0, 1, 1a, and 2 complete on Windows MSVC; later phases unstarted.
 **Date:** 2026-09-05.
 **Decider:** Project owner.
 **Baseline:** `539659e` (Player, bundle discovery, built-in capture).
@@ -13,8 +13,9 @@ and contracts remain proposals until implemented and verified.
 
 The Player currently discovers `game/main.luau` beside its executable, renders
 startup states, and supports unattended PNG capture. The shared library now also
-contains an optional headless Luau host. The Player has no game execution yet;
-ECS systems, frame accumulation, rendering bindings, and plugins remain later work.
+contains an optional headless Luau runtime with a kernel, velocity integration,
+and frame/input timing. The Player has no game execution yet; rendering bindings
+and plugins remain later work.
 
 Preserve the shared editor/Player kernel, primarily Luau-authored games, and a
 C-compatible native plugin interface. Use `hecs` 0.11.1 and `mlua` 0.12.1 with
@@ -560,9 +561,8 @@ not change Player rendering or capture. Other native platforms are unverified.
 The sibling-file and allocation-retry regressions both failed against `db0a7c2`
 and pass after the resolver fixes. The checks above were rerun after those fixes.
 
-Next slice: Phase 2 kernel-facing APIs and frame/input timing. Do not imply that
-passing a constant dt implements a
-real-time accumulator or that invoking draw supplies a renderer.
+The standalone host supplies constant dt only. The Phase 2 record below covers
+kernel systems and real-time accumulation; invoking draw still supplies no renderer.
 
 ## Phase 1a implementation contract
 
@@ -671,4 +671,121 @@ The persistence command ran twice. The existing 15 scripting behavior tests,
 capture are unchanged; the opt-in GPU capture was not rerun. Filesystem behavior
 on other targets and crash durability remain unverified. Platform data-directory
 selection remains the embedding application's responsibility; plugin manifest
-interpretation is Phase 4. Phase 2 is next.
+interpretation is Phase 4.
+
+## Phase 2 implementation contract
+
+The shared, headless `GameRuntime` wraps `ScriptHost` and a private
+hecs world. Keep standalone `ScriptHost` calls available for VM/data tests; only
+`GameRuntime` supplies `ctx.world` and `ctx.input`. Player wiring and drawing
+commands remain Phase 3.
+
+- Every entity has `Position { x, y }` in world pixels and `Velocity { x, y }` in
+  pixels/second, stored as finite f64 values. Spawn takes a position and starts
+  with zero velocity. No tile/map, collision, or generic component API yet.
+- `ctx.world.spawn(x, y)`, `despawn(entity)`, `position(entity)`,
+  `set_position(entity, x, y)`, `velocity(entity)`, `set_velocity(entity, x, y)`,
+  and `entities()` are the initial operations. Reads return owned `{x, y}` tables;
+  enumeration is an owned array ordered by the internal entity identifier.
+  Handles are opaque userdata, with session identity and hecs generation checks.
+  Despawn/reuse, cross-session use, and stopped/faulted sessions reject access.
+  A private VM table with weak values canonicalizes retained wrappers by session
+  and generation, including when handles are Luau table keys. Unreferenced
+  wrappers/cache entries can be collected. Private binary cache keys are never
+  script-facing IDs or persisted data.
+- Init/update mutations are immediate. Draw/shutdown permit world reads only.
+  Each operation releases Rust/hecs borrows before VM allocation or return to
+  script code; retained functions expire while returned handles/values may live
+  across callbacks. Callback failure does not roll back earlier mutations.
+  A spawn whose wrapper/cache publication fails removes its unpublished entity
+  before returning the error; caught allocation failures cannot leave an extra
+  live entity behind.
+- After each successful update, integrate `position += velocity * (1/60)` once.
+  Validate all resulting positions before committing the system's changes.
+  Nonfinite results fault the session; no engine systems run after a failed
+  callback. No gameplay behavior depends on hecs traversal order.
+- Cap live entities at 16,384 and world operations at 4,096 per callback. Both
+  limits latch session faults even through protected calls. Invalid handles,
+  nonfinite arguments, and phase violations are ordinary catchable errors.
+- Input uses six logical buttons: `up`, `down`, `left`, `right`, `action`,
+  `cancel`. The application supplies held/pressed/released sets; the runtime
+  also derives edges from held-state transitions. Explicit edges preserve taps
+  occurring between samples. Physical key/controller mapping remains Player work.
+  Scripts read `ctx.input.held(name)`, `pressed(name)`, and `released(name)`.
+- Frames accumulate pending edges until a tick consumes them; only the first
+  catch-up tick receives those edges. Held state uses the latest sample. Draw
+  sees that frame's sampled edges independently of tick consumption; init and
+  shutdown see neutral input. Repeated edges before a tick coalesce to booleans.
+- `frame(elapsed_seconds, input)` validates finite nonnegative time, clamps to
+  250 ms, runs at most five fixed ticks, discards excess whole ticks, and draws
+  once with the retained fractional alpha. Its report includes completed ticks,
+  discarded ticks, clamped seconds, and alpha; the runtime counts overloaded
+  frames. Invalid arguments leave state and queued input untouched.
+  Accumulated tick values within `1e-12` of a positive integer are normalized to
+  that integer before counting ticks (about 17 femtoseconds of tolerance).
+  Ordinary fractional time is retained; tiny inputs near zero still accumulate.
+- `step(input)` runs exactly one tick without drawing or altering the frame
+  accumulator; `draw(alpha)` draws separately. These support headless replay and
+  future capture. Completed-tick counts advance only after callback and systems
+  succeed. Fixed input replay tests compare owned, ordered world state on this
+  target; no cross-platform floating-point or RNG determinism claim is made.
+
+Exit evidence: real Luau spawn/read/change/despawn and velocity integration;
+stale/cross-session/stopped handle refusal; mutation permissions and expired
+functions; catchable validation versus latched limits; fault ordering; zero-tick
+and catch-up edge handling; overload/remainder/invalid-time boundaries; repeated
+fixed-input state replay. Run the existing default/headless/all-feature checks
+and debug/release scripting suites, plus the new kernel/runtime tests.
+
+### Phase 2 verification record — 2026-09-05
+
+Phase 1a was committed as `a74e72c` before this slice. Phase 2 adds `src/kernel.rs`,
+`src/input.rs`, `src/runtime.rs`, and `src/scripting/world.rs`; the headless runner
+now drives `GameRuntime`. No dependencies or Player rendering code changed.
+
+Four kernel tests, thirteen runtime tests, and three internal Luau bridge tests pass in
+debug and release. They verify owned snapshots, immediate mutations, generation
+and session rejection (including a foreign handle injected into Luau), stopped
+session refusal, phase restrictions, expired functions, finite-value validation,
+atomic system overflow refusal, latched operation/entity limits, and lifecycle
+fault ordering. Tests consume press/release edges once across catch-up, preserve
+taps through zero-tick frames, isolate draw input, reject invalid time without
+changing queued input, and retain the fraction while dropping overload ticks.
+
+`examples/games/movement/main.luau` moves through the real hecs system. Replaying
+half a second right followed by half a second down at 30, 60, 100, 120, 144, 180,
+and 240 FPS completes 60 ticks at `(46, 46)` from `(16, 16)`; another 30 FPS run
+matches. The lifecycle
+example still logs three ticks. Two actual persistence runs through GameRuntime
+against a fresh data directory restore 0 then 3 ticks and leave version 1/ticks 6.
+
+All passed:
+
+```text
+cargo fmt --all -- --check
+cargo check --offline --workspace --all-targets
+cargo test --offline --workspace
+cargo test --offline --workspace --no-default-features
+cargo clippy --offline --workspace --all-targets -- -D warnings
+cargo build --offline --release --bin protogine-player
+cargo test --offline --workspace --no-default-features --features scripting
+cargo check --offline --workspace --all-targets --all-features
+cargo clippy --offline --workspace --all-targets --all-features -- -D warnings
+cargo test --offline --release --no-default-features --features scripting --lib --test kernel --test runtime --test scripting --test scripting_feasibility --test scripting_utilities
+cargo run --offline --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo run --offline --example script_host --no-default-features --features scripting -- examples/games/movement
+```
+
+Player capture/rendering was unchanged, so the opt-in GPU smoke test was not
+rerun. Rendering commands, physical input mapping, seeded game capture, and
+Player integration are Phase 3. Other platforms remain unverified.
+
+The Phase 2 review regressions failed before remediation: enumeration returned
+distinct userdata table keys, 100/144 FPS replay completed 59 ticks, and caught
+spawn allocation failure left one extra entity alive. All pass after the fixes
+in debug and release. Negative controls cover stale handles after slot reuse,
+cross-session cache keys, identity retained through garbage collection, unused
+cache entries being collected, fractions on either side of a tick outside the
+tolerance, and accumulation of tiny time inputs. Allocation-pressure tests use
+both 1 MiB and the default 64 MiB VM limits; an injected cache-write failure also
+proves rollback after userdata allocation and successful retry afterward.

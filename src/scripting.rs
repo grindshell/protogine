@@ -4,6 +4,9 @@ mod data;
 mod filesystem;
 mod modules;
 mod utilities;
+mod world;
+
+pub(crate) use world::EngineContext;
 
 use mlua::{
     Function, Lua, MultiValue, StdLib, Value, VmState, state::LuaOptions, thread::ThreadStatus,
@@ -16,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const FIXED_DT: f64 = 1.0 / 60.0;
+pub use crate::kernel::FIXED_DT;
 const LOG_BYTES: usize = 64 * 1024;
 
 #[cfg(panic = "abort")]
@@ -107,6 +110,7 @@ pub struct ScriptHost {
     logs: Vec<String>,
     data: data::Data,
     filesystem: filesystem::FileSystem,
+    entities: world::EntityCache,
 }
 
 impl ScriptHost {
@@ -180,6 +184,7 @@ impl ScriptHost {
         });
         let modules = modules::BundleModules::new(root, budget.clone()).map_err(load_error)?;
         let data = data::Data::new(&lua).map_err(load_error)?;
+        let entities = world::EntityCache::new(&lua).map_err(load_error)?;
         let filesystem = filesystem::FileSystem::new(root, data_root).map_err(load_error)?;
         globals
             .raw_set(
@@ -205,6 +210,7 @@ impl ScriptHost {
             logs: Vec::new(),
             data,
             filesystem,
+            entities,
         };
         let result = host.execute("load", entry, MultiValue::new(), limits.startup_timeout)?;
         let table = match (result.len(), result.front()) {
@@ -260,19 +266,44 @@ impl ScriptHost {
     }
 
     pub fn init(&mut self) -> Result<(), ScriptError> {
+        self.init_in(None)
+    }
+
+    pub(crate) fn init_in(&mut self, engine: Option<EngineContext<'_>>) -> Result<(), ScriptError> {
         self.require_state("init", ScriptState::Loaded)?;
-        self.callback(0, "init", None, self.limits.startup_timeout)?;
+        self.callback(0, "init", None, self.limits.startup_timeout, engine)?;
         self.state = ScriptState::Running;
         Ok(())
     }
 
     /// Advance exactly one simulation tick. Frame accumulation belongs to the runtime.
     pub fn update(&mut self) -> Result<(), ScriptError> {
+        self.update_in(None)
+    }
+
+    pub(crate) fn update_in(
+        &mut self,
+        engine: Option<EngineContext<'_>>,
+    ) -> Result<(), ScriptError> {
         self.require_state("update", ScriptState::Running)?;
-        self.callback(1, "update", Some(FIXED_DT), self.limits.callback_timeout)
+        self.callback(
+            1,
+            "update",
+            Some(FIXED_DT),
+            self.limits.callback_timeout,
+            engine,
+        )
     }
 
     pub fn draw(&mut self, alpha: f64) -> Result<(), ScriptError> {
+        self.draw_in(alpha, None)
+    }
+
+    pub(crate) fn draw_in(
+        &mut self,
+        alpha: f64,
+        engine: Option<EngineContext<'_>>,
+    ) -> Result<(), ScriptError> {
         self.require_state("draw", ScriptState::Running)?;
         if !alpha.is_finite() || !(0.0..1.0).contains(&alpha) {
             return Err(ScriptError {
@@ -280,15 +311,22 @@ impl ScriptHost {
                 message: "alpha must be finite and in [0, 1)".into(),
             });
         }
-        self.callback(2, "draw", Some(alpha), self.limits.callback_timeout)
+        self.callback(2, "draw", Some(alpha), self.limits.callback_timeout, engine)
     }
 
     pub fn shutdown(&mut self) -> Result<(), ScriptError> {
+        self.shutdown_in(None)
+    }
+
+    pub(crate) fn shutdown_in(
+        &mut self,
+        engine: Option<EngineContext<'_>>,
+    ) -> Result<(), ScriptError> {
         match self.state {
             ScriptState::Stopped | ScriptState::Faulted => return Ok(()),
             ScriptState::Loaded => {} // Init never completed: skip game shutdown.
             ScriptState::Running => {
-                self.callback(3, "shutdown", None, self.limits.startup_timeout)?
+                self.callback(3, "shutdown", None, self.limits.startup_timeout, engine)?
             }
         }
         self.state = ScriptState::Stopped;
@@ -312,6 +350,7 @@ impl ScriptHost {
         phase: &'static str,
         number: Option<f64>,
         timeout: Duration,
+        engine: Option<EngineContext<'_>>,
     ) -> Result<(), ScriptError> {
         self.logs.clear();
         let Some(function) = self.callbacks[index].clone() else {
@@ -345,6 +384,17 @@ impl ScriptHost {
                     self.filesystem
                         .bind(&lua, scope, &utility_budget, phase != "draw")?,
                 )?;
+                if let Some(engine) = &engine {
+                    let (world, input) = engine.bind(
+                        &lua,
+                        scope,
+                        &utility_budget,
+                        matches!(phase, "init" | "update"),
+                        &self.entities,
+                    )?;
+                    context.raw_set("world", world)?;
+                    context.raw_set("input", input)?;
+                }
                 context.set_readonly(true);
                 let mut args = MultiValue::from_vec(vec![Value::Table(context)]);
                 if let Some(number) = number {
@@ -397,14 +447,13 @@ impl ScriptHost {
             Some(message) => Err(mlua::Error::runtime(message)),
             None => result,
         };
-        result.map_err(|error| {
-            let error = ScriptError {
-                phase,
-                message: error.to_string(),
-            };
-            self.state = ScriptState::Faulted;
-            self.last_error = Some(error.clone());
-            error
-        })
+        result.map_err(|error| self.fault(phase, error.to_string()))
+    }
+
+    pub(crate) fn fault(&mut self, phase: &'static str, message: String) -> ScriptError {
+        let error = ScriptError { phase, message };
+        self.state = ScriptState::Faulted;
+        self.last_error = Some(error.clone());
+        error
     }
 }

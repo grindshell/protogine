@@ -3,10 +3,12 @@
 Protogine (Prototype Engine) is a tile-based game engine inspired by RPG Maker,
 with a shared kernel for its editor and standalone Player.
 
-The current implementation is a minimal Player startup shell. It opens a
+The current Player is a minimal startup shell. It opens a
 resizable window and displays **Missing game data** when no bundle is present.
 Press Escape or close the window to quit. The startup screen needs no external
 fonts, images, audio, or game files.
+The shared library also provides a headless Luau runtime with an entity kernel,
+fixed updates, input handling, and script data/filesystem utilities.
 
 ## Run and build
 
@@ -89,12 +91,12 @@ in console builds.
 A detected entry point currently shows **Game data detected** and explains that
 loading is not implemented. Detection checks file type and readability, not
 Luau syntax or complete bundle validity. Player script execution, archive formats,
-export tooling, simulation systems, audio, native plugins, and the editor are
-future work. The headless scripting host below is available independently.
+export tooling, audio, native plugins, and the editor are future work. The
+headless runtime below already provides simulation independently of the Player.
 
 ## Headless scripting
 
-Enable the optional `scripting` feature to use `protogine::scripting::ScriptHost`.
+Enable the optional `scripting` feature to use `protogine::runtime::GameRuntime`.
 The sample loads source modules and runs init, three fixed updates, draw callbacks,
 and orderly shutdown without a window:
 
@@ -102,19 +104,25 @@ and orderly shutdown without a window:
 cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
 ```
 
-`ScriptHost::load` takes an absolute game-directory path and `ScriptLimits`.
+`GameRuntime::load` takes an absolute game-directory path and `ScriptLimits`.
 `main.luau` returns a plain table containing optional `init`, `update`, `draw`,
 and `shutdown` functions. Callbacks return no values. The host exposes
-`ctx.log(message)`, `ctx.data`, and `ctx.fs`; stored context functions expire when
+`ctx.log(message)`, `ctx.data`, `ctx.fs`, `ctx.world`, and `ctx.input`;
+stored context functions expire when
 their callback ends, while returned data values can be retained.
-Logs from the last call can be retrieved with `take_logs()`.
+Logs from the last call/frame can be retrieved in callback order with `take_logs()`.
 
-Call `init()` once, then `update()` for each simulation tick and `draw(alpha)` for
-each presentation frame. Updates receive `dt = 1/60`; alpha must be finite and
-in `[0, 1)`. The host does not yet accumulate frame time, interpolate state, or
-expose world/drawing operations. `shutdown()` is idempotent and skips game cleanup
+Call `init()` once, then `frame(elapsed_seconds, input)` for each presentation
+frame. It runs fixed updates and calls draw once. For exact stepping, use
+`step(input)` and `draw(alpha)` separately. Updates receive `dt = 1/60`; alpha
+must be finite and in `[0, 1)`. The runtime does not interpolate state or expose
+drawing commands yet. `shutdown()` is idempotent and skips game cleanup
 if init did not complete or the session faulted. Dropping a host only releases
 resources. Errors include a lifecycle phase and available Luau source context.
+
+The lower-level `protogine::scripting::ScriptHost` remains available for standalone
+VM/data work. Its `update()` invokes one fixed callback without kernel systems;
+it supplies only log/data/filesystem bindings, with no world, input, or clock.
 
 Modules use extensionless relative paths, such as `require("./counter")` or
 `require("../shared")` within the bundle. Files must be UTF-8 `.luau` source.
@@ -138,6 +146,58 @@ This does not preempt filesystem I/O, source/JIT compilation, or native function
 the heap cap is not a bound on total process memory. Native work is checked
 against the deadline when control returns to the VM/host. Process, network,
 and native-plugin APIs remain unavailable.
+
+## World and fixed input
+
+Each entity has a finite f64 position in world pixels and velocity in pixels per
+second. After a successful script update, the kernel integrates velocity over
+`1/60` second. Invalid system results fault the session. There is no collision,
+tile-map API, or generic component API yet.
+
+| World API | Behavior |
+| --- | --- |
+| `ctx.world.spawn(x, y)` | Return an opaque entity handle; initial velocity is zero |
+| `ctx.world.despawn(entity)` | Remove the entity and invalidate its handle |
+| `ctx.world.position(entity)` / `velocity(entity)` | Return an owned `{x, y}` table |
+| `ctx.world.set_position(entity, x, y)` / `set_velocity(entity, x, y)` | Apply an immediate change |
+| `ctx.world.entities()` | Return an owned array of handles ordered by internal entity identifier |
+
+World writes are allowed during init/update; draw/shutdown can only read.
+Returned tables are copies. Handles may be retained across callbacks, but stale,
+foreign-session, and stopped/faulted-session handles reject access. Handle equality
+compares identity; it does not establish that the entity is still alive.
+Enumeration reuses retained userdata, so handles also work as Luau table keys;
+unused wrappers are eligible for garbage collection. Callback errors do not roll
+back prior mutations, but a spawn that fails to publish its handle removes the
+unpublished entity. Live entities are capped at 16,384, with
+4,096 world operations per callback; exceeding either limit faults the session
+even through `pcall`. Ordinary validation and permission errors remain catchable.
+
+`ctx.input.held(name)`, `pressed(name)`, and `released(name)` read logical buttons
+`up`, `down`, `left`, `right`, `action`, and `cancel`. The Rust caller supplies an
+`InputSnapshot` with held buttons and optional press/release events. The runtime
+also derives edges from held-state transitions. Explicit events preserve quick
+taps; repeated events before a tick coalesce into booleans. Physical key mappings
+will be added with Player integration.
+
+Frames clamp incoming time to 250 ms and run at most five ticks. Excess whole
+ticks are discarded, retaining fractional progress as draw alpha. `FrameReport`
+reports tick count, discarded ticks, clamped seconds, and alpha; `overloads()`
+counts affected frames. Invalid time leaves the clock/input/session untouched.
+Tick boundaries tolerate `1e-12` of a tick of rounding error; other fractions,
+including tiny inputs near zero, remain accumulated.
+Pending press/release edges wait through zero-tick frames, reach only the first
+catch-up tick, and then clear. Held state uses the latest sample. Draw sees the
+current frame's edges independently; init/shutdown see neutral input.
+`step(input)` consumes pending edges and runs exactly one tick without changing
+the frame accumulator. `draw(alpha)` uses the latest sampled input.
+
+The [movement sample](examples/games/movement/main.luau) sets velocity from input.
+`tests/runtime.rs` replays right for half a second, then down for half a second:
+30, 60, 100, 120, 144, 180, and 240 FPS all complete 60 ticks at `(46, 46)` from
+`(16, 16)`. This verifies
+fixed-input state on the tested target; it does not promise cross-platform float
+or RNG determinism. Renderer integration and game captures are Phase 3.
 
 ## Script data and filesystem utilities
 
@@ -171,7 +231,8 @@ with their data path; no values are silently dropped. The TOML dependency is
 used for export only; game manifests still use tot.
 
 `ScriptHost::load` grants bundle reads. To grant writes, the embedding application
-calls `ScriptHost::load_with_data_root(bundle, data, limits)` with two existing,
+calls `GameRuntime::load_with_data_root(bundle, data, limits)` (also available on
+`ScriptHost`) with two existing,
 absolute directories. They are canonicalized and must be disjoint. The application
 selects the data location; the engine supplies no save filename or schema.
 
@@ -216,6 +277,8 @@ version without overwriting the existing data. There is no engine save lifecycle
 - `src/bin/player.rs` owns the Macroquad window and startup presentation.
 - `src/bin/player/capture.rs` handles capture configuration and PNG output.
 - `src/scripting.rs` and `src/scripting/modules.rs` provide the optional Luau host.
+- `src/kernel.rs`, `src/input.rs`, and `src/runtime.rs` own entities, logical input,
+  and fixed-step execution; `src/scripting/world.rs` supplies scoped bindings.
 - `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and `utilities.rs`
   implement scoped data/I/O services and their shared callback limits.
 - The default `player` Cargo feature enables graphics. The shared library can
@@ -230,7 +293,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --test scripting --test scripting_feasibility --test scripting_utilities
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test scripting --test scripting_feasibility --test scripting_utilities
 ```
 
 See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance.

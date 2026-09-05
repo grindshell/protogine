@@ -38,12 +38,14 @@ and bounded callback logging. [Data](src/scripting/data.rs) and
 [filesystem](src/scripting/filesystem.rs) utilities expose tot and JSON/YAML/TOML
 export, bundle reads, and explicit data-root writes through scoped callbacks.
 The [persistence example](examples/games/persistence/main.luau) owns its save schema
-and write timing. Its `update()` advances one fixed 1/60-second tick;
-frame accumulation, ECS-facing APIs, and drawing APIs remain later phases.
-Run the [headless example](examples/script_host.rs) to exercise it. The Player
-does not enable scripting or execute games yet. hecs and GitHub tot are pinned
-and exercised by dependency probes; kernel systems, Kira
-audio, native plugins, the editor, and export tooling remain unimplemented.
+and write timing. [GameRuntime](src/runtime.rs) supplies the shared
+[kernel](src/kernel.rs), scoped world/input APIs, fixed ticks, frame catch-up,
+and input edge consumption. Position/velocity integration follows successful
+script updates. The [movement example](examples/games/movement/main.luau) is
+replayed headlessly at different frame rates by [runtime tests](tests/runtime.rs).
+Run the [headless example](examples/script_host.rs) to exercise the runtime.
+The Player does not enable scripting or execute games yet. Drawing bindings,
+Kira audio, native plugins, the editor, and export tooling remain unimplemented.
 
 The proposed next architecture and execution phases are in
 [SCRIPTING_C_API_PLAN.md](SCRIPTING_C_API_PLAN.md). D1-D8 are accepted and initial
@@ -125,6 +127,14 @@ behavior that depends on them.
   `panic=unwind` for scripting builds; test protected calls and metamethods when
   changing interruption. Ordinary caught allocation errors are recoverable;
   host-detected budget failures remain latched outside Lua.
+- `GameRuntime` owns kernel mutation and timing; standalone `ScriptHost` calls
+  omit world/input bindings. World operations return owned data/opaque handles
+  and release all hecs/RefCell borrows before VM work. Only init/update mutate
+  world state. Validate session identity and generation on every handle access.
+  Canonical wrappers in a private weak VM cache preserve Luau table-key identity.
+  Roll back unpublished entities if wrapper/cache allocation fails during spawn.
+  Fixed systems run after a successful callback; session faults invalidate the
+  kernel. See the Phase 2 contract for entity/operation limits and input timing.
 - `ctx.data` preserves integer text, null, and array/object identity; ordinary
   Luau numbers encode as finite floats. Do not silently narrow integers or omit
   unsupported export values. Data strings/tables remain in VM-owned storage.
@@ -184,7 +194,7 @@ mutation timing are separate contracts. Treat native plugins as trusted code.
   cargo test --workspace --no-default-features --features scripting
   cargo check --workspace --all-targets --all-features
   cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --release --no-default-features --features scripting --test scripting --test scripting_feasibility --test scripting_utilities
+  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test scripting --test scripting_feasibility --test scripting_utilities
   cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
   ```
 
@@ -192,6 +202,8 @@ mutation timing are separate contracts. Treat native plugins as trusted code.
   with a 10-second watchdog. Keep that outer timeout independent of the VM.
   `scripting_utilities` verifies conversions, rooted I/O, retained-value/stale-call
   behavior, limits, file replacement failure, and script-owned save/load.
+  `kernel` and `runtime` cover handles, immediate writes, system ordering, scoped
+  operations, latched resource limits, catch-up input, and fixed-input replay.
 
   Check additional target/feature configurations as they are introduced and
   document their actual commands here. `cargo run --bin protogine-player` opens
