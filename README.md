@@ -88,15 +88,62 @@ in console builds.
 
 A detected entry point currently shows **Game data detected** and explains that
 loading is not implemented. Detection checks file type and readability, not
-Luau syntax or complete bundle validity. Script execution, archive formats,
-export tooling, simulation, audio, native plugins, and the editor are future
-work. This directory convention can evolve with the export format.
+Luau syntax or complete bundle validity. Player script execution, archive formats,
+export tooling, simulation systems, audio, native plugins, and the editor are
+future work. The headless scripting host below is available independently.
+
+## Headless scripting
+
+Enable the optional `scripting` feature to use `protogine::scripting::ScriptHost`.
+The sample loads source modules and runs init, three fixed updates, draw callbacks,
+and orderly shutdown without a window:
+
+```text
+cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+```
+
+`ScriptHost::load` takes an absolute game-directory path and `ScriptLimits`.
+`main.luau` returns a plain table containing optional `init`, `update`, `draw`,
+and `shutdown` functions. Callbacks return no values. The host exposes
+`ctx.log(message)`; stored context functions expire when their callback ends.
+Logs from the last call can be retrieved with `take_logs()`.
+
+Call `init()` once, then `update()` for each simulation tick and `draw(alpha)` for
+each presentation frame. Updates receive `dt = 1/60`; alpha must be finite and
+in `[0, 1)`. The host does not yet accumulate frame time, interpolate state, or
+expose world/drawing operations. `shutdown()` is idempotent and skips game cleanup
+if init did not complete or the session faulted. Dropping a host only releases
+resources. Errors include a lifecycle phase and available Luau source context.
+
+Modules use extensionless relative paths, such as `require("./counter")` or
+`require("../shared")` within the bundle. Files must be UTF-8 `.luau` source.
+Aliases, dotted path segments, directory init modules, and paths escaping the
+canonical bundle root are rejected. Successfully loaded module values are cached
+once per VM; loaded source changes require a new host. Cycles and failed imports
+return script errors; failed results are not cached. Keep bundle files stable
+while the session is running.
+
+Defaults are 64 MiB of VM heap, one second for load/init/shutdown execution, and
+100 ms per update/draw. Each source file is limited to 256 KiB, with at most 256
+compiled modules and 64 active imports including the entry module. Logging is
+limited to 4 KiB per message and 64 KiB per callback, including line separators.
+Host-detected budget failures fault the session even when caught in Luau.
+Allocation failures caught by scripts remain recoverable under the VM heap cap;
+uncaught allocation errors fault the session.
+
+Cancellation requires Rust `panic=unwind` and uses mlua's protected panic handling
+so `pcall`, `xpcall`, and metamethods cannot swallow the host's cancellation.
+This does not preempt filesystem I/O, source/JIT compilation, or native functions;
+the heap cap is not a bound on total process memory. Module preparation is checked
+against the deadline when control returns to the VM/host. There is no filesystem,
+process, network, or native-plugin API exposed to scripts in this slice.
 
 ## Code and checks
 
 - `src/lib.rs` exposes shared code; `src/bundle.rs` implements discovery.
 - `src/bin/player.rs` owns the Macroquad window and startup presentation.
 - `src/bin/player/capture.rs` handles capture configuration and PNG output.
+- `src/scripting.rs` and `src/scripting/modules.rs` provide the optional Luau host.
 - The default `player` Cargo feature enables graphics. The shared library can
   be built and tested without graphics dependencies.
 
@@ -106,6 +153,9 @@ cargo check --workspace --all-targets
 cargo test --workspace
 cargo test --workspace --no-default-features
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-default-features --features scripting
+cargo check --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance.

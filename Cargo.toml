@@ -9,13 +9,21 @@ name = "protogine-player"
 path = "src/bin/player.rs"
 required-features = ["player"]
 
+[[example]]
+name = "script_host"
+required-features = ["scripting"]
+
 [features]
 default = ["player"]
 player = ["dep:macroquad", "dep:image"]
+scripting = ["dep:mlua"]
 
 [dependencies]
 macroquad = { version = "=0.4.16", default-features = false, optional = true }
 image = { version = "0.24.9", default-features = false, features = ["png"], optional = true }
+hecs = "=0.11.1"
+mlua = { version = "=0.12.1", features = ["luau-jit"], optional = true }
+tot = { git = "https://github.com/totlang/tot", rev = "2f407897f985654cdbb6201ad01ba05216a6e3d7", version = "=0.1.0" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

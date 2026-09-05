@@ -32,10 +32,18 @@ graphics; the shared library also builds with `--no-default-features`.
 - [Capture smoke test](tests/player_capture.rs): opt-in GPU verification of the
   actual Player, including pixel repeatability and process exit codes.
 
-Only Macroquad and PNG encoding are wired into the runtime so far. Simulation
-with hecs, Luau execution, Kira audio, native plugins, the editor, and export
-tooling remain unimplemented. The remaining sections describe intended architecture and
-implementation guidance. Keep this status current as implementation lands.
+The optional `scripting` feature adds a headless
+[Luau host](src/scripting.rs), bundle-local modules, lifecycle/fault handling,
+and bounded callback logging. Its `update()` advances one fixed 1/60-second tick;
+frame accumulation, ECS-facing APIs, and drawing APIs remain later phases.
+Run the [headless example](examples/script_host.rs) to exercise it. The Player
+does not enable scripting or execute games yet. hecs and GitHub tot are pinned
+and exercised by dependency probes; kernel systems, script data utilities, Kira
+audio, native plugins, the editor, and export tooling remain unimplemented.
+
+The proposed next architecture and execution phases are in
+[SCRIPTING_C_API_PLAN.md](SCRIPTING_C_API_PLAN.md). D1-D8 are accepted and initial
+implementation is authorized; consult its implementation record before advancing.
 
 ## Required technology choices
 
@@ -45,11 +53,17 @@ implementation guidance. Keep this status current as implementation lands.
 | ECS foundation for the core update loop | `hecs` | `0.11.1` | Engine-owned update ordering |
 | Audio | `kira` | `0.12.4` | Route engine audio through Kira |
 | Luau scripting host | `mlua` | `0.12.1` | Enable `luau-jit` |
+| Structured game data and manifest | `tot` | `0.1.0` | Git dependency from `https://github.com/totlang/tot`; use `game/game.tot` |
+| Runtime native-library loading | `libloading` | `0.9.0` | Keep behind the native plugin boundary |
 
 These versions are project requirements. Verify versions, features, and target
 support when wiring dependencies; report incompatibilities instead of silently
 substituting versions or libraries. Keep `Cargo.lock` updated with resolved
 application dependencies.
+
+Prefer the GitHub source for tot; `../tot` is available for source inspection,
+not the normal dependency source. Pin a reviewed Git revision as described in
+the scripting plan. Cargo itself continues to use `Cargo.toml`.
 
 `hecs` supplies an ECS world and queries; it does not supply a scheduler or an
 application event loop. Protogine must define its simulation update order around
@@ -93,12 +107,26 @@ behavior that depends on them.
   layout or package format. Do not make ordinary script edits require rebuilding
   the engine. The initial unpacked layout is documented in the README; a future
   archive format and full export contract remain open.
+- The accepted first scripting milestone uses source modules, explicit native
+  plugin declarations, and complete runtime restart rather than live reload.
 - Use the same script APIs and loading rules during editor playtesting and in
   exported games. Resolve content through an explicit project/package root,
   rather than relying on the process working directory.
-- Report script failures with useful source context. Define lifecycle, reload,
-  and host-access rules when implementing the scripting boundary; none are
-  implemented yet.
+- The headless host validates init/update/draw/shutdown callbacks and expires
+  scoped context functions after every call. Faults stop the session; drop never
+  runs game code. Restart creates a new host/VM. Source, import, logging, and VM
+  heap limits are documented in the README and implementation record.
+- VM cancellation uses mlua's protected panic propagation with
+  `catch_rust_panics(false)` and a host-owned cancellation payload. Keep
+  `panic=unwind` for scripting builds; test protected calls and metamethods when
+  changing interruption. Ordinary caught allocation errors are recoverable;
+  host-detected budget failures remain latched outside Lua.
+- Save handling belongs to game scripts: schema, file layout, timing, restoration,
+  and migrations. The engine may expose general filesystem access, tot parsing
+  and formatting, and tot-export utilities for JSON, YAML, and TOML. Do not add
+  engine-owned save slots or automatic world serialization. Verify reusable
+  exporter availability and conversion rules before assuming a `tot-export`
+  crate exists; the inspected tot revision keeps YAML/TOML conversion in its CLI.
 
 ## Native plugin boundary
 
@@ -113,8 +141,12 @@ Keep unsafe code localized with safety invariants; prevent Rust panics from
 unwinding across C calls. Keep libraries loaded while their code or data remains
 reachable. Hot unloading/reloading is not an established requirement.
 
-The loader library, supported operating systems, exported symbols, and ABI
-compatibility policy remain to be designed. Treat native plugins as trusted code.
+Use `libloading` 0.9.0. The accepted first native target to verify is
+`x86_64-pc-windows-msvc`; additional targets, exported symbols, and ABI
+compatibility rules remain to be finalized in the scripting plan. The accepted
+first scope is synchronous Luau-callable batch computation: buffers carry
+inputs/results. Keep engine command buffers as a future option; scheduling and
+mutation timing are separate contracts. Treat native plugins as trusted code.
 
 ## Working in this repository
 
@@ -134,6 +166,20 @@ compatibility policy remain to be designed. Treat native plugins as trusted code
   cargo clippy --workspace --all-targets -- -D warnings
   cargo build --release --bin protogine-player
   ```
+
+  Scripting changes also require the real headless feature configuration and
+  the combined Player/scripting configuration:
+
+  ```text
+  cargo test --workspace --no-default-features --features scripting
+  cargo check --workspace --all-targets --all-features
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --release --no-default-features --features scripting --test scripting --test scripting_feasibility
+  cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+  ```
+
+  `scripting_feasibility` runs potentially runaway fixtures in child processes
+  with a 10-second watchdog. Keep that outer timeout independent of the VM.
 
   Check additional target/feature configurations as they are introduced and
   document their actual commands here. `cargo run --bin protogine-player` opens
