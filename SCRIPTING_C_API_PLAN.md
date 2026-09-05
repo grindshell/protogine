@@ -1,6 +1,6 @@
 # ADR-001: Luau scripting and the native plugin API
 
-**Status:** D1-D8 accepted; Phases 0, 1, 1a, and 2 complete on Windows MSVC; later phases unstarted.
+**Status:** D1-D8 accepted; Phases 0, 1, 1a, 2, and 3 complete on Windows MSVC; Phases 4-5 unstarted.
 **Date:** 2026-09-05.
 **Decider:** Project owner.
 **Baseline:** `539659e` (Player, bundle discovery, built-in capture).
@@ -789,3 +789,116 @@ cache entries being collected, fractions on either side of a tick outside the
 tolerance, and accumulation of tiny time inputs. Allocation-pressure tests use
 both 1 MiB and the default 64 MiB VM limits; an injected cache-write failure also
 proves rollback after userdata allocation and successful retry afterward.
+
+## Implementation record: Phase 3
+
+### Contract frozen before implementation
+
+- `player` enables `scripting`. The Player loads and initializes the discovered
+  bundle once, drives `GameRuntime`, and renders owned commands. Missing and
+  inaccessible bundle screens retain their existing presentation and exit codes.
+- `ctx.draw` exists only during draw. `clear(r,g,b,a)` and
+  `rect(x,y,w,h,r,g,b,a)` append owned commands, capped at 10,000 per draw;
+  exceeding the cap latches a session fault even through protected calls.
+  Colors are finite in `[0,1]`; pixel coordinates are finite in
+  `[-1_000_000,1_000_000]`; sizes are finite in `[0,1_000_000]`.
+  Conversion to f32 occurs after validation. Invalid arguments are recoverable.
+  Context tables are read-only and functions expire after the callback.
+- Each draw starts empty and publishes commands only on success. Fault/stop
+  clears published commands. Frames start opaque black; a clear replaces all
+  preceding drawing, and subsequent rectangles composite in insertion order.
+  Headless hosts expose the same commands without graphics dependencies.
+- Interactive input maps arrows to directions, Space to action, and Backspace
+  to cancel. Escape remains Player exit. Poll held/pressed/released once per
+  frame; `GameRuntime` owns fixed timing and edge consumption. Prevent native
+  immediate quit so orderly window-close/Escape runs shutdown once.
+- Capture loads with Luau's `math.random` seed 0 before any game module executes,
+  performs one neutral-input fixed tick followed by draw(alpha=0) per frame,
+  and captures frame N after N completed ticks. Explicit script reseeding or
+  external file changes remain script inputs, not engine determinism guarantees.
+  Interactive sessions retain the VM's default random initialization.
+- Load/init/update/draw/system faults show a fixed Game error screen, report
+  source/callback details to stderr, stop callbacks, and exit with code 3 even
+  when a diagnostic PNG is saved. A fault takes precedence over a simultaneous
+  capture-write failure (both errors are reported). Shutdown runs before saving
+  the final capture so shutdown failure produces a diagnostic PNG and code 3.
+  Normal capture failure/interruption stays 1; bad configuration stays 2.
+- This slice supplies no Player writable data root; bundle reads and data
+  conversion work, while writes require the existing explicit root host API.
+  Platform data-directory selection, manifest schema and plugin loading remain
+  separate work. The sample uses no filesystem writes or external assets.
+
+### Implementation and verification
+
+`DrawCommand` lives in the graphics-independent `drawing` module. ScriptHost
+owns the published list, and GameRuntime exposes it to the Player/headless caller.
+Scoped draw bindings accumulate a temporary list and publish only after callback
+success. `load_seeded` initializes Luau's math RNG before require/bootstrap runs.
+The Player renders commands using Macroquad and retains the static fallback/font
+warmup path. `examples/games/tiles` supplies a grid and a moving, controllable tile;
+its imported palette exercises module-time randomness.
+
+Verified on `x86_64-pc-windows-msvc`:
+
+- Five headless drawing tests pass in debug/release: owned ordered commands,
+  empty-frame replacement, expired/read-only contexts, numeric and permission
+  validation, exact command cap plus protected-call overflow, failed publication,
+  update/system faults, stop cleanup, seeded sample replay and input controls.
+  Two seed-0 replays yield identical command lists and position `(124,128)` after
+  60 ticks; seed 1 changes the palette while preserving motion. Pause/direction
+  inputs provide negative controls for state replay.
+- The expanded opt-in GPU test runs the actual copied Player from a temporary
+  distribution outside the repository, with a decoy bundle in an unrelated cwd.
+  It verifies frame-1 startup text, dimensions, startup states, PNG write/config
+  errors, frame-1/frame-60 tile positions, byte-identical repeated seed-0 PNGs,
+  source palette edits without rebuilding, clear ordering/alpha blending, and
+  an empty subsequent frame. Load/init/update/draw/system/deadline/shutdown faults
+  save the same diagnostic screen and exit 3; simultaneous capture failure retains
+  code 3 and reports both errors. Normal capture runs shutdown once.
+- Release missing/unavailable captures match the pre-Phase-3 Player byte for
+  byte, including first-frame font rendering. Missing PNG SHA-256:
+  `270f3b8cac72e32970352cc1421aee0f0a1e83c03357441c2aae2d49097afc93`;
+  unavailable: `b65afdcf94f74b874e72d7254ea263fc5bc8421e17d4b510b42b4c8858a3f336`.
+  Release tile and missing screenshots were visually inspected; local artifacts
+  are under ignored `target/phase3-proof/`.
+- The checked-in [Windows event probe](tests/player_input.ps1) uses a
+  [Luau fixture](tests/fixtures/player_input.luau) against the copied release
+  Player. It verifies each physical key's logical mapping, held state and exact
+  press/release sequence. Window-close and Escape each run shutdown once and
+  exit 0; a shutdown fault on window-close exits 3 with the source traceback.
+  A negative control swapping Left/Right expectations fails; invalid inherited
+  capture/dimension settings are excluded and restored in the caller afterward.
+  These are injected OS events, not a manual keyboard playtest. Other platforms
+  remain unverified.
+
+Commands passed (dependencies already cached, so offline):
+
+```text
+cargo fmt --all -- --check
+cargo check --offline --workspace --all-targets
+cargo test --offline --workspace
+cargo test --offline --workspace --no-default-features
+cargo clippy --offline --workspace --all-targets -- -D warnings
+cargo build --offline --release --bin protogine-player
+cargo test --offline --workspace --no-default-features --features scripting
+cargo check --offline --workspace --all-targets --all-features
+cargo clippy --offline --workspace --all-targets --all-features -- -D warnings
+cargo test --offline --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
+cargo run --offline --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo test --offline --test player_capture -- --ignored
+```
+
+No new dependencies or lockfile changes were needed. Kira/audio, data-directory
+selection for the Player, the versioned tot manifest/C loader, native batch calls,
+and editor/export tooling have not been implemented by this phase.
+
+The independent-review follow-up corrected the README's feature description,
+release drawing test command and wrapping, removed the redundant loop-entry exit
+status write, and promoted the input probe into the repository. The Rust checks,
+release scripting suites (including drawing), GPU captures and the new probe
+passed after remediation. Run the probe with PowerShell 7 on Windows after
+building the release Player:
+
+```powershell
+pwsh -NoProfile -File tests/player_input.ps1
+```

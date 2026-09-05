@@ -1,6 +1,7 @@
-//! Headless Luau lifecycle. The Player is connected in a later implementation slice.
+//! Headless Luau lifecycle, shared by the Player and development tools.
 
 mod data;
+mod drawing;
 mod filesystem;
 mod modules;
 mod utilities;
@@ -12,13 +13,14 @@ use mlua::{
     Function, Lua, MultiValue, StdLib, Value, VmState, state::LuaOptions, thread::ThreadStatus,
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     fmt,
     path::Path,
     rc::Rc,
     time::{Duration, Instant},
 };
 
+use crate::drawing::DrawCommand;
 pub use crate::kernel::FIXED_DT;
 const LOG_BYTES: usize = 64 * 1024;
 
@@ -111,11 +113,17 @@ pub struct ScriptHost {
     data: data::Data,
     filesystem: filesystem::FileSystem,
     entities: world::EntityCache,
+    draw_commands: Vec<DrawCommand>,
 }
 
 impl ScriptHost {
     pub fn load(root: &Path, limits: ScriptLimits) -> Result<Self, ScriptError> {
-        Self::load_with_roots(root, None, limits)
+        Self::load_with_roots(root, None, limits, None)
+    }
+
+    /// Seed math.random before evaluating any game source, for repeatable runs.
+    pub fn load_seeded(root: &Path, limits: ScriptLimits, seed: i32) -> Result<Self, ScriptError> {
+        Self::load_with_roots(root, None, limits, Some(seed))
     }
 
     /// Grant filesystem writes beneath an existing, absolute directory disjoint
@@ -125,13 +133,14 @@ impl ScriptHost {
         data_root: &Path,
         limits: ScriptLimits,
     ) -> Result<Self, ScriptError> {
-        Self::load_with_roots(root, Some(data_root), limits)
+        Self::load_with_roots(root, Some(data_root), limits, None)
     }
 
     fn load_with_roots(
         root: &Path,
         data_root: Option<&Path>,
         limits: ScriptLimits,
+        seed: Option<i32>,
     ) -> Result<Self, ScriptError> {
         let load_error = |error: mlua::Error| ScriptError {
             phase: "load",
@@ -162,6 +171,15 @@ impl ScriptHost {
             .map_err(load_error)?;
         lua.enable_jit(true);
         let globals = lua.globals();
+        if let Some(seed) = seed {
+            globals
+                .get::<mlua::Table>("math")
+                .map_err(load_error)?
+                .get::<Function>("randomseed")
+                .map_err(load_error)?
+                .call::<()>(seed)
+                .map_err(load_error)?;
+        }
         for name in [
             "loadstring",
             "getfenv",
@@ -211,6 +229,7 @@ impl ScriptHost {
             data,
             filesystem,
             entities,
+            draw_commands: Vec::new(),
         };
         let result = host.execute("load", entry, MultiValue::new(), limits.startup_timeout)?;
         let table = match (result.len(), result.front()) {
@@ -265,6 +284,11 @@ impl ScriptHost {
         std::mem::take(&mut self.logs)
     }
 
+    /// Owned commands from the last successful draw, cleared on fault or stop.
+    pub fn draw_commands(&self) -> &[DrawCommand] {
+        &self.draw_commands
+    }
+
     pub fn init(&mut self) -> Result<(), ScriptError> {
         self.init_in(None)
     }
@@ -304,6 +328,7 @@ impl ScriptHost {
         alpha: f64,
         engine: Option<EngineContext<'_>>,
     ) -> Result<(), ScriptError> {
+        self.draw_commands.clear();
         self.require_state("draw", ScriptState::Running)?;
         if !alpha.is_finite() || !(0.0..1.0).contains(&alpha) {
             return Err(ScriptError {
@@ -322,6 +347,7 @@ impl ScriptHost {
         &mut self,
         engine: Option<EngineContext<'_>>,
     ) -> Result<(), ScriptError> {
+        self.draw_commands.clear();
         match self.state {
             ScriptState::Stopped | ScriptState::Faulted => return Ok(()),
             ScriptState::Loaded => {} // Init never completed: skip game shutdown.
@@ -362,6 +388,7 @@ impl ScriptHost {
         let mut logs = Vec::new();
         let mut bytes = 0;
         let utility_budget = utilities::UtilityBudget::new(&budget);
+        let commands = RefCell::new(Vec::new());
         let result = catch_interrupt(|| {
             lua.scope(|scope| {
                 let context = lua.create_table()?;
@@ -378,6 +405,12 @@ impl ScriptHost {
                     Ok(())
                 })?;
                 context.raw_set("log", log)?;
+                if phase == "draw" {
+                    context.raw_set(
+                        "draw",
+                        drawing::bind(&lua, scope, &utility_budget, &commands)?,
+                    )?;
+                }
                 context.raw_set("data", self.data.bind(&lua, scope, &utility_budget)?)?;
                 context.raw_set(
                     "fs",
@@ -414,7 +447,11 @@ impl ScriptHost {
             })
         });
         self.logs = logs;
-        self.finish(phase, result)
+        self.finish(phase, result)?;
+        if phase == "draw" {
+            self.draw_commands = commands.into_inner();
+        }
+        Ok(())
     }
 
     fn execute(
@@ -451,6 +488,7 @@ impl ScriptHost {
     }
 
     pub(crate) fn fault(&mut self, phase: &'static str, message: String) -> ScriptError {
+        self.draw_commands.clear();
         let error = ScriptError { phase, message };
         self.state = ScriptState::Faulted;
         self.last_error = Some(error.clone());

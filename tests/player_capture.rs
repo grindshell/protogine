@@ -95,7 +95,7 @@ fn captures_startup_states_with_repeatable_pixels_and_reliable_exit_codes() {
 
     let entry_point = distribution.join("game/main.luau");
     fs::create_dir(entry_point.parent().unwrap()).unwrap();
-    fs::write(&entry_point, "-- detected").unwrap();
+    fs::write(&entry_point, "return {draw=function(ctx) ctx.draw.clear(0,0,0,1); ctx.draw.rect(10,10,24,24,0,1,0,1) end}").unwrap();
     let detected_path = root.join("captures/detected.png");
     assert_success(run_player(&executable, &cwd, &detected_path, &[]));
     let detected = image::open(detected_path).unwrap().into_rgba8();
@@ -131,4 +131,182 @@ fn captures_startup_states_with_repeatable_pixels_and_reliable_exit_codes() {
     );
     assert_eq!(bad_config.status.code(), Some(2));
     assert!(!bad_config_path.exists());
+
+    fs::remove_dir(&entry_point).unwrap();
+    fs::write(
+        &entry_point,
+        include_str!("../examples/games/tiles/main.luau"),
+    )
+    .unwrap();
+    let palette = distribution.join("game/palette.luau");
+    fs::write(
+        &palette,
+        include_str!("../examples/games/tiles/palette.luau"),
+    )
+    .unwrap();
+    let sample_path = root.join("captures/sample.png");
+    let output = run_player(
+        &executable,
+        &cwd,
+        &sample_path,
+        &[("PLAYER_CAPTURE_FRAME", "60")],
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Game capture: 60 completed ticks"));
+    assert_success(output);
+    let sample = image::open(&sample_path).unwrap().into_rgba8();
+    let repeated_path = root.join("captures/sample-repeat.png");
+    assert_success(run_player(
+        &executable,
+        &cwd,
+        &repeated_path,
+        &[("PLAYER_CAPTURE_FRAME", "60")],
+    ));
+    assert_eq!(
+        fs::read(&sample_path).unwrap(),
+        fs::read(&repeated_path).unwrap(),
+        "seeded PNG bytes differ"
+    );
+    assert_success(run_player(
+        &executable,
+        &cwd,
+        &repeated_path,
+        &[("PLAYER_CAPTURE_FRAME", "1")],
+    ));
+    let first = image::open(&repeated_path).unwrap().into_rgba8();
+    assert!(
+        first != sample,
+        "simulation should move the tile between captures"
+    );
+    // Headless replay places the tile at x=65 after tick 1 and x=124 after tick 60.
+    let tile = sample.get_pixel(130, 145);
+    assert!(tile.0[1] >= 200 && tile.0[2] >= 160);
+    assert_eq!(first.get_pixel(70, 145), tile);
+    assert_ne!(sample.get_pixel(70, 145), tile);
+
+    // Edit shipped source and relaunch the same executable, without rebuilding.
+    fs::write(&palette, "return {r=1,g=0,b=0}").unwrap();
+    assert_success(run_player(
+        &executable,
+        &cwd,
+        &repeated_path,
+        &[("PLAYER_CAPTURE_FRAME", "60")],
+    ));
+    let edited = image::open(&repeated_path).unwrap().into_rgba8();
+    assert_eq!(edited.get_pixel(130, 145).0, [255, 0, 0, 255]);
+    assert!(edited != sample);
+
+    fs::write(
+        &entry_point,
+        r#"
+        local frame = 0
+        return {
+            draw=function(ctx)
+                frame += 1
+                if frame == 1 then
+                    ctx.draw.rect(0,0,30,30,1,0,0,1)
+                    ctx.draw.clear(0,0,1,1)
+                    ctx.draw.rect(4,4,8,8,0,1,0,0.5)
+                end
+            end,
+            shutdown=function(ctx) ctx.log("shutdown once") end,
+        }
+    "#,
+    )
+    .unwrap();
+    let output = run_player(
+        &executable,
+        &cwd,
+        &repeated_path,
+        &[("PLAYER_CAPTURE_FRAME", "1")],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("shutdown once")
+            .count(),
+        1
+    );
+    assert_success(output);
+    let ordered = image::open(&repeated_path).unwrap().into_rgba8();
+    assert_eq!(ordered.get_pixel(0, 0).0, [0, 0, 255, 255]);
+    let blended = ordered.get_pixel(6, 6).0;
+    assert_eq!(blended[0], 0);
+    assert!((127..=128).contains(&blended[1]) && (127..=128).contains(&blended[2]));
+    assert_success(run_player(
+        &executable,
+        &cwd,
+        &repeated_path,
+        &[("PLAYER_CAPTURE_FRAME", "2")],
+    ));
+    assert!(
+        image::open(&repeated_path)
+            .unwrap()
+            .into_rgba8()
+            .pixels()
+            .all(|p| p.0 == [0, 0, 0, 255])
+    );
+
+    let mut fault_pixels = None;
+    for (phase, source) in [
+        ("load", "return {"),
+        (
+            "init",
+            "return {init=function() error('init failed') end, shutdown=function(ctx) ctx.log('must skip shutdown') end}",
+        ),
+        (
+            "update",
+            "return {update=function() error('update failed') end, shutdown=function(ctx) ctx.log('must skip shutdown') end}",
+        ),
+        (
+            "draw",
+            "return {draw=function(ctx) ctx.draw.clear(1,0,0,1); ctx.draw.rect(1,1,960,600,1,1,1,1); error('draw failed') end}",
+        ),
+        (
+            "systems",
+            "return {init=function(ctx) local e=ctx.world.spawn(1.7976931348623157e308,0); ctx.world.set_velocity(e,1e308,0) end}",
+        ),
+        ("update", "return {update=function() while true do end end}"),
+        (
+            "shutdown",
+            "return {draw=function(ctx) ctx.draw.clear(1,0,0,1) end, shutdown=function() error('shutdown failed') end}",
+        ),
+    ] {
+        fs::write(&entry_point, source).unwrap();
+        let output = run_player(
+            &executable,
+            &cwd,
+            &repeated_path,
+            &[("PLAYER_CAPTURE_FRAME", "1")],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(3), "{phase}: {stderr}");
+        assert!(
+            stderr.contains(&format!("Game error: {phase}:")),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("must skip shutdown"), "{stderr}");
+        assert!(stderr.contains("Screenshot saved"), "{stderr}");
+        if matches!(phase, "init" | "draw" | "shutdown") {
+            assert!(
+                stderr.contains("main.luau"),
+                "traceback should identify game source: {stderr}"
+            );
+        }
+        let pixels = image::open(&repeated_path).unwrap().into_rgba8();
+        assert!(pixels != missing && pixels != sample);
+        if let Some(previous) = &fault_pixels {
+            assert!(
+                previous == &pixels,
+                "fault screen contains partial game rendering"
+            );
+        }
+        fault_pixels = Some(pixels);
+    }
+    // A successful diagnostic PNG or a simultaneous write failure cannot mask a game fault.
+    let output = run_player(&executable, &cwd, root, &[]);
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Game error: shutdown:") && stderr.contains("Player capture failed"),
+        "{stderr}"
+    );
 }

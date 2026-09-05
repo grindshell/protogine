@@ -3,7 +3,7 @@
 Protogine (Prototype Engine) is a tile-based game engine inspired by RPG Maker,
 with a shared kernel for its editor and standalone Player.
 
-The current Player is a minimal startup shell. It opens a
+The Player runs shipped Luau games through the shared runtime. It opens a
 resizable window and displays **Missing game data** when no bundle is present.
 Press Escape or close the window to quit. The startup screen needs no external
 fonts, images, audio, or game files.
@@ -22,6 +22,20 @@ cargo build --release --bin protogine-player
 `cargo run` also selects the Player by default. The release executable is
 `target/release/protogine-player` (`.exe` on Windows). Copy it into a distribution
 directory to run independently of this repository.
+
+To run the moving tile sample in PowerShell:
+
+```powershell
+cargo build --release --bin protogine-player
+New-Item -ItemType Directory -Force target/tiles-demo/game | Out-Null
+Copy-Item target/release/protogine-player.exe target/tiles-demo/
+Copy-Item examples/games/tiles/*.luau target/tiles-demo/game/
+& ./target/tiles-demo/protogine-player.exe
+```
+
+The tile cruises horizontally. Arrows steer, Space pauses, and Backspace resets
+its position. Edit the copied Luau files and relaunch to change the game without
+rebuilding Rust. The sample uses code-drawn tiles and no external assets.
 
 ## Screenshot capture
 
@@ -50,21 +64,31 @@ Capture paths are relative to the working directory, unlike game bundle paths.
 Parent directories are created as needed; an existing output file is overwritten.
 The image is always PNG. Capture mode disables resizing and DPI scaling, verifies
 that the framebuffer matches the requested dimensions, and needs a working
-graphics context. It uses the actual Player renderer and whichever startup state
-bundle discovery selects.
+graphics context. It uses the actual Player renderer for games and startup screens.
 
-Exit codes are `0` for a saved capture, `1` for capture failure or interruption,
-and `2` for invalid environment configuration. Errors go to stderr. Unset the
+Exit codes are `0` for normal exit or a saved capture, `1` for capture failure or
+interruption, `2` for invalid environment configuration, and `3` for game loading
+or runtime faults. A game fault shows **Game error** and retains code `3` even
+when its diagnostic screenshot is saved or the PNG write also fails. Shutdown
+runs before saving the final PNG; shutdown errors receive the same treatment.
+Errors and script logs go to stderr. Unset the
 capture variables to return to interactive mode. On Windows, `cargo run` waits
 for the Player; scripts launching the release GUI executable directly should use
 a process API that waits and collects its exit code.
 
-The current static startup screen produces repeatable pixels on the same
-graphics stack. Capture frame selection does not yet establish deterministic
-simulation timing or guarantee identical rendering across platforms/drivers.
+Game capture seeds Luau's `math.random` with `0` before loading any module, uses
+neutral input, and performs exactly one fixed tick followed by draw(alpha=0)
+per render frame. Capture frame N observes N completed ticks after init.
+Startup screens run no simulation. The sample's state and PNG bytes repeat on
+the tested graphics stack. Script reseeding, changing external files, or changing
+gameplay upvalues in draw can affect reproducibility; identical pixels across
+platforms/drivers are not guaranteed. Interactive play uses the VM's default RNG
+initialization. Headless tools can use `GameRuntime::load_seeded(root, limits, seed)`
+(also on `ScriptHost`) with an i32 seed for the same initialization order.
 
 The opt-in smoke test runs the compiled Player from an isolated distribution,
-checks all startup states, repeatability, dimensions, and failure exit codes:
+checks startup states, sample movement, source edits without rebuilding, seeded
+repeatability, dimensions, drawing order/blending, and failure exit codes:
 
 ```text
 cargo test --test player_capture -- --ignored
@@ -88,11 +112,12 @@ An absent directory or entry point shows **Missing game data**. An invalid file
 type or access failure shows **Game data unavailable**, with details on stderr
 in console builds.
 
-A detected entry point currently shows **Game data detected** and explains that
-loading is not implemented. Detection checks file type and readability, not
-Luau syntax or complete bundle validity. Player script execution, archive formats,
-export tooling, audio, native plugins, and the editor are future work. The
-headless runtime below already provides simulation independently of the Player.
+A detected entry point loads a new runtime and calls init once. Each interactive
+frame samples input, advances fixed simulation ticks, then draws. Normal exit
+runs shutdown once; faults stop callbacks and show **Game error**, with the phase
+and available source traceback on stderr. Restart the Player to reload source.
+The optional `game.tot` manifest schema, archive formats, export tooling, audio,
+native plugins, and the editor remain future work.
 
 ## Headless scripting
 
@@ -107,22 +132,23 @@ cargo run --example script_host --no-default-features --features scripting -- ex
 `GameRuntime::load` takes an absolute game-directory path and `ScriptLimits`.
 `main.luau` returns a plain table containing optional `init`, `update`, `draw`,
 and `shutdown` functions. Callbacks return no values. The host exposes
-`ctx.log(message)`, `ctx.data`, `ctx.fs`, `ctx.world`, and `ctx.input`;
-stored context functions expire when
-their callback ends, while returned data values can be retained.
+`ctx.log(message)`, `ctx.data`, `ctx.fs`, `ctx.world`, `ctx.input`, and (during draw)
+`ctx.draw`. Stored context functions expire when their callback ends, while
+returned data values can be retained.
 Logs from the last call/frame can be retrieved in callback order with `take_logs()`.
 
 Call `init()` once, then `frame(elapsed_seconds, input)` for each presentation
 frame. It runs fixed updates and calls draw once. For exact stepping, use
 `step(input)` and `draw(alpha)` separately. Updates receive `dt = 1/60`; alpha
-must be finite and in `[0, 1)`. The runtime does not interpolate state or expose
-drawing commands yet. `shutdown()` is idempotent and skips game cleanup
-if init did not complete or the session faulted. Dropping a host only releases
-resources. Errors include a lifecycle phase and available Luau source context.
+must be finite and in `[0, 1)`. The runtime does not interpolate state automatically.
+`draw_commands()` exposes its owned presentation list. `shutdown()` is idempotent
+and skips game cleanup if init did not complete or the session faulted. Dropping
+a host only releases resources. Errors include a lifecycle phase and available
+Luau source context.
 
 The lower-level `protogine::scripting::ScriptHost` remains available for standalone
 VM/data work. Its `update()` invokes one fixed callback without kernel systems;
-it supplies only log/data/filesystem bindings, with no world, input, or clock.
+it supplies log/data/filesystem/draw bindings, with no world, input, or clock.
 
 Modules use extensionless relative paths, such as `require("./counter")` or
 `require("../shared")` within the bundle. Files must be UTF-8 `.luau` source.
@@ -177,8 +203,8 @@ even through `pcall`. Ordinary validation and permission errors remain catchable
 `up`, `down`, `left`, `right`, `action`, and `cancel`. The Rust caller supplies an
 `InputSnapshot` with held buttons and optional press/release events. The runtime
 also derives edges from held-state transitions. Explicit events preserve quick
-taps; repeated events before a tick coalesce into booleans. Physical key mappings
-will be added with Player integration.
+taps; repeated events before a tick coalesce into booleans. The Player maps arrows
+to directions, Space to `action`, and Backspace to `cancel`. Escape exits the Player.
 
 Frames clamp incoming time to 250 ms and run at most five ticks. Excess whole
 ticks are discarded, retaining fractional progress as draw alpha. `FrameReport`
@@ -197,7 +223,30 @@ The [movement sample](examples/games/movement/main.luau) sets velocity from inpu
 30, 60, 100, 120, 144, 180, and 240 FPS all complete 60 ticks at `(46, 46)` from
 `(16, 16)`. This verifies
 fixed-input state on the tested target; it does not promise cross-platform float
-or RNG determinism. Renderer integration and game captures are Phase 3.
+or RNG determinism.
+
+## Drawing
+
+Only the draw callback exposes `ctx.draw`. It appends owned commands; it never
+receives a graphics handle or borrowed world storage.
+
+| Draw API | Behavior |
+| --- | --- |
+| `ctx.draw.clear(r,g,b,a)` | Replace the background and discard preceding drawing |
+| `ctx.draw.rect(x,y,w,h,r,g,b,a)` | Draw a filled rectangle in pixel coordinates |
+
+Coordinates use a top-left origin with positive y downward. Colors are normalized
+RGBA in `[0,1]`; coordinates are in `[-1_000_000,1_000_000]`, and sizes are in
+`[0,1_000_000]`. All numbers must be finite and are converted to f32 after
+validation. Zero-size rectangles are allowed. Invalid arguments are catchable.
+Rectangles composite in insertion order with alpha blending.
+
+Each frame starts opaque black and each draw starts with an empty command list.
+Only a successful draw publishes its commands; fault/stop clears the list.
+Drawing nothing leaves a black frame. The 10,000-command cap counts clears too
+and faults the session even through `pcall`. Drawing tables are read-only and
+their functions expire with the callback. World writes remain prohibited in draw;
+keep gameplay changes in update, including changes to script upvalues.
 
 ## Script data and filesystem utilities
 
@@ -235,6 +284,8 @@ calls `GameRuntime::load_with_data_root(bundle, data, limits)` (also available o
 `ScriptHost`) with two existing,
 absolute directories. They are canonicalized and must be disjoint. The application
 selects the data location; the engine supplies no save filename or schema.
+The current Player grants bundle reads and no writable data root. Use the explicit
+host API for persistence examples; Player data-directory selection is separate work.
 
 | Filesystem API | Behavior |
 | --- | --- |
@@ -281,8 +332,8 @@ version without overwriting the existing data. There is no engine save lifecycle
   and fixed-step execution; `src/scripting/world.rs` supplies scoped bindings.
 - `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and `utilities.rs`
   implement scoped data/I/O services and their shared callback limits.
-- The default `player` Cargo feature enables graphics. The shared library can
-  be built and tested without graphics dependencies.
+- The default `player` Cargo feature enables graphics and scripting. The shared
+  library can be built and tested without graphics dependencies.
 
 ```text
 cargo fmt --all -- --check
@@ -293,7 +344,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test scripting --test scripting_feasibility --test scripting_utilities
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
 ```
+
+On Windows with PowerShell 7 and a working desktop/graphics context, run the
+repeatable [input/shutdown probe](tests/player_input.ps1):
+
+```powershell
+cargo build --release --bin protogine-player
+pwsh -NoProfile -File tests/player_input.ps1
+```
+
+It copies the Player into an isolated distribution under `target/player-input/`,
+injects native key events, and checks each arrow/Space/Backspace mapping, held
+state, press/release order, and shutdown exactly once on Escape/window-close.
+It also verifies exit code 3 for a shutdown fault. Logs remain beside the copied
+Player. Pass `-Player <executable>` to test another build. Capture/window
+environment overrides are excluded from the child process.
 
 See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance.

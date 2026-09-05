@@ -4,7 +4,13 @@
 )]
 
 use macroquad::prelude::*;
-use protogine::bundle::discover_bundle;
+use protogine::{
+    bundle::discover_bundle,
+    drawing::DrawCommand,
+    input::{Button, Buttons, InputSnapshot},
+    runtime::GameRuntime,
+    scripting::{ScriptError, ScriptLimits},
+};
 use std::{cell::Cell, process::ExitCode, rc::Rc};
 
 #[path = "player/capture.rs"]
@@ -29,30 +35,6 @@ struct StartupScreen {
 }
 
 impl StartupScreen {
-    fn discover() -> Self {
-        let result = std::env::current_exe().and_then(|path| discover_bundle(&path));
-        match result {
-            Ok(None) => Self {
-                title: "Missing game data",
-                description: "No game was found alongside this player.",
-            },
-            Ok(Some(bundle)) => {
-                eprintln!("Game data detected at {}", bundle.root().display());
-                Self {
-                    title: "Game data detected",
-                    description: "This player does not load games yet.",
-                }
-            }
-            Err(error) => {
-                eprintln!("Cannot access game data: {error}");
-                Self {
-                    title: "Game data unavailable",
-                    description: "The game data could not be accessed.",
-                }
-            }
-        }
-    }
-
     fn draw(&self) {
         let background = Color::from_rgba(20, 24, 32, 255);
         let foreground = Color::from_rgba(235, 239, 245, 255);
@@ -110,6 +92,131 @@ impl StartupScreen {
     }
 }
 
+struct PlayerSession {
+    runtime: Option<GameRuntime>,
+    screen: Option<StartupScreen>,
+    faulted: bool,
+}
+
+impl PlayerSession {
+    fn discover(capturing: bool) -> Self {
+        let mut session = Self {
+            runtime: None,
+            screen: None,
+            faulted: false,
+        };
+        match std::env::current_exe().and_then(|path| discover_bundle(&path)) {
+            Ok(None) => {
+                session.screen = Some(StartupScreen {
+                    title: "Missing game data",
+                    description: "No game was found alongside this player.",
+                })
+            }
+            Err(error) => {
+                eprintln!("Cannot access game data: {error}");
+                session.screen = Some(StartupScreen {
+                    title: "Game data unavailable",
+                    description: "The game data could not be accessed.",
+                });
+            }
+            Ok(Some(bundle)) => {
+                let loaded = if capturing {
+                    GameRuntime::load_seeded(bundle.root(), ScriptLimits::default(), 0)
+                } else {
+                    GameRuntime::load(bundle.root(), ScriptLimits::default())
+                };
+                match loaded {
+                    Ok(runtime) => {
+                        session.runtime = Some(runtime);
+                        session.call(GameRuntime::init);
+                    }
+                    Err(error) => session.fault(error),
+                }
+            }
+        }
+        session
+    }
+
+    fn fault(&mut self, error: ScriptError) {
+        eprintln!("Game error: {error}");
+        self.runtime = None; // Drop never runs game code after a fault.
+        self.faulted = true;
+        self.screen = Some(StartupScreen {
+            title: "Game error",
+            description: "The game stopped. See stderr for details.",
+        });
+    }
+
+    fn call(&mut self, call: impl FnOnce(&mut GameRuntime) -> Result<(), ScriptError>) {
+        if let Some(runtime) = &mut self.runtime {
+            let result = call(runtime);
+            for message in runtime.take_logs() {
+                eprintln!("{message}");
+            }
+            if let Err(error) = result {
+                self.fault(error);
+            }
+        }
+    }
+
+    fn draw(&self) {
+        if let Some(screen) = &self.screen {
+            screen.draw();
+        } else if let Some(runtime) = &self.runtime {
+            render(runtime.draw_commands());
+        }
+    }
+
+    fn exit_code(&self, capture_failed: bool) -> u8 {
+        if self.faulted {
+            3
+        } else {
+            u8::from(capture_failed)
+        }
+    }
+}
+
+fn render(commands: &[DrawCommand]) {
+    clear_background(BLACK);
+    for command in commands {
+        match *command {
+            DrawCommand::Clear(color) => clear_background(Color::from(color)),
+            DrawCommand::Rect {
+                x,
+                y,
+                width,
+                height,
+                color,
+            } => {
+                draw_rectangle(x, y, width, height, Color::from(color));
+            }
+        }
+    }
+}
+
+fn poll_input() -> InputSnapshot {
+    let keys = [
+        (Button::Up, KeyCode::Up),
+        (Button::Down, KeyCode::Down),
+        (Button::Left, KeyCode::Left),
+        (Button::Right, KeyCode::Right),
+        (Button::Action, KeyCode::Space),
+        (Button::Cancel, KeyCode::Backspace),
+    ];
+    let buttons = |check: fn(KeyCode) -> bool| {
+        Buttons::new(
+            keys.iter()
+                .filter(|(_, key)| check(*key))
+                .map(|(button, _)| *button),
+        )
+    };
+    InputSnapshot {
+        held: buttons(is_key_down),
+        pressed: buttons(is_key_pressed),
+        released: buttons(is_key_released),
+    }
+}
+
 fn main() -> ExitCode {
     let options = match PlayerOptions::from_env() {
         Ok(options) => options,
@@ -121,51 +228,73 @@ fn main() -> ExitCode {
 
     // A window closed before the capture finishes must not report success.
     // The native event loop and its future run on the same thread.
-    let succeeded = Rc::new(Cell::new(options.capture.is_none()));
-    let run_succeeded = Rc::clone(&succeeded);
+    let status = Rc::new(Cell::new(u8::from(options.capture.is_some())));
+    let run_status = Rc::clone(&status);
     macroquad::Window::from_config(window_conf(&options), async move {
-        match run(options).await {
-            Ok(()) => run_succeeded.set(true),
-            Err(error) => eprintln!("Player capture failed: {error}"),
-        }
+        run(options, run_status).await;
     });
-    if succeeded.get() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    ExitCode::from(status.get())
 }
 
-async fn run(options: PlayerOptions) -> Result<(), String> {
-    if options.capture.is_some() {
-        prevent_quit();
-    }
-    let screen = StartupScreen::discover();
+async fn run(options: PlayerOptions, status: Rc<Cell<u8>>) {
+    prevent_quit(); // Intercept native close for orderly script shutdown too.
+    let mut session = PlayerSession::discover(options.capture.is_some());
     let mut rendered_frames = 0;
     loop {
         if is_key_pressed(KeyCode::Escape) || is_quit_requested() {
-            return if options.capture.is_some() {
-                Err("window closed before the screenshot was saved".to_owned())
-            } else {
-                Ok(())
-            };
+            session.call(GameRuntime::shutdown);
+            if options.capture.is_some() {
+                eprintln!("Player capture failed: window closed before the screenshot was saved");
+            }
+            status.set(session.exit_code(options.capture.is_some()));
+            return;
         }
-        screen.draw();
+        if options.capture.is_some() {
+            session.call(|runtime| runtime.step(InputSnapshot::default()));
+            session.call(|runtime| runtime.draw(0.0));
+        } else {
+            session.call(|runtime| {
+                runtime
+                    .frame(f64::from(get_frame_time()), poll_input())
+                    .map(|_| ())
+            });
+        }
+        session.draw();
         if let Some(capture) = &options.capture {
             rendered_frames += 1;
             if rendered_frames == capture.frame {
-                let screenshot = get_screen_data();
-                if (screenshot.width, screenshot.height) != (options.width, options.height) {
-                    return Err(format!(
-                        "framebuffer is {}x{}, expected {}x{}; the platform resized the window",
-                        screenshot.width, screenshot.height, options.width, options.height
-                    ));
+                if let Some(runtime) = &session.runtime {
+                    eprintln!(
+                        "Game capture: {} completed ticks",
+                        runtime.completed_ticks()
+                    );
                 }
-                capture::save_png(screenshot, &capture.path)?;
-                eprintln!("Screenshot saved to {}", capture.path.display());
-                return Ok(());
+                session.call(GameRuntime::shutdown);
+                if session.faulted {
+                    session.draw();
+                }
+                let result = save_capture(&options, capture);
+                if let Err(error) = &result {
+                    eprintln!("Player capture failed: {error}");
+                }
+                status.set(session.exit_code(result.is_err()));
+                return;
             }
         }
+        status.set(session.exit_code(options.capture.is_some()));
         next_frame().await;
     }
+}
+
+fn save_capture(options: &PlayerOptions, capture: &capture::Capture) -> Result<(), String> {
+    let screenshot = get_screen_data();
+    if (screenshot.width, screenshot.height) != (options.width, options.height) {
+        return Err(format!(
+            "framebuffer is {}x{}, expected {}x{}; the platform resized the window",
+            screenshot.width, screenshot.height, options.width, options.height
+        ));
+    }
+    capture::save_png(screenshot, &capture.path)?;
+    eprintln!("Screenshot saved to {}", capture.path.display());
+    Ok(())
 }

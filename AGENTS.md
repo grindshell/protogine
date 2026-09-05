@@ -17,13 +17,13 @@ for performance-sensitive work.
 The repository contains a single Cargo package, `protogine` version `0.1.0`, using
 Rust edition `2024`. The minimal `protogine-player` binary opens a Macroquad
 window with a "Missing game data" fallback. Its default `player` feature enables
-graphics; the shared library also builds with `--no-default-features`.
+graphics and scripting; the shared library also builds with `--no-default-features`.
 
 - [Shared library](src/lib.rs) and [bundle discovery](src/bundle.rs): look for a
   readable `game/main.luau` beside the executable, independent of the working
   directory. This is the initial unpacked bundle convention.
-- [Player](src/bin/player.rs): startup presentation, including detected and
-  inaccessible bundle states. Detection does not yet execute scripts.
+- [Player](src/bin/player.rs): bundle execution through `GameRuntime`, physical
+  input, owned-command rendering, startup and game-error presentation.
 - [Built-in capture](src/bin/player/capture.rs): `PLAYER_CAPTURE` saves a PNG and
   exits; optional `PLAYER_CAPTURE_FRAME`, `PLAYER_WIDTH`, and `PLAYER_HEIGHT`
   control timing and dimensions. Use this for agent-driven visual checks.
@@ -44,7 +44,10 @@ and input edge consumption. Position/velocity integration follows successful
 script updates. The [movement example](examples/games/movement/main.luau) is
 replayed headlessly at different frame rates by [runtime tests](tests/runtime.rs).
 Run the [headless example](examples/script_host.rs) to exercise the runtime.
-The Player does not enable scripting or execute games yet. Drawing bindings,
+The [drawing API](src/drawing.rs) exposes owned clear/rectangle commands, shared
+by headless tools and the Player. The [tile sample](examples/games/tiles/main.luau)
+runs from copied source beside the Player. Capture mode seeds the VM before
+module loading and steps once per frame with neutral input and alpha 0.
 Kira audio, native plugins, the editor, and export tooling remain unimplemented.
 
 The proposed next architecture and execution phases are in
@@ -135,6 +138,12 @@ behavior that depends on them.
   Roll back unpublished entities if wrapper/cache allocation fails during spawn.
   Fixed systems run after a successful callback; session faults invalidate the
   kernel. See the Phase 2 contract for entity/operation limits and input timing.
+- `ctx.draw` exists only in draw and publishes a fresh owned list only after a
+  successful callback. Validate finite coordinates/sizes/colors before f32
+  conversion; the 10,000-command cap latches. Fault/stop clears published commands.
+  Keep renderer semantics (clear discards previous drawing, ordered alpha-blended
+  rectangles, empty frame black) aligned with headless data and GPU tests.
+  See Phase 3 for capture seeding, shutdown, input mappings and fault code 3.
 - `ctx.data` preserves integer text, null, and array/object identity; ordinary
   Luau numbers encode as finite floats. Do not silently narrow integers or omit
   unsupported export values. Data strings/tables remain in VM-owned storage.
@@ -194,7 +203,7 @@ mutation timing are separate contracts. Treat native plugins as trusted code.
   cargo test --workspace --no-default-features --features scripting
   cargo check --workspace --all-targets --all-features
   cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test scripting --test scripting_feasibility --test scripting_utilities
+  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
   cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
   ```
 
@@ -204,6 +213,13 @@ mutation timing are separate contracts. Treat native plugins as trusted code.
   behavior, limits, file replacement failure, and script-owned save/load.
   `kernel` and `runtime` cover handles, immediate writes, system ordering, scoped
   operations, latched resource limits, catch-up input, and fixed-input replay.
+  `drawing` verifies command publication/validation, expired bindings, faults,
+  and seeded sample state without graphics. `player_capture` verifies the actual
+  copied Player, source edits, seeded PNG bytes, movement, compositing and faults.
+  On Windows, run `cargo build --release --bin protogine-player` followed by
+  `pwsh -NoProfile -File tests/player_input.ps1` when changing physical input or
+  Player shutdown. The probe requires PowerShell 7 and a working graphics context;
+  it checks each key mapping, held/edge state, Escape/close cleanup and fault exit.
 
   Check additional target/feature configurations as they are introduced and
   document their actual commands here. `cargo run --bin protogine-player` opens

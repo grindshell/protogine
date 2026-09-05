@@ -1,6 +1,7 @@
 //! One headless game session: Luau, kernel systems, fixed clock, and input.
 
 use crate::{
+    drawing::DrawCommand,
     input::{InputQueue, InputSnapshot},
     kernel::{FIXED_DT, Kernel},
     scripting::{EngineContext, ScriptError, ScriptHost, ScriptLimits, ScriptState},
@@ -38,6 +39,10 @@ impl GameRuntime {
         Ok(Self::new(ScriptHost::load(root, limits)?))
     }
 
+    pub fn load_seeded(root: &Path, limits: ScriptLimits, seed: i32) -> Result<Self, ScriptError> {
+        Ok(Self::new(ScriptHost::load_seeded(root, limits, seed)?))
+    }
+
     pub fn load_with_data_root(
         root: &Path,
         data_root: &Path,
@@ -69,6 +74,9 @@ impl GameRuntime {
     }
     pub fn kernel(&self) -> &Kernel {
         &self.kernel
+    }
+    pub fn draw_commands(&self) -> &[DrawCommand] {
+        self.scripts.draw_commands()
     }
     pub fn completed_ticks(&self) -> u64 {
         self.completed_ticks
