@@ -1,0 +1,21 @@
+[package]
+name = "protogine"
+version = "0.1.0"
+edition = "2024"
+default-run = "protogine-player"
+
+[[bin]]
+name = "protogine-player"
+path = "src/bin/player.rs"
+required-features = ["player"]
+
+[features]
+default = ["player"]
+player = ["dep:macroquad", "dep:image"]
+
+[dependencies]
+macroquad = { version = "=0.4.16", default-features = false, optional = true }
+image = { version = "0.24.9", default-features = false, features = ["png"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.27.0"
