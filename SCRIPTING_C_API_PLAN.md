@@ -490,9 +490,12 @@ Contracts finalized in this slice:
 - Require uses mlua's Luau resolver with canonical bundle-root validation and
   canonical file cache keys. Extensionless relative path segments select UTF-8
   `.luau` files; aliases, dotted segments, directory init modules, and escaping
-  junctions/symlinks are rejected. A file and same-named directory are ambiguous.
+  junctions/symlinks are rejected. A file and same-named directory inside the
+  bundle are ambiguous; sibling files outside the bundle do not affect its root.
   Modules return one value. Cycles are errors; failed results are not cached;
   compiled source and successful values persist until the VM is replaced.
+  A Rust scope guard releases active imports on success, error, and cancellation,
+  including allocation failures during module execution or return processing.
   Bundle files are assumed stable during execution, not concurrently hostile.
 - Limits: 64 MiB VM heap; 1 second load/init/shutdown execution; 100 ms update/draw;
   256 KiB/source; 256 compiled modules; 64 active imports including main;
@@ -524,8 +527,9 @@ Verified evidence:
   Each potentially runaway fixture has an independent 10-second process timeout.
 - `tests/scripting.rs` covers lifecycle/fault transitions, callback schema,
   fixed dt, invalid alpha, stale context functions, import caching/retry/cycles,
-  entry execution exactly once, source stability, captured host helpers, Windows case aliases and junction
-  escape. The sample prints ticks at 0.016667, 0.033333, and 0.050000 seconds.
+  entry execution exactly once, source stability, host-owned import guards,
+  allocation-error retry, sibling-file isolation, Windows case aliases and
+  junction escape. The sample prints ticks at 0.016667, 0.033333, and 0.050000 seconds.
 - The C and C++ fixture compiled and ran successfully on
   `x86_64-pc-windows-msvc` using clang with `-std=c11` and `-x c++ -std=c++17`:
   `tests/fixtures/native_toolchain.c`, outputs `target/phase0/c-probe.exe` and
@@ -548,10 +552,13 @@ cargo test --release --no-default-features --features scripting --test scripting
 cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
 ```
 
-All passed. The final scripting tests pass in debug and release: 13 behavioral
+All passed. The final scripting tests pass in debug and release: 15 behavioral
 tests and 17 isolated feasibility/resource probes. Existing bundle and Player
 unit tests pass; the opt-in GPU smoke test was not rerun because this slice does
 not change Player rendering or capture. Other native platforms are unverified.
+
+The sibling-file and allocation-retry regressions both failed against `db0a7c2`
+and pass after the resolver fixes. The checks above were rerun after those fixes.
 
 Next slice: Phase 1a data/filesystem utilities, then Phase 2 kernel-facing APIs
 and frame/input timing. Do not imply that passing a constant dt implements a

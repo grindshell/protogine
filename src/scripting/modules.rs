@@ -2,7 +2,7 @@
 
 use super::Budget;
 use mlua::{
-    Function, Lua,
+    Function, Lua, MultiValue,
     chunk::ChunkMode,
     luau::{NavigateError, Require},
 };
@@ -25,12 +25,24 @@ pub(super) struct BundleModules {
     resolved: Option<PathBuf>,
     active: Rc<RefCell<HashSet<String>>>,
     budget: Rc<Budget>,
-    wrap: Function,
     loaders: RefCell<HashMap<PathBuf, Function>>,
 }
 
+// Cleanup is owned by Rust so VM errors (including allocation failures) and
+// cancellation cannot skip it. Never retain a RefCell borrow across game code.
+struct ActiveImport<'a> {
+    active: &'a RefCell<HashSet<String>>,
+    key: &'a str,
+}
+
+impl Drop for ActiveImport<'_> {
+    fn drop(&mut self) {
+        self.active.borrow_mut().remove(self.key);
+    }
+}
+
 impl BundleModules {
-    pub(super) fn new(lua: &Lua, root: &Path, budget: Rc<Budget>) -> mlua::Result<Self> {
+    pub(super) fn new(root: &Path, budget: Rc<Budget>) -> mlua::Result<Self> {
         if !root.is_absolute() {
             return Err(mlua::Error::runtime("script root must be absolute"));
         }
@@ -38,35 +50,12 @@ impl BundleModules {
         if !root.is_dir() {
             return Err(mlua::Error::runtime("script root must be a directory"));
         }
-        // Capture trusted helpers before any game code can replace its globals.
-        // Retain source context for errors raised through nested imports.
-        let wrap = lua
-            .load(
-                r#"
-            local protect, raise, pack = xpcall, error, table.pack
-            local trace, stringify = debug.traceback, tostring
-            local function describe(err) return trace(stringify(err), 2) end
-            return function(module, enter, leave)
-                return function()
-                    enter()
-                    local result = pack(protect(module, describe))
-                    leave()
-                    if not result[1] then raise(result[2], 0) end
-                    if result.n ~= 2 then raise("modules must return exactly one value", 0) end
-                    return result[2]
-                end
-            end
-        "#,
-            )
-            .set_name("=module_guard")
-            .eval()?;
         Ok(Self {
             root,
             current: PathBuf::new(),
             resolved: None,
             active: Rc::default(),
             budget,
-            wrap,
             loaders: RefCell::default(),
         })
     }
@@ -82,6 +71,13 @@ impl BundleModules {
     }
 
     fn navigate(&mut self, relative: PathBuf) -> Result<(), NavigateError> {
+        // The root is a directory, never a module candidate. Its sibling .luau
+        // file is outside the bundle and must not influence module resolution.
+        if relative.as_os_str().is_empty() {
+            self.current = relative;
+            self.resolved = None;
+            return Ok(());
+        }
         let path = self.root.join(&relative);
         let file = path.with_extension("luau");
         // Reject ambiguity between a directory and its same-named module.
@@ -133,26 +129,33 @@ impl BundleModules {
             .into_function()?;
         let key = path.to_string_lossy().into_owned();
         let active = self.active.clone();
-        let leave_active = active.clone();
-        let leave_key = key.clone();
         let budget = self.budget.clone();
-        let enter = lua.create_function(move |_, ()| {
-            let mut active = active.borrow_mut();
-            if active.contains(&key) {
-                return Err(mlua::Error::runtime("cyclic module import"));
+        let loader = lua.create_function(move |_, ()| {
+            {
+                let mut active = active.borrow_mut();
+                if active.contains(&key) {
+                    return Err(mlua::Error::runtime("cyclic module import"));
+                }
+                if active.len() >= IMPORT_DEPTH {
+                    budget.fault.set(Some("module import depth exceeded"));
+                    return Err(mlua::Error::runtime("module import depth exceeded"));
+                }
+                active.insert(key.clone());
             }
-            if active.len() >= IMPORT_DEPTH {
-                budget.fault.set(Some("module import depth exceeded"));
-                return Err(mlua::Error::runtime("module import depth exceeded"));
+            let _import = ActiveImport {
+                active: &active,
+                key: &key,
+            };
+            // mlua's protected call retains tracebacks without relying on any
+            // mutable script globals or allocating a Lua table for the results.
+            let mut result = module.call::<MultiValue>(())?;
+            if result.len() != 1 {
+                return Err(mlua::Error::runtime(
+                    "modules must return exactly one value",
+                ));
             }
-            active.insert(key.clone());
-            Ok(())
+            Ok(result.pop_front().expect("one module result"))
         })?;
-        let leave = lua.create_function(move |_, ()| {
-            leave_active.borrow_mut().remove(&leave_key);
-            Ok(())
-        })?;
-        let loader: Function = self.wrap.call((module, enter, leave))?;
         self.loaders
             .borrow_mut()
             .insert(path.to_owned(), loader.clone());

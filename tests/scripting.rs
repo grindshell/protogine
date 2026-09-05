@@ -160,6 +160,81 @@ fn modules_resolve_relative_to_importer_and_cache_owned_values() {
 }
 
 #[test]
+fn bundle_root_ignores_sibling_modules() {
+    for name in ["game", "game.release"] {
+        let distribution = tempfile::tempdir().unwrap();
+        let root = distribution.path().join(name);
+        fs::create_dir(&root).unwrap();
+        fs::write(root.with_extension("luau"), "error('outside bundle')").unwrap();
+        fs::write(
+            root.join("main.luau"),
+            "assert(require('./lib/value') == 42); return {}",
+        )
+        .unwrap();
+        fs::create_dir(root.join("lib")).unwrap();
+        fs::write(root.join("lib/value.luau"), "return require('../shared')").unwrap();
+        fs::write(root.join("shared.luau"), "return 42").unwrap();
+        load(&root);
+
+        // Same-named files/directories inside the bundle must remain ambiguous.
+        fs::write(root.join("lib.luau"), "return 42").unwrap();
+        let error = ScriptHost::load(&root, ScriptLimits::default())
+            .err()
+            .unwrap();
+        assert!(error.message.contains("ambiguous"), "{error}");
+    }
+}
+
+#[test]
+fn module_allocation_errors_do_not_poison_retry() {
+    for memory_bytes in [1024 * 1024, 4 * 1024 * 1024] {
+        let root = game(
+            r#"
+            return {
+                update = function(ctx)
+                    local ok = pcall(require, './hungry')
+                    allocations, returns = nil, nil
+                    -- Reclaim the temporary buffers before retrying the import.
+                    for i = 1, 100 do local ok, scratch = pcall(buffer.create, 32768) end
+                    assert(not ok)
+                    assert(require('./hungry').recovered)
+                    local ok, err = pcall(require, './allocate')
+                    assert(not ok and string.find(tostring(err), 'memory'))
+                    assert(require('./allocate').recovered)
+                    ctx.log('recovered')
+                end,
+            }
+        "#,
+        );
+        // At 1 MiB, the old Lua wrapper failed while packing these results and
+        // skipped import cleanup. At 4 MiB it rejected the arity and recovered.
+        fs::write(
+            root.path().join("hungry.luau"),
+            "if filled then return {recovered = true} end\nfilled = true\nreturns = table.create(8000, 1)\nallocations = buffer.create(200000)\nreturn table.unpack(returns)",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("allocate.luau"),
+            "if allocated then return {recovered = true} end; allocated = true; return buffer.create(16 * 1024 * 1024)",
+        )
+        .unwrap();
+        let mut host = ScriptHost::load(
+            root.path(),
+            ScriptLimits {
+                memory_bytes,
+                ..ScriptLimits::default()
+            },
+        )
+        .unwrap();
+        host.init().unwrap();
+        host.update().unwrap();
+        assert_eq!(host.take_logs(), ["recovered"]);
+        assert_eq!(host.state(), ScriptState::Running);
+        host.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn module_cycles_and_failed_imports_do_not_poison_retry() {
     let root = game(
         r#"
@@ -194,7 +269,7 @@ fn loaded_modules_keep_their_source_until_session_restart() {
 }
 
 #[test]
-fn module_guard_keeps_original_helpers_and_source_context() {
+fn module_guard_ignores_replaced_globals_and_keeps_source_context() {
     let root = game("xpcall = function() return true, {} end; return require('./broken')");
     fs::write(
         root.path().join("broken.luau"),

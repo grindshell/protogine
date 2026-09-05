@@ -155,8 +155,7 @@ impl ScriptHost {
             }
             Ok(VmState::Continue)
         });
-        let modules =
-            modules::BundleModules::new(&lua, root, budget.clone()).map_err(load_error)?;
+        let modules = modules::BundleModules::new(root, budget.clone()).map_err(load_error)?;
         globals
             .raw_set(
                 "require",
