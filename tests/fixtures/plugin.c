@@ -77,8 +77,46 @@ static uint32_t plugin_shutdown(const PgHost *host, void *instance, PgError *err
     return MODE == 6 ? fail(error, "shutdown failed") : PG_OK;
 }
 static uint32_t batch(const PgHost *host, void *instance, PgBytes input, PgOutput *output, PgError *error) {
-    (void)host; (void)instance; (void)input; (void)error;
-    output->written = 0; return PG_OK;
+    (void)instance;
+    trace("call");
+    PgStr message = STR("batch"); host->log(host->context, PG_LOG_INFO, message);
+    if ((!input.len && input.data) || (!output->capacity && output->data)) return fail(error, "non-null empty buffer");
+    if (input.len && output->capacity && input.data == output->data) return PG_CONTRACT_ERROR;
+    if (MODE == 30) {
+        if (output->capacity < input.len) return PG_BUFFER_TOO_SMALL;
+        for (uint64_t i = 0; i < input.len; ++i) output->data[i] = input.data[i] ^ 0xff;
+        output->written = input.len; return PG_OK;
+    }
+    if (output->capacity) output->data[0] = 0xee;
+    if (MODE == 31) return fail(error, "batch rejected");
+    if (MODE == 32) return PG_BUFFER_TOO_SMALL;
+    if (MODE == 33) return PG_PANIC;
+    if (MODE == 34) return PG_CONTRACT_ERROR;
+    if (MODE == 35) return 999;
+    if (MODE == 36) output->data = NULL;
+    if (MODE == 37) output->capacity += 1;
+    if (MODE == 38) output->written = output->capacity + 1;
+    if (MODE == 39) { output->written = 1; return PG_ERROR; }
+    if (MODE == 40) error->data = NULL;
+    if (MODE == 41) error->written = error->capacity + 1;
+    if (MODE == 42) { error->data[0] = 0xff; error->written = 1; }
+    if (MODE == 43) {
+        static uint8_t bytes[4096]; memset(bytes, 'x', sizeof(bytes));
+        PgStr large = {bytes, sizeof(bytes)};
+        for (int i = 0; i < 17; ++i) host->log(host->context, PG_LOG_INFO, large);
+    }
+    if (MODE == 44) { Sleep(150); if (output->capacity) output->written = 1; }
+    if (MODE == 45) {
+        HANDLE worker = CreateThread(NULL, 0, wrong_thread, (void *)host, 0, NULL);
+        if (!worker) return fail(error, "thread creation");
+        WaitForSingleObject(worker, INFINITE); CloseHandle(worker);
+    }
+    if (MODE == 46) error->capacity += 1;
+    if (MODE == 47) output->written = UINT64_MAX;
+    if (MODE == 48) return PG_INVALID_ARGUMENT;
+    if (MODE == 49) return PG_UNSUPPORTED;
+    if (MODE == 50) host->log(host->context, 99, message);
+    return PG_OK;
 }
 static PgFunction functions[2] = {
     {sizeof(PgFunction), 1, STR("example.batch"), STR("example.empty"), batch, {0,0}},

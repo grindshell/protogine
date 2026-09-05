@@ -29,7 +29,7 @@ impl<'a> UtilityBudget<'a> {
 
     pub(super) fn limit(&self, exceeded: bool, message: &'static str) -> mlua::Result<()> {
         if exceeded {
-            self.budget.fault.set(Some(message));
+            self.budget.fail(message);
         }
         self.check()
     }

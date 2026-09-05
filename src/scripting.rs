@@ -4,6 +4,8 @@ mod data;
 mod drawing;
 mod filesystem;
 mod modules;
+#[cfg(feature = "native-plugins")]
+mod native;
 mod utilities;
 mod world;
 
@@ -82,19 +84,43 @@ impl std::error::Error for ScriptError {}
 #[derive(Default)]
 struct Budget {
     deadline: Cell<Option<Instant>>,
-    fault: Cell<Option<&'static str>>,
+    fault: RefCell<Option<String>>,
 }
 
 impl Budget {
-    fn check(&self) -> Option<&'static str> {
+    fn fail(&self, message: impl Into<String>) {
+        self.fault
+            .borrow_mut()
+            .get_or_insert_with(|| message.into());
+    }
+
+    fn check(&self) -> Option<String> {
         if self
             .deadline
             .get()
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            self.fault.set(Some("script deadline exceeded"));
+            self.fail("script deadline exceeded");
         }
-        self.fault.get()
+        self.fault.borrow().clone()
+    }
+}
+
+#[derive(Default)]
+struct CallbackLogs {
+    lines: RefCell<Vec<String>>,
+    bytes: Cell<usize>,
+}
+
+impl CallbackLogs {
+    fn push(&self, budget: &Budget, message: String) -> mlua::Result<()> {
+        if self.bytes.get() + message.len() + 1 > LOG_BYTES {
+            budget.fail("script log limit exceeded");
+            return Err(mlua::Error::runtime("script log limit exceeded"));
+        }
+        self.bytes.set(self.bytes.get() + message.len() + 1);
+        self.lines.borrow_mut().push(message);
+        Ok(())
     }
 }
 
@@ -376,7 +402,7 @@ impl ScriptHost {
         phase: &'static str,
         number: Option<f64>,
         timeout: Duration,
-        engine: Option<EngineContext<'_>>,
+        mut engine: Option<EngineContext<'_>>,
     ) -> Result<(), ScriptError> {
         self.logs.clear();
         let Some(function) = self.callbacks[index].clone() else {
@@ -385,26 +411,39 @@ impl ScriptHost {
         self.budget.deadline.set(Some(Instant::now() + timeout));
         let lua = self.lua.clone();
         let budget = self.budget.clone();
-        let mut logs = Vec::new();
-        let mut bytes = 0;
+        let logs = CallbackLogs::default();
+        #[cfg(feature = "native-plugins")]
+        let native = engine.as_mut().and_then(|e| e.plugins.take());
+        // Mutable access is needed only to detach the scoped native capability.
+        let _ = &mut engine;
         let utility_budget = utilities::UtilityBudget::new(&budget);
         let commands = RefCell::new(Vec::new());
         let result = catch_interrupt(|| {
             lua.scope(|scope| {
                 let context = lua.create_table()?;
-                let log = scope.create_function_mut(|_, message: mlua::LuaString| {
-                    if message.as_bytes().len() > 4096
-                        || bytes + message.as_bytes().len() + 1 > LOG_BYTES
-                    {
-                        budget.fault.set(Some("script log limit exceeded"));
+                let log = scope.create_function(|_, message: mlua::LuaString| {
+                    if message.as_bytes().len() > 4096 {
+                        budget.fail("script log limit exceeded");
                         return Err(mlua::Error::runtime("script log limit exceeded"));
                     }
                     let message = message.to_str()?.to_string();
-                    bytes += message.len() + 1;
-                    logs.push(message);
-                    Ok(())
+                    logs.push(&budget, message)
                 })?;
                 context.raw_set("log", log)?;
+                #[cfg(feature = "native-plugins")]
+                if engine.is_some() {
+                    context.raw_set(
+                        "native",
+                        native::bind(
+                            &lua,
+                            scope,
+                            native,
+                            matches!(phase, "init" | "update"),
+                            &budget,
+                            &logs,
+                        )?,
+                    )?;
+                }
                 if phase == "draw" {
                     context.raw_set(
                         "draw",
@@ -446,7 +485,7 @@ impl ScriptHost {
                 Ok(())
             })
         });
-        self.logs = logs;
+        self.logs = logs.lines.into_inner();
         self.finish(phase, result)?;
         if phase == "draw" {
             self.draw_commands = commands.into_inner();

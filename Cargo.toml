@@ -18,6 +18,10 @@ required-features = ["player"]
 name = "script_host"
 required-features = ["scripting"]
 
+[[example]]
+name = "native_benchmark"
+required-features = ["scripting", "native-plugins"]
+
 [features]
 default = ["player"]
 player = ["dep:macroquad", "dep:image", "scripting", "native-plugins"]

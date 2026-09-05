@@ -1,6 +1,6 @@
 # ADR-001: Luau scripting and the native plugin API
 
-**Status:** D1-D8 accepted; Phases 0, 1, 1a, 2, 3, and 4 complete on Windows MSVC; Phase 5 unstarted.
+**Status:** D1-D8 accepted; Phases 0, 1, 1a, 2, 3, 4, and 5 complete on Windows MSVC.
 **Date:** 2026-09-05.
 **Decider:** Project owner.
 **Baseline:** `539659e` (Player, bundle discovery, built-in capture).
@@ -15,8 +15,8 @@ The Player currently discovers `game/main.luau` beside its executable, renders
 startup states, and supports unattended PNG capture. The shared library now also
 contains an optional headless Luau runtime with a kernel, velocity integration,
 and frame/input timing. The Player runs shipped scripts and owned drawing commands;
-native plugins initialize and shut down around the VM. Luau/native batch invocation
-is the next slice.
+native plugins initialize and shut down around the VM. Luau can invoke native
+batch computations through scoped, validated buffer calls.
 
 Preserve the shared editor/Player kernel, primarily Luau-authored games, and a
 C-compatible native plugin interface. Use `hecs` 0.11.1 and `mlua` 0.12.1 with
@@ -333,7 +333,7 @@ versioned function table. Use an engine-owned ABI version independent of the
 engine package version. The bootstrap accepts requested ABI, destination size,
 and a host-allocated descriptor destination. The exact ABI 1 declarations are in
 the generated [C header](include/protogine_plugin.h); the Phase 4 implementation
-record freezes their constraints. The Luau adapter below remains Phase 5 work.
+record freezes their constraints. The Phase 5 record freezes the Luau adapter.
 
 | Surface | Required contract |
 | --- | --- |
@@ -1094,3 +1094,128 @@ debug/release suites, runtime regression in debug/release, release SDK suite,
 release Player build, header verification and native GPU captures pass after
 these fixes. Follow-up gate and negative-control logs are under ignored
 `target/phase4-followup/`. Phase 5 remains unstarted.
+
+## Implementation record: Phase 5
+
+Phase 4 and its review fixes were committed as `2ae99a1`. The owner authorized
+Phase 5. The following detailed contract is frozen before implementation:
+
+- Runtime callbacks expose `ctx.native.call(plugin_id, function_id, input,
+  output) -> written_bytes` when native support is enabled. Calls are permitted
+  only in init/update. The function expires with its callback; retained buffers
+  remain ordinary VM-owned data. `ctx.native.plugins[plugin_id][function_id]`
+  is an owned, read-only metadata snapshot with `schema` and `schema_version`.
+  No native API is supplied to standalone ScriptHost or module initialization.
+- Copy input to host storage and allocate zeroed, disjoint output scratch before
+  FFI. Input and output may alias in Luau. Publish only the validated written
+  prefix on success; preserve the output suffix and the entire output on failure.
+  Zero-length spans use null pointers. No retry, VM pointer, retained native
+  callable handle, or ECS access is introduced. Copy validated function pointers
+  at registration and keep their libraries alive through calls and teardown.
+- Limit combined input length/output capacity to 16 MiB per call, cumulative
+  requested bytes to 64 MiB and call attempts to 128 per callback. Limits and
+  deadlines latch outside pcall. Include native logs in the existing 64 KiB
+  callback log budget and preserve script/native ordering. Check deadlines before
+  and after foreign work; a hung plugin still requires process termination.
+- Unknown IDs, bad script arguments, allocation refusal and native statuses
+  INVALID_ARGUMENT/UNSUPPORTED/ERROR/BUFFER_TOO_SMALL are recoverable script
+  errors. No failed call publishes output or retries. PANIC/CONTRACT_ERROR,
+  unknown statuses, malformed diagnostics, host-service violations, changed
+  output pointer/capacity, out-of-bounds written length or nonzero failure length
+  poison the registry and latch a detailed session fault even under pcall.
+- The independent C example computes an unweighted four-neighbor tile-grid
+  distance field from one source (one batched result for all cells). Input schema
+  `protogine.grid_distance`, version 1: little-endian u32 width, height, source
+  index, followed by width*height bytes (0 walkable, 1 blocked). Width/height are
+  1..256, row-major source is zero-based and must be walkable. Output is one
+  little-endian u32 per cell; 0xffffffff means blocked/unreachable. No diagonal
+  moves or edge wrapping. Validate the complete input before writing results.
+- A typed Luau wrapper marshals ordinary tile arrays and decodes distance arrays;
+  a pure-Luau BFS provides parity. A copied Player renders the same result.
+  Release benchmarks time the complete typed call including packing, allocation,
+  both FFI copies and decoding against the pure-Luau function, with warmed runs,
+  median/p95 timings and multiple grid sizes on the named local machine. No
+  speedup is an acceptance requirement; report the observed crossover or its
+  absence. Correctness, refusal/cleanup tests and both hosts are required gates.
+
+This keeps ABI 1 unchanged. Host scratch costs an extra copy but makes VM buffer
+ownership and failure publication explicit. Direct VM buffers and command buffers
+remain deferred pending measurements and separate lifetime/scheduling contracts.
+
+### Phase 5 delivery and verification
+
+- ABI 1 and the generated header remain byte-for-byte unchanged. The loader copies
+  validated call pointers, exposes bounded `PluginSet::call`, and distinguishes
+  recoverable rejection from a poisoned registry. The Luau bridge uses scoped
+  mutable access without holding a kernel or RefCell borrow through native code.
+  The existing fault latch now retains the first owned diagnostic so caught
+  native contract failures keep plugin/function context through cleanup.
+- Native C tests retain their independent 15-second subprocess watchdog. The
+  existing 41 lifecycle/declaration cases pass, with 31 new batch cases and one
+  distance-parity process. These cover all statuses, forged output/diagnostic
+  fields, UTF-8 refusal, zero/aliased buffers with disjoint native spans, unchanged
+  output on failure and unwritten success, unknown IDs/types, callback expiry,
+  draw/shutdown refusal, exact/over byte and call limits, shared log limits/order,
+  elapsed native deadline, wrong-thread logging and poisoned-registry refusal.
+  Recoverable errors do not retry; a returned result drives immediate world
+  mutation before the same tick's kernel integration.
+- The typed distance wrapper agrees with independent known fields and pure-Luau
+  BFS across one-dimensional, disconnected, blocked, open and seeded random
+  grids through 256x256. Direct payload probes reject missing/trailing data,
+  invalid dimensions/source/tile values and insufficient output without mutation.
+- The headless example and copied Player execute the same bridge. Native distance
+  captures at 400x300 repeat byte-for-byte, with source/wall pixel assertions.
+  The release capture was visually inspected. A native contract error caught by
+  Luau still produces an update-error capture, native cleanup and Player exit 3.
+- [Published benchmark](examples/games/native_distance/BENCHMARK.md): 50 warm-ups
+  and 200 alternating samples per method/size include the complete typed call,
+  buffer packing/copies/decoding, allocations, GC and runtime overhead. On BLD
+  (Ryzen 7 5800X, Rust 1.95.0, Clang 20.1.6), 256x256 median was 30.636 ms pure
+  Luau versus 8.999 ms native, about 3.4x. Tiny grids have no reliable advantage;
+  the report includes p95, crossover observations and host variability.
+
+The documented workspace fmt/check/test/clippy, core-only and scripting-only
+configurations, all-feature check/clippy, release scripting suite, native-only
+check, headless native debug/release suites, release SDK suite, header check,
+release Player build, script-only and native GPU captures, headless examples and
+Windows input/shutdown probe all pass. Commands are the Phase 4 gate list above,
+plus `pwsh -NoProfile -File tools/build_native_distance.ps1` and
+`cargo run --offline --release --example native_benchmark -- target/native-distance-demo/game`.
+Native integration tests run in the existing `plugins` suite; the publication
+unit test also runs in native-enabled `--lib` gates.
+Local results are under ignored `target/phase5-proof/`; the runnable distribution
+is under `target/native-distance-demo/`. The owner reviewed the implementation
+and accepted the follow-up fixes below.
+
+This completes the accepted initial scripting/native milestone on Windows MSVC
+x64. Other native targets, audio, Player writable-data selection, editor/export,
+asynchronous native work, zero-copy and engine command buffers remain outside
+this implementation. Native hangs and memory corruption still cannot be contained
+by the in-process boundary.
+
+### Phase 5 review fixes
+
+- Count native attempts before converting raw Luau arguments. Malformed buffer
+  types and missing arguments remain recoverable through attempt 128; attempt
+  129 latches the callback limit even under pcall. Two watched cases verify the
+  boundary and that rejected arguments never enter native code. The malformed
+  buffer regression failed against the original bridge before the fix.
+- Exercise truncated and trailing tile payloads with valid 2x2 headers, retaining
+  output-sentinel checks. An isolated C variant that accepts trailing bytes now
+  fails the fixture; it still rejects truncated input to keep the probe readable
+  within its allocation. The unchanged C implementation passes.
+- Isolate post-FFI result publication in `finish_call`. A direct unit test verifies
+  successful prefix publication, then verifies that an expired deadline returns
+  an error, preserves the entire output and latches the fault. Removing that guard
+  in an isolated copy makes the test fail. MODE 44 now reports one written byte
+  and checks for delivery/output-change markers, but the unit test is necessary:
+  Luau's interrupt can stop the callback before either marker is logged. Native
+  debug/release gate commands in README and AGENTS include `--lib` for this test.
+
+The documented workspace, core-only and scripting-only tests, check/clippy
+configurations, release scripting/native and SDK suites, header check, release
+Player build, headless lifecycle and native Player captures pass after these
+fixes. The native debug tests were rebuilt after the isolated mutation probes;
+future probes use a separate Cargo target directory. Gate and negative-control
+logs are under ignored `target/phase5-fixes/`. The owner approved Phase 5 and its
+review fixes for commit.

@@ -1,0 +1,2 @@
+version 1
+plugins [{ id "org.protogine.grid" library "plugins/grid_distance.dll" }]

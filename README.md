@@ -9,8 +9,8 @@ Press Escape or close the window to quit. The startup screen needs no external
 fonts, images, audio, or game files.
 The shared library also provides a headless Luau runtime with an entity kernel,
 fixed updates, input handling, and script data/filesystem utilities.
-Trusted C plugins can initialize and shut down alongside the runtime; their
-Luau-callable batch interface is the next implementation phase.
+Trusted C plugins initialize and shut down alongside the runtime and expose
+synchronous batch computations to Luau through owned byte buffers.
 
 ## Run and build
 
@@ -120,7 +120,7 @@ frame samples input, advances fixed simulation ticks, then draws. Normal exit
 runs shutdown once; faults stop callbacks and show **Game error**, with the phase
 and available source traceback on stderr. Restart the Player to reload source.
 An optional `game.tot` declares required native plugins, described below. Archive
-formats, export tooling, audio, native batch invocation, and the editor remain
+formats, export tooling, audio, and the editor remain
 future work.
 
 ## Native plugins
@@ -158,8 +158,8 @@ The dependency-free [Rust SDK](sdk/src/lib.rs) defines ABI 1. Its generated
 Luau headers are needed. Export `protogine_plugin_query` with `PG_PLUGIN_EXPORT`.
 It negotiates exact ABI/descriptor sizes and returns init/shutdown callbacks and
 up to 64 immutable function declarations. IDs, schema IDs/versions, required
-callbacks, table sizes and zero reserved fields are checked. Batch signatures
-are defined and declarations are validated, but invocation from Luau is Phase 5.
+callbacks, table sizes and zero reserved fields are checked. The runtime copies
+validated function pointers and keeps their libraries alive through invocation.
 
 Host services currently provide bounded UTF-8 logging: info/warn/error, 4 KiB per
 message and 64 KiB per native call. Diagnostics use a 1024-byte host-owned buffer.
@@ -198,6 +198,52 @@ To run the same game visually, copy `target/release/protogine-player.exe` into
 `target/native-demo/` and launch it there. The example logs native init before
 Luau init, then Luau shutdown before native shutdown.
 
+### Luau batch calls
+
+With native support enabled, runtime contexts expose:
+
+```luau
+local written = ctx.native.call(pluginId, functionId, inputBuffer, outputBuffer)
+local info = ctx.native.plugins[pluginId][functionId]
+-- info.schema and info.schema_version identify the byte format.
+```
+
+Calls are allowed only in init/update and expire with that callback. Metadata
+is an owned read-only snapshot; buffers can be retained. A runtime with no plugins
+has an empty registry. Standalone ScriptHost supplies no native API.
+
+The adapter copies input to host memory and uses disjoint zeroed output scratch.
+On validated success, it copies only the written prefix back, preserving the
+output suffix. Failure leaves the entire output unchanged. Input/output may be
+the same Luau buffer; no VM pointers cross the C ABI. Zero-length native spans
+use null pointers. No automatic retry occurs, including for insufficient capacity.
+
+Unknown IDs, bad arguments and native statuses INVALID_ARGUMENT, UNSUPPORTED,
+ERROR and BUFFER_TOO_SMALL raise recoverable script errors. PANIC, CONTRACT_ERROR,
+unknown statuses, malformed diagnostics/output and host-service violations poison
+the registry and fault the session even through `pcall`. Native failures include
+plugin/function context; cleanup preserves the primary fault.
+
+Limits are 16 MiB combined input/output capacity per call, 64 MiB requested bytes
+and 128 call attempts per callback. Native and script logs share the callback's
+64 KiB total in execution order. Limits and elapsed deadlines latch outside Luau;
+native calls that never return cannot be interrupted in process.
+
+The [distance-field example](examples/games/native_distance/SCHEMA.md) computes
+four-neighbor tile distances in one call. Its typed wrapper accepts tile arrays
+and returns distance arrays; the pure-Luau implementation supplies parity.
+
+```powershell
+pwsh -NoProfile -File tools/build_native_distance.ps1
+cargo run --example script_host --no-default-features --features scripting,native-plugins -- target/native-distance-demo/game
+./target/native-distance-demo/protogine-player.exe
+cargo run --release --example native_benchmark -- target/native-distance-demo/game
+```
+
+The build script uses Clang `-O2`, the C header and platform SDK, then copies the
+game and release Player. [Benchmark results and method](examples/games/native_distance/BENCHMARK.md)
+include validation, packing, FFI copies, decoding, GC and runtime callback costs.
+
 ## Headless scripting
 
 Enable the optional `scripting` feature to use `protogine::runtime::GameRuntime`.
@@ -212,7 +258,8 @@ cargo run --example script_host --no-default-features --features scripting -- ex
 `main.luau` returns a plain table containing optional `init`, `update`, `draw`,
 and `shutdown` functions. Callbacks return no values. The host exposes
 `ctx.log(message)`, `ctx.data`, `ctx.fs`, `ctx.world`, `ctx.input`, and (during draw)
-`ctx.draw`. Stored context functions expire when their callback ends, while
+`ctx.draw`, plus `ctx.native` with native support enabled. Stored context
+functions expire when their callback ends, while
 returned data values can be retained.
 Logs from the last call/frame can be retrieved in callback order with `take_logs()`.
 
@@ -227,7 +274,8 @@ Luau source context.
 
 The lower-level `protogine::scripting::ScriptHost` remains available for standalone
 VM/data work. Its `update()` invokes one fixed callback without kernel systems;
-it supplies log/data/filesystem/draw bindings, with no world, input, or clock.
+it supplies log/data/filesystem/draw bindings, with no world, input, native calls,
+or clock.
 
 Modules use extensionless relative paths, such as `require("./counter")` or
 `require("../shared")` within the bundle. Files must be UTF-8 `.luau` source.
@@ -249,8 +297,8 @@ Cancellation requires Rust `panic=unwind` and uses mlua's protected panic handli
 so `pcall`, `xpcall`, and metamethods cannot swallow the host's cancellation.
 This does not preempt filesystem I/O, source/JIT compilation, or native functions;
 the heap cap is not a bound on total process memory. Native work is checked
-against the deadline when control returns to the VM/host. Process, network,
-and native-plugin APIs remain unavailable.
+against the deadline when control returns to the VM/host. Process execution,
+network access and script-selected DLL loading remain unavailable.
 
 ## World and fixed input
 
@@ -431,8 +479,8 @@ cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
 cargo check --no-default-features --features native-plugins
-cargo test --no-default-features --features scripting,native-plugins --test plugins --test manifest
-cargo test --release --no-default-features --features scripting,native-plugins --test plugins --test manifest
+cargo test --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
+cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
 cargo test --release -p protogine-plugin-api
 cargo run -p protogine-headergen -- --check
 ```

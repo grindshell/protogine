@@ -106,7 +106,7 @@ impl BundleModules {
             return Ok(loader.clone());
         }
         if self.loaders.borrow().len() >= MODULE_COUNT {
-            self.budget.fault.set(Some("module count exceeded"));
+            self.budget.fail("module count exceeded");
             return Err(mlua::Error::runtime("module count exceeded"));
         }
         let mut source = Vec::new();
@@ -114,7 +114,7 @@ impl BundleModules {
             .take(SOURCE_BYTES + 1)
             .read_to_end(&mut source)?;
         if source.len() as u64 > SOURCE_BYTES {
-            self.budget.fault.set(Some("module source limit exceeded"));
+            self.budget.fail("module source limit exceeded");
             return Err(mlua::Error::runtime("module source limit exceeded"));
         }
         let source = String::from_utf8(source).map_err(mlua::Error::external)?;
@@ -137,7 +137,7 @@ impl BundleModules {
                     return Err(mlua::Error::runtime("cyclic module import"));
                 }
                 if active.len() >= IMPORT_DEPTH {
-                    budget.fault.set(Some("module import depth exceeded"));
+                    budget.fail("module import depth exceeded");
                     return Err(mlua::Error::runtime("module import depth exceeded"));
                 }
                 active.insert(key.clone());

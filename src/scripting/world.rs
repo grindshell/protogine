@@ -45,6 +45,8 @@ pub(crate) struct EngineContext<'a> {
     kernel: RefCell<&'a mut Kernel>,
     input: InputSnapshot,
     calls: Cell<usize>,
+    #[cfg(feature = "native-plugins")]
+    pub(super) plugins: Option<&'a mut crate::plugins::PluginSet>,
 }
 
 impl<'a> EngineContext<'a> {
@@ -53,7 +55,18 @@ impl<'a> EngineContext<'a> {
             kernel: RefCell::new(kernel),
             input,
             calls: Cell::new(0),
+            #[cfg(feature = "native-plugins")]
+            plugins: None,
         }
+    }
+
+    #[cfg(feature = "native-plugins")]
+    pub(crate) fn with_plugins(
+        mut self,
+        plugins: Option<&'a mut crate::plugins::PluginSet>,
+    ) -> Self {
+        self.plugins = plugins;
+        self
     }
 
     fn begin(

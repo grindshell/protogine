@@ -26,6 +26,23 @@ fn error(message: impl ToString) -> PluginError {
     PluginError(message.to_string())
 }
 
+pub const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+
+/// Recoverable application refusal versus a poisoned native registry.
+#[derive(Clone, Debug)]
+pub enum CallError {
+    Rejected(PluginError),
+    Fault(PluginError),
+}
+impl fmt::Display for CallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(error) | Self::Fault(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for CallError {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionInfo {
     pub id: String,
@@ -156,15 +173,19 @@ impl Diagnostic {
         }
     }
 
-    fn result(&self, span: PgError, status: u32) -> Result<(), PluginError> {
+    fn text(&self, span: PgError) -> Result<&str, PluginError> {
         if !ptr::eq(span.data, self.bytes.as_ptr())
             || span.capacity != PG_ERROR_CAPACITY
             || span.written > span.capacity
         {
             return Err(error("plugin corrupted diagnostic pointer/capacity/length"));
         }
-        let text = std::str::from_utf8(&self.bytes[..span.written as usize])
-            .map_err(|_| error("plugin diagnostic is not UTF-8"))?;
+        std::str::from_utf8(&self.bytes[..span.written as usize])
+            .map_err(|_| error("plugin diagnostic is not UTF-8"))
+    }
+
+    fn result(&self, span: PgError, status: u32) -> Result<(), PluginError> {
+        let text = self.text(span)?;
         if status > PG_CONTRACT_ERROR {
             return Err(error(format!("unknown plugin status {status}")));
         }
@@ -177,6 +198,7 @@ impl Diagnostic {
 
 struct LoadedPlugin {
     info: PluginInfo,
+    calls: Vec<PgCall>,
     descriptor: PgPlugin,
     instance: *mut c_void,
     context: Box<HostContext>,
@@ -188,6 +210,7 @@ struct LoadedPlugin {
 pub struct PluginSet {
     loaded: Vec<LoadedPlugin>,
     logs: Vec<String>,
+    fault: Option<PluginError>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -203,6 +226,7 @@ impl PluginSet {
         let mut set = Self {
             loaded: Vec::new(),
             logs: Vec::new(),
+            fault: None,
             _thread_bound: PhantomData,
         };
         let result = (|| {
@@ -234,10 +258,11 @@ impl PluginSet {
                     .result(span, status)
                     .map_err(|e| error(format!("{} query: {e}", declaration.id)))?;
                 // SAFETY: Caller guarantees valid readable descriptor spans for this library.
-                let info = unsafe { validate_descriptor(descriptor, &declaration.id) }
+                let (info, calls) = unsafe { validate_descriptor(descriptor, &declaration.id) }
                     .map_err(|e| error(format!("{}: {e}", declaration.id)))?;
                 set.loaded.push(LoadedPlugin {
                     info,
+                    calls,
                     descriptor,
                     instance: ptr::null_mut(),
                     context: Box::new(HostContext::new()),
@@ -300,6 +325,113 @@ impl PluginSet {
         std::mem::take(&mut self.logs)
     }
 
+    /// Execute once using host-owned input and disjoint zeroed output scratch.
+    /// Only validated success returns bytes. A contract fault refuses every later
+    /// call, while shutdown remains available. No VM or kernel access occurs here.
+    pub fn call(
+        &mut self,
+        plugin_id: &str,
+        function_id: &str,
+        input: &[u8],
+        capacity: usize,
+    ) -> Result<Vec<u8>, CallError> {
+        if let Some(fault) = &self.fault {
+            return Err(CallError::Fault(fault.clone()));
+        }
+        let reject = |message| CallError::Rejected(error(message));
+        if input
+            .len()
+            .checked_add(capacity)
+            .is_none_or(|n| n > MAX_BATCH_BYTES)
+        {
+            return Err(reject("native buffer limit exceeded"));
+        }
+        let plugin = self
+            .loaded
+            .iter_mut()
+            .find(|p| p.info.id == plugin_id)
+            .ok_or_else(|| reject("unknown native plugin"))?;
+        let index = plugin
+            .info
+            .functions
+            .iter()
+            .position(|f| f.id == function_id)
+            .ok_or_else(|| reject("unknown native function"))?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| reject("native scratch allocation failed"))?;
+        output.resize(capacity, 0);
+        let mut destination = PgOutput {
+            data: if capacity == 0 {
+                ptr::null_mut()
+            } else {
+                output.as_mut_ptr()
+            },
+            capacity: capacity as u64,
+            written: 0,
+        };
+        let original = destination;
+        let source = PgBytes {
+            data: if input.is_empty() {
+                ptr::null()
+            } else {
+                input.as_ptr()
+            },
+            len: input.len() as u64,
+        };
+        let mut diagnostic = Diagnostic::new();
+        let mut span = diagnostic.span();
+        plugin.context.begin();
+        let host = plugin.context.table();
+        // SAFETY: Callback was copied from the validated descriptor; its library
+        // and initialized instance remain live. All spans are disjoint host memory.
+        // The trusted plugin must obey read-only input and call-scoped lifetimes.
+        let status = unsafe {
+            plugin.calls[index].unwrap()(
+                &host,
+                plugin.instance,
+                source,
+                &mut destination,
+                &mut span,
+            )
+        };
+        let (logs, host_fault) = plugin.context.finish();
+        self.logs.extend(
+            logs.into_iter()
+                .map(|s| format!("[{}] {s}", plugin.info.id)),
+        );
+        let contract = (|| {
+            let text = diagnostic.text(span)?;
+            if destination.data != original.data
+                || destination.capacity != original.capacity
+                || destination.written > original.capacity
+                || (status != PG_OK && destination.written != 0)
+            {
+                return Err(error("plugin corrupted output pointer/capacity/length"));
+            }
+            if let Some(fault) = host_fault {
+                return Err(error(fault));
+            }
+            if status >= PG_PANIC {
+                return Err(error(format!(
+                    "native panic/contract or unknown status {status}: {text}"
+                )));
+            }
+            Ok(())
+        })();
+        if let Err(fault) = contract {
+            let fault = error(format!("{plugin_id}/{function_id}: {fault}"));
+            self.fault = Some(fault.clone());
+            return Err(CallError::Fault(fault));
+        }
+        diagnostic
+            .result(span, status)
+            .map_err(|e| CallError::Rejected(error(format!("{plugin_id}/{function_id}: {e}"))))?;
+        output.truncate(destination.written as usize);
+        Ok(output)
+    }
+
     /// Idempotent reverse teardown. Continue after errors; no libraries unload
     /// until every initialized instance has received shutdown.
     pub fn shutdown(&mut self) -> Result<(), PluginError> {
@@ -346,7 +478,7 @@ impl Drop for PluginSet {
 unsafe fn validate_descriptor(
     plugin: PgPlugin,
     expected_id: &str,
-) -> Result<PluginInfo, PluginError> {
+) -> Result<(PluginInfo, Vec<PgCall>), PluginError> {
     if plugin.abi_version != PG_ABI_VERSION || plugin.struct_size != size_of::<PgPlugin>() as u32 {
         return Err(error("plugin ABI version or descriptor size mismatch"));
     }
@@ -384,6 +516,7 @@ unsafe fn validate_descriptor(
     };
     let mut seen = std::collections::HashSet::new();
     let mut infos = Vec::new();
+    let mut calls = Vec::new();
     for function in functions {
         if function.struct_size != size_of::<PgFunction>() as u32
             || function.schema_version == 0
@@ -406,11 +539,15 @@ unsafe fn validate_descriptor(
             schema,
             schema_version: function.schema_version,
         });
+        calls.push(function.call);
     }
-    Ok(PluginInfo {
-        id,
-        functions: infos,
-    })
+    Ok((
+        PluginInfo {
+            id,
+            functions: infos,
+        },
+        calls,
+    ))
 }
 
 unsafe fn identifier(value: PgStr) -> Result<String, PluginError> {

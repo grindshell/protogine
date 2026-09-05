@@ -170,14 +170,14 @@ impl GameRuntime {
     pub fn init(&mut self) -> Result<(), ScriptError> {
         self.require_state("init", ScriptState::Loaded)?;
         self.logs.clear();
-        let result = self
-            .scripts
-            .as_mut()
-            .unwrap()
-            .init_in(Some(EngineContext::new(
-                &mut self.kernel,
-                InputSnapshot::default(),
-            )));
+        #[cfg(feature = "native-plugins")]
+        if let Some(plugins) = &mut self.plugins {
+            self.logs.extend(plugins.take_logs());
+        }
+        let engine = EngineContext::new(&mut self.kernel, InputSnapshot::default());
+        #[cfg(feature = "native-plugins")]
+        let engine = engine.with_plugins(self.plugins.as_mut());
+        let result = self.scripts.as_mut().unwrap().init_in(Some(engine));
         self.finish_call(result)
     }
 
@@ -245,14 +245,10 @@ impl GameRuntime {
         if self.scripts.is_none() {
             return Ok(());
         }
-        let result = self
-            .scripts
-            .as_mut()
-            .unwrap()
-            .shutdown_in(Some(EngineContext::new(
-                &mut self.kernel,
-                InputSnapshot::default(),
-            )));
+        let engine = EngineContext::new(&mut self.kernel, InputSnapshot::default());
+        #[cfg(feature = "native-plugins")]
+        let engine = engine.with_plugins(self.plugins.as_mut());
+        let result = self.scripts.as_mut().unwrap().shutdown_in(Some(engine));
         self.finish_call(result)
     }
 
@@ -261,11 +257,10 @@ impl GameRuntime {
             return Ok(());
         }
         let input = self.input.consume();
-        let result = self
-            .scripts
-            .as_mut()
-            .unwrap()
-            .update_in(Some(EngineContext::new(&mut self.kernel, input)));
+        let engine = EngineContext::new(&mut self.kernel, input);
+        #[cfg(feature = "native-plugins")]
+        let engine = engine.with_plugins(self.plugins.as_mut());
+        let result = self.scripts.as_mut().unwrap().update_in(Some(engine));
         self.finish_tick(result)
     }
 
@@ -291,10 +286,10 @@ impl GameRuntime {
         if self.state != ScriptState::Running {
             return Ok(());
         }
-        let result = self.scripts.as_mut().unwrap().draw_in(
-            alpha,
-            Some(EngineContext::new(&mut self.kernel, self.draw_input)),
-        );
+        let engine = EngineContext::new(&mut self.kernel, self.draw_input);
+        #[cfg(feature = "native-plugins")]
+        let engine = engine.with_plugins(self.plugins.as_mut());
+        let result = self.scripts.as_mut().unwrap().draw_in(alpha, Some(engine));
         self.finish_call(result)
     }
 

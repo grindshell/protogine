@@ -52,8 +52,10 @@ module loading and steps once per frame with neutral input and alpha 0.
 The optional [manifest](src/manifest.rs) and [native loader](src/plugins.rs) add
 trusted C plugin startup/cleanup before/after the VM. The [SDK](sdk/src/lib.rs)
 generates [the C header](include/protogine_plugin.h) with the separate
-[headergen tool](tools/headergen/src/main.rs). Kira audio, Luau/native batch
-invocation, the editor, and export tooling remain unimplemented.
+[headergen tool](tools/headergen/src/main.rs). The [native buffer adapter](src/scripting/native.rs)
+supplies synchronous batch calls; the [distance-field example](examples/games/native_distance/SCHEMA.md)
+includes a typed Luau wrapper and parity implementation. Kira audio, the editor,
+and export tooling remain unimplemented.
 
 The proposed next architecture and execution phases are in
 [SCRIPTING_C_API_PLAN.md](SCRIPTING_C_API_PLAN.md). D1-D8 are accepted and initial
@@ -178,7 +180,7 @@ reachable. Hot unloading/reloading is not an established requirement.
 
 Use `libloading` 0.9.0. ABI 1 currently supports `x86_64-pc-windows-msvc` with
 exact C layout/table sizes and one `protogine_plugin_query` export. The immutable
-declarations specify IDs, schema IDs/versions and batch signatures; Phase 5 adds
+declarations specify IDs, schema IDs/versions and batch signatures. Phase 5 supplies
 actual invocation and Luau buffers. Keep engine command buffers as a future
 option; scheduling and mutation timing are separate contracts.
 
@@ -211,6 +213,18 @@ option; scheduling and mutation timing are separate contracts.
   aborts, foreign exceptions and native hangs cannot be contained in process.
   Guard panic-payload disposal too; if disposal panics, intentionally forget the
   secondary payload so another destructor cannot unwind through the C boundary.
+- `ctx.native.call(plugin_id, function_id, input_buffer, output_buffer)` runs only
+  in init/update and returns written bytes. Native functions expire with their
+  callback; `ctx.native.plugins` contains owned read-only schema metadata. Copy
+  input before FFI, use disjoint zeroed host output, and publish only the validated
+  success prefix. Preserve the suffix and all output on failure, even for aliased
+  VM buffers. Never retry automatically or pass VM/kernel pointers to plugins.
+- Native statuses 1..4 are recoverable; panic/contract/unknown statuses, malformed
+  diagnostics/output and host-service faults poison the registry and latch the
+  first detailed failure outside pcall. Skip systems and tear down the session.
+  Enforce 16 MiB combined buffers/call, 64 MiB requested bytes and 128 call attempts
+  per callback. Script and native logs share the callback's 64 KiB budget in order.
+  Check deadlines around native work; native hangs remain process-level failures.
 - Edit SDK definitions, then regenerate with `cargo run -p protogine-headergen`.
   cbindgen 0.29.2 is pinned in the development tool; the checked-in C header is a
   generated artifact and normal engine builds do not run generation. The tool
@@ -252,8 +266,8 @@ option; scheduling and mutation timing are separate contracts.
 
   ```text
   cargo check --no-default-features --features native-plugins
-  cargo test --no-default-features --features scripting,native-plugins --test plugins --test manifest
-  cargo test --release --no-default-features --features scripting,native-plugins --test plugins --test manifest
+  cargo test --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
+  cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
   cargo test --release -p protogine-plugin-api
   cargo run -p protogine-headergen -- --check
   cargo test --test plugins -- --ignored
@@ -267,6 +281,13 @@ option; scheduling and mutation timing are separate contracts.
   the independently compiled lifecycle example and dependency lookup policy.
   The SDK's `panic_boundary` suite runs C entry points in child processes with a
   10-second watchdog; it covers ordinary and recursively panicking payload cleanup.
+  The native suite also covers buffer aliasing/zero lengths, failure publication,
+  poison/refusal, deadlines/limits, callback expiry and distance-field parity.
+  Its ignored captures include the actual native distance result and repeat PNGs.
+  Build the standalone example with `pwsh -NoProfile -File tools/build_native_distance.ps1`.
+  Run `cargo run --release --example native_benchmark -- target/native-distance-demo/game`
+  for end-to-end typed-wrapper timings; the example's BENCHMARK.md records the
+  method and measured limits. Do not report FFI-only timing as authoring performance.
 
   `scripting_feasibility` runs potentially runaway fixtures in child processes
   with a 10-second watchdog. Keep that outer timeout independent of the VM.

@@ -96,6 +96,24 @@ impl Fixtures {
         );
         output
     }
+
+    fn distance_bundle(&self, root: &Path) {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"));
+        fs::create_dir_all(root.join("plugins")).unwrap();
+        compile(
+            &project.join("examples/plugins/grid_distance.c"),
+            &self.header,
+            &root.join("plugins/grid_distance.dll"),
+            &["-O2".into()],
+        );
+        for file in ["main.luau", "distance.luau", "game.tot"] {
+            fs::copy(
+                project.join("examples/games/native_distance").join(file),
+                root.join(file),
+            )
+            .unwrap();
+        }
+    }
 }
 
 fn bundle(root: &Path, a: &Path, b: Option<&Path>) {
@@ -296,6 +314,26 @@ fn native_probe() {
         return;
     };
     let root = PathBuf::from(std::env::var_os("PROTOGINE_NATIVE_ROOT").unwrap());
+    if case == "distance" {
+        let limits = ScriptLimits {
+            startup_timeout: Duration::from_secs(5),
+            ..ScriptLimits::default()
+        };
+        // SAFETY: Independently built, controlled distance-field example.
+        let mut runtime =
+            unsafe { GameRuntime::load_trusted(&root, None, limits, Some(0)) }.unwrap();
+        runtime.init().unwrap();
+        assert_eq!(
+            runtime.take_logs(),
+            ["distance parity and schema refusals passed"]
+        );
+        runtime.shutdown().unwrap();
+        return;
+    }
+    if let Some(case) = case.strip_prefix("batch-") {
+        batch_probe(&root, case);
+        return;
+    }
     if case == "registry" || case == "empty" {
         let manifest = GameManifest::load(&root).unwrap();
         // SAFETY: Independently compiled, controlled fixtures with valid pointer storage.
@@ -462,17 +500,359 @@ fn native_probe() {
 }
 
 #[test]
+fn distance_field_parity_and_schema() {
+    let fixtures = Fixtures::new();
+    let root = fixtures.directory.path().join("game");
+    fixtures.distance_bundle(&root);
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/distance.luau"),
+        root.join("main.luau"),
+    )
+    .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "native_probe", "--nocapture"])
+        .current_dir(fixtures.directory.path())
+        .env("PROTOGINE_NATIVE_CASE", "distance")
+        .env("PROTOGINE_NATIVE_ROOT", &root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    assert!(wait(&mut child).success());
+}
+
+#[test]
+#[cfg(feature = "player")]
+#[ignore = "requires graphics; runs the native distance example in a copied Player"]
+fn distance_player_capture() {
+    let fixtures = Fixtures::new();
+    let root = fixtures.directory.path().join("distribution");
+    fixtures.distance_bundle(&root.join("game"));
+    let executable = root.join("protogine-player.exe");
+    fs::copy(env!("CARGO_BIN_EXE_protogine-player"), &executable).unwrap();
+    let mut captures = Vec::new();
+    for index in 0..2 {
+        let capture = root.join(format!("distance-{index}.png"));
+        let stderr = root.join(format!("stderr-{index}.log"));
+        let mut child = Command::new(&executable)
+            .current_dir(fixtures.directory.path())
+            .env("PLAYER_CAPTURE", &capture)
+            .env("PLAYER_CAPTURE_FRAME", "2")
+            .env("PLAYER_WIDTH", "400")
+            .env("PLAYER_HEIGHT", "300")
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        assert!(
+            wait(&mut child).success(),
+            "{}",
+            fs::read_to_string(stderr).unwrap()
+        );
+        let pixels = image::open(&capture).unwrap().into_rgba8();
+        assert_eq!(pixels.dimensions(), (400, 300));
+        assert!((229..=230).contains(&pixels.get_pixel(15, 15).0[1]));
+        assert!((20..=21).contains(&pixels.get_pixel(169, 15).0[1]));
+        captures.push(fs::read(capture).unwrap());
+    }
+    assert_eq!(captures[0], captures[1]);
+}
+
+#[test]
+fn native_batch_contracts() {
+    let fixtures = Fixtures::new();
+    let runner = fixtures.directory.path().join("batch-probe.exe");
+    fs::copy(std::env::current_exe().unwrap(), &runner).unwrap();
+    let mut cases = Vec::new();
+    for mode in std::iter::once(0).chain(30..=50) {
+        let dll = fixtures.build(&format!("batch-{mode}"), mode, "org.example.a", &[]);
+        cases.push((mode.to_string(), dll));
+    }
+    let echo = fixtures.build("echo", 30, "org.example.a", &[]);
+    for case in [
+        "limits",
+        "transfer",
+        "calls",
+        "calls-invalid-types",
+        "calls-missing-args",
+        "logs",
+        "host",
+        "world",
+    ] {
+        cases.push((case.into(), echo.clone()));
+    }
+    cases.push((
+        "poison".into(),
+        fixtures.build("poison", 36, "org.example.a", &[]),
+    ));
+    for (case, dll) in cases {
+        let root = fixtures.directory.path().join(format!("game-{case}"));
+        bundle(&root, &dll, None);
+        let mut child = Command::new(&runner)
+            .args(["--exact", "native_probe", "--nocapture"])
+            .current_dir(fixtures.directory.path())
+            .env("PROTOGINE_NATIVE_CASE", format!("batch-{case}"))
+            .env("PROTOGINE_NATIVE_ROOT", &root)
+            .env("PROTOGINE_PLUGIN_TRACE", root.join("trace.log"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        assert!(wait(&mut child).success(), "batch {case}: {}", trace(&root));
+    }
+}
+
+fn batch_probe(root: &Path, case: &str) {
+    if matches!(case, "host" | "poison") {
+        let manifest = GameManifest::load(root).unwrap();
+        // SAFETY: Controlled C fixture; native calls are inside the watched child.
+        let mut plugins = unsafe { PluginSet::load_trusted(root, &manifest) }.unwrap();
+        if case == "poison" {
+            use protogine::plugins::CallError;
+            let first = plugins
+                .call("org.example.a", "example.batch", &[0], 1)
+                .unwrap_err();
+            assert!(matches!(first, CallError::Fault(_)));
+            let next = plugins
+                .call("org.example.a", "example.batch", &[0], 1)
+                .unwrap_err();
+            assert!(matches!(next, CallError::Fault(_)));
+            assert_eq!(first.to_string(), next.to_string());
+            plugins.shutdown().unwrap();
+            assert_eq!(trace(root).matches("call org.example.a\n").count(), 1);
+            assert_teardown(root, &["a"]);
+            return;
+        }
+        assert!(
+            plugins
+                .call("missing.plugin", "example.batch", &[], 0)
+                .is_err()
+        );
+        assert!(
+            plugins
+                .call("org.example.a", "missing.function", &[], 0)
+                .is_err()
+        );
+        assert!(
+            plugins
+                .call("org.example.a", "example.batch", &[], usize::MAX)
+                .is_err()
+        );
+        assert_eq!(
+            plugins
+                .call("org.example.a", "example.batch", &[0, 255], 2)
+                .unwrap(),
+            [255, 0]
+        );
+        plugins.shutdown().unwrap();
+        assert!(
+            plugins
+                .call("org.example.a", "example.batch", &[], 0)
+                .is_err()
+        );
+        assert_teardown(root, &["a"]);
+        return;
+    }
+    let common = r#"
+        local input = buffer.create(2)
+        buffer.writeu8(input, 0, 17); buffer.writeu8(input, 1, 42)
+        local output = buffer.create(4); buffer.fill(output, 0, 85)
+        local stale, entity
+        return {
+            init=function(ctx)
+                stale = ctx.native.call
+                local info = ctx.native.plugins['org.example.a']['example.batch']
+                assert(info.schema == 'example.empty' and info.schema_version == 1)
+                assert(not pcall(function() info.schema = 'bad' end))
+                assert(not pcall(ctx.native.call, 'unknown.plugin', 'example.batch', input, output))
+                assert(not pcall(ctx.native.call, 'org.example.a', 'unknown.function', input, output))
+                assert(not pcall(ctx.native.call, 'org.example.a', 'example.batch', 'bad', output))
+                entity = ctx.world.spawn(0, 0)
+            end,
+            update=function(ctx)
+                assert(not pcall(stale, 'org.example.a', 'example.batch', input, output))
+                local function call(a, b) return ctx.native.call('org.example.a', 'example.batch', a, b) end
+                BODY
+            end,
+            draw=function(ctx)
+                assert(not pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output))
+            end,
+            shutdown=function(ctx)
+                assert(not pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output))
+                ctx.log('shutdown once')
+            end,
+        }
+    "#;
+    let body = match case {
+        "30" => {
+            r#"
+            ctx.log('before')
+            assert(call(input, output) == 2)
+            ctx.log('after')
+            assert(buffer.readu8(output,0) == 238 and buffer.readu8(output,1) == 213)
+            assert(buffer.readu8(output,2) == 85 and buffer.readu8(output,3) == 85)
+            assert(buffer.readu8(input,0) == 17)
+            assert(call(input, input) == 2 and buffer.readu8(input,0) == 238)
+            assert(call(buffer.create(0), buffer.create(0)) == 0)
+            assert(not pcall(call, input, buffer.create(0)))
+        "#
+        }
+        "0" => "assert(call(input, output) == 0); assert(buffer.readu8(output,0) == 85)",
+        "limits" => "pcall(call, buffer.create(16*1024*1024), buffer.create(1))",
+        "transfer" => {
+            "local a, b = buffer.create(8*1024*1024), buffer.create(8*1024*1024); for i=1,4 do assert(call(a,b) == buffer.len(a)); assert(buffer.readu8(b,0) == 255) end; pcall(call,a,b)"
+        }
+        "calls" => {
+            "local a=buffer.create(0); for i=1,128 do assert(call(a,a) == 0) end; pcall(call,a,a)"
+        }
+        "calls-invalid-types" => {
+            "for i=1,128 do assert(not pcall(call,'bad',output)) end; ctx.log('128 rejected calls'); pcall(call,'bad',output)"
+        }
+        "calls-missing-args" => {
+            "for i=1,128 do assert(not pcall(ctx.native.call)) end; ctx.log('128 rejected calls'); pcall(ctx.native.call)"
+        }
+        "logs" => {
+            "local line=string.rep('x',4000); for i=1,16 do ctx.log(line) end; for i=1,100 do pcall(call,input,output) end"
+        }
+        "world" => {
+            "assert(call(input,output) == 2); ctx.world.set_velocity(entity, buffer.readu8(output,0), 0)"
+        }
+        "44" => {
+            r#"
+            local ok = pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output)
+            if ok then ctx.log('delivered') end
+            if buffer.tostring(output) ~= string.rep(string.char(85),4) then
+                ctx.log('output changed')
+            end
+        "#
+        }
+        _ => {
+            r#"
+            local ok = pcall(call, input, output)
+            assert(not ok)
+            assert(buffer.tostring(output) == string.rep(string.char(85),4))
+            ctx.log('output preserved')
+        "#
+        }
+    };
+    fs::write(root.join("main.luau"), common.replace("BODY", body)).unwrap();
+    // Non-timeout cases should test their specific budgets on slow/debug hosts.
+    let limits = ScriptLimits {
+        callback_timeout: if case == "44" {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(5)
+        },
+        ..ScriptLimits::default()
+    };
+    // SAFETY: Same controlled fixtures and subprocess boundary as the loader tests.
+    let mut runtime = unsafe { GameRuntime::load_trusted(root, None, limits, Some(0)) }.unwrap();
+    runtime.init().unwrap();
+    let result = runtime.step(InputSnapshot::default());
+    let logs = runtime.take_logs();
+    let fatal = matches!(
+        case,
+        "limits" | "transfer" | "calls" | "calls-invalid-types" | "calls-missing-args" | "logs"
+    ) || case
+        .parse::<u32>()
+        .is_ok_and(|n| (33..=47).contains(&n) || n == 50);
+    if fatal {
+        let error = result.unwrap_err();
+        assert_eq!(runtime.state(), ScriptState::Faulted);
+        assert_eq!(runtime.completed_ticks(), 0);
+        assert!(runtime.step(InputSnapshot::default()).is_err());
+        let expected = match case {
+            "limits" | "calls" | "calls-invalid-types" | "calls-missing-args" => {
+                "native call/buffer limit"
+            }
+            "transfer" => "native transfer limit",
+            "logs" => "script log limit",
+            "33" | "34" | "35" => "status",
+            "36" | "37" | "38" | "39" | "47" => "output pointer/capacity/length",
+            "40" | "41" | "46" => "diagnostic pointer/capacity/length",
+            "42" => "UTF-8",
+            "43" => "native log limit",
+            "44" => "deadline",
+            "45" => "runtime thread",
+            "50" => "log level",
+            _ => unreachable!(),
+        };
+        assert!(error.message.contains(expected), "{case}: {error}");
+        if matches!(case, "calls-invalid-types" | "calls-missing-args") {
+            assert!(logs.iter().any(|s| s == "128 rejected calls"));
+            assert_eq!(trace(root).matches("call org.example.a\n").count(), 0);
+        }
+        if case == "44" {
+            assert!(
+                !logs
+                    .iter()
+                    .any(|s| s == "delivered" || s == "output changed")
+            );
+        }
+    } else {
+        result.unwrap();
+        assert_eq!(runtime.completed_ticks(), 1);
+        if case == "world" {
+            assert_eq!(
+                runtime.kernel().snapshot().unwrap()[0].position.x,
+                238.0 / 60.0
+            );
+        }
+        if case == "30" {
+            assert_eq!(
+                &logs[..3],
+                ["before", "[org.example.a] info: batch", "after"]
+            );
+        }
+        if matches!(case, "31" | "32" | "48" | "49") {
+            assert!(logs.iter().any(|s| s == "output preserved"));
+        }
+        runtime.draw(0.0).unwrap();
+        runtime.shutdown().unwrap();
+        assert_eq!(
+            runtime.take_logs(),
+            ["shutdown once", "[org.example.a] info: shutdown"]
+        );
+    }
+    runtime.shutdown().unwrap();
+    assert_teardown(root, &["a"]);
+    if case.parse::<u32>().is_ok_and(|n| (31..=50).contains(&n)) {
+        assert_eq!(
+            trace(root).matches("call org.example.a\n").count(),
+            1,
+            "no retry or later native call"
+        );
+    }
+    if matches!(case, "0" | "30" | "world") {
+        assert_eq!(
+            trace(root).matches("call org.example.a\n").count(),
+            if case == "30" { 4 } else { 1 }
+        );
+    }
+}
+
+#[test]
 #[cfg(feature = "player")]
 #[ignore = "requires a graphics context; launches copied Players with C plugins"]
 fn native_player_capture() {
     let fixtures = Fixtures::new();
     let a = fixtures.build("a", 0, "org.example.a", &[]);
     let bad = fixtures.build("bad", 5, "org.example.a", &[]);
+    let bad_call = fixtures.build("bad-call", 36, "org.example.a", &[]);
     let root = fixtures.directory.path().join("exported");
-    for (name, dll, expected) in [("normal", &a, 0), ("failed-init", &bad, 3)] {
+    for (name, dll, expected) in [
+        ("normal", &a, 0),
+        ("failed-init", &bad, 3),
+        ("failed-call", &bad_call, 3),
+    ] {
         let distribution = root.join(name);
         let game = distribution.join("game");
         bundle(&game, dll, None);
+        if name == "failed-call" {
+            fs::write(game.join("main.luau"), r#"return { update=function(ctx)
+                pcall(ctx.native.call, 'org.example.a', 'example.batch', buffer.create(1), buffer.create(1))
+            end }"#).unwrap();
+        }
         let executable = distribution.join("protogine-player.exe");
         fs::copy(env!("CARGO_BIN_EXE_protogine-player"), &executable).unwrap();
         let capture = distribution.join("capture.png");
@@ -500,12 +880,17 @@ fn native_player_capture() {
             assert_teardown(&game, &["a"]);
         } else {
             let text = fs::read_to_string(stderr).unwrap();
+            let (phase, diagnostic, initialized): (&str, &str, &[&str]) = if name == "failed-call" {
+                ("update", "output pointer/capacity/length", &["a"])
+            } else {
+                ("plugins.load", "init failed", &[])
+            };
             assert!(
-                text.contains("Game error: plugins.load:") && text.contains("init failed"),
+                text.contains(&format!("Game error: {phase}:")) && text.contains(diagnostic),
                 "{text}"
             );
             assert!(pixels.pixels().any(|p| p.0[0] != 0));
-            assert_teardown(&game, &[]);
+            assert_teardown(&game, initialized);
         }
     }
 }
