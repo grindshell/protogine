@@ -14,26 +14,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("too many arguments".into());
     }
     let root = std::fs::canonicalize(root)?;
-    let mut host = if let Some(data) = data {
+    let data = if let Some(data) = data {
         std::fs::create_dir_all(&data)?;
-        GameRuntime::load_with_data_root(
-            &root,
-            &std::fs::canonicalize(data)?,
-            ScriptLimits::default(),
-        )?
+        Some(std::fs::canonicalize(data)?)
     } else {
-        GameRuntime::load(&root, ScriptLimits::default())?
+        None
     };
-    host.init()?;
+    #[cfg(feature = "native-plugins")]
+    // SAFETY: This development CLI runs the explicitly selected, trusted bundle
+    // and its declared plugins. It is not a native-code sandbox.
+    let mut host = unsafe {
+        GameRuntime::load_trusted(&root, data.as_deref(), ScriptLimits::default(), None)
+    }?;
+    #[cfg(not(feature = "native-plugins"))]
+    let mut host = match data {
+        Some(data) => GameRuntime::load_with_data_root(&root, &data, ScriptLimits::default())?,
+        None => GameRuntime::load(&root, ScriptLimits::default())?,
+    };
+    let result = host.init();
     print_logs(&mut host);
+    result?;
     for _ in 0..3 {
-        host.step(InputSnapshot::default())?;
+        let result = host.step(InputSnapshot::default());
         print_logs(&mut host);
-        host.draw(0.0)?;
+        result?;
+        let result = host.draw(0.0);
         print_logs(&mut host);
+        result?;
     }
-    host.shutdown()?;
+    let result = host.shutdown();
     print_logs(&mut host);
+    result?;
     Ok(())
 }
 

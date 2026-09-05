@@ -9,6 +9,8 @@ Press Escape or close the window to quit. The startup screen needs no external
 fonts, images, audio, or game files.
 The shared library also provides a headless Luau runtime with an entity kernel,
 fixed updates, input handling, and script data/filesystem utilities.
+Trusted C plugins can initialize and shut down alongside the runtime; their
+Luau-callable batch interface is the next implementation phase.
 
 ## Run and build
 
@@ -71,7 +73,7 @@ interruption, `2` for invalid environment configuration, and `3` for game loadin
 or runtime faults. A game fault shows **Game error** and retains code `3` even
 when its diagnostic screenshot is saved or the PNG write also fails. Shutdown
 runs before saving the final PNG; shutdown errors receive the same treatment.
-Errors and script logs go to stderr. Unset the
+Errors and script/native logs go to stderr. Unset the
 capture variables to return to interactive mode. On Windows, `cargo run` waits
 for the Player; scripts launching the release GUI executable directly should use
 a process API that waits and collects its exit code.
@@ -80,7 +82,8 @@ Game capture seeds Luau's `math.random` with `0` before loading any module, uses
 neutral input, and performs exactly one fixed tick followed by draw(alpha=0)
 per render frame. Capture frame N observes N completed ticks after init.
 Startup screens run no simulation. The sample's state and PNG bytes repeat on
-the tested graphics stack. Script reseeding, changing external files, or changing
+the tested graphics stack. Native plugin state is not seeded by capture mode.
+Script reseeding, changing external files, or changing
 gameplay upvalues in draw can affect reproducibility; identical pixels across
 platforms/drivers are not guaranteed. Interactive play uses the VM's default RNG
 initialization. Headless tools can use `GameRuntime::load_seeded(root, limits, seed)`
@@ -116,8 +119,84 @@ A detected entry point loads a new runtime and calls init once. Each interactive
 frame samples input, advances fixed simulation ticks, then draws. Normal exit
 runs shutdown once; faults stop callbacks and show **Game error**, with the phase
 and available source traceback on stderr. Restart the Player to reload source.
-The optional `game.tot` manifest schema, archive formats, export tooling, audio,
-native plugins, and the editor remain future work.
+An optional `game.tot` declares required native plugins, described below. Archive
+formats, export tooling, audio, native batch invocation, and the editor remain
+future work.
+
+## Native plugins
+
+Native loading currently supports `x86_64-pc-windows-msvc`. The Player enables
+`native-plugins` and treats its shipped libraries and dependencies as trusted
+executable code. Plugins are declared explicitly; there is no DLL scanning or
+hot reload. Omit `game.tot` for a script-only game, or use this versioned tot file:
+
+```text
+version 1
+plugins [
+    {id "org.protogine.lifecycle" library "plugins/lifecycle.dll"}
+]
+```
+
+All entries are required and initialize in manifest order. A present manifest
+requires integer `version 1`; unknown fields, unsupported versions, malformed
+entries and duplicate IDs/library paths fail startup. Source is limited to 64 KiB
+and 16 plugins. IDs have at least two dot-separated segments, each beginning with
+a lowercase ASCII letter and continuing with lowercase letters, digits or `_`,
+up to 128 bytes. Library paths are relative to the game directory, use `/`, end
+in `.dll`, and are at most 1024 UTF-8 bytes. Traversal, Windows device names,
+invalid path characters, symlinks and reparse points below the root are rejected.
+Keep bundle files and dependencies stable while the runtime is using them.
+
+The loader resolves all primary paths, then loads and validates every descriptor
+before initializing any plugin. Dependency lookup uses the primary DLL's own
+directory and System32; the working directory, executable directory and PATH
+are excluded. Windows can still reuse an already loaded module by basename,
+so use unique private dependency names.
+
+The dependency-free [Rust SDK](sdk/src/lib.rs) defines ABI 1. Its generated
+[C header](include/protogine_plugin.h) is sufficient for C authors; no engine or
+Luau headers are needed. Export `protogine_plugin_query` with `PG_PLUGIN_EXPORT`.
+It negotiates exact ABI/descriptor sizes and returns init/shutdown callbacks and
+up to 64 immutable function declarations. IDs, schema IDs/versions, required
+callbacks, table sizes and zero reserved fields are checked. Batch signatures
+are defined and declarations are validated, but invocation from Luau is Phase 5.
+
+Host services currently provide bounded UTF-8 logging: info/warn/error, 4 KiB per
+message and 64 KiB per native call. Diagnostics use a 1024-byte host-owned buffer.
+The header documents pointer lifetimes, instance ownership and status values.
+Calls are synchronous on the runtime thread; no host pointers may be retained
+and workers must finish before return. Rust plugin shims can use `catch_status`
+to translate unwind panics. Native code is not sandboxed or preempted: invalid
+pointers, process crashes, foreign exceptions and hangs remain plugin faults
+that an in-process ABI cannot contain.
+
+Successful init transfers a non-null instance to the host; failed init cleans up
+its own allocations and publishes null. On normal exit the runtime calls Luau
+shutdown once, destroys the VM, shuts down native instances in reverse order,
+then unloads libraries. Script faults skip further Luau callbacks but still clean
+up native instances. Cleanup continues after native errors, preserving an earlier
+fault. Dropping a runtime destroys the VM and cleans up native instances without
+implicitly calling Luau shutdown. Plugin shutdown consumes its instance even on
+an error return. Startup/shutdown errors use Player exit code 3.
+
+For Rust embedders, safe `GameRuntime::load` variants reject native declarations.
+The unsafe `GameRuntime::load_trusted(root, data_root, limits, seed)` explicitly
+accepts native execution and ABI safety obligations. `data_root` and `seed` are
+optional. The lower-level `ScriptHost` is a VM utility and does not load plugins.
+
+Build the [lifecycle plugin](examples/plugins/lifecycle.c) using Clang and the
+MSVC/Windows SDK, then run its copied game with the headless host:
+
+```powershell
+New-Item -ItemType Directory -Force target/native-demo/game/plugins | Out-Null
+Copy-Item examples/games/native_lifecycle/* target/native-demo/game/
+clang --target=x86_64-pc-windows-msvc -std=c11 -shared -Werror -I include examples/plugins/lifecycle.c -o target/native-demo/game/plugins/lifecycle.dll
+cargo run --example script_host --no-default-features --features scripting,native-plugins -- target/native-demo/game
+```
+
+To run the same game visually, copy `target/release/protogine-player.exe` into
+`target/native-demo/` and launch it there. The example logs native init before
+Luau init, then Luau shutdown before native shutdown.
 
 ## Headless scripting
 
@@ -332,8 +411,14 @@ version without overwriting the existing data. There is no engine save lifecycle
   and fixed-step execution; `src/scripting/world.rs` supplies scoped bindings.
 - `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and `utilities.rs`
   implement scoped data/I/O services and their shared callback limits.
-- The default `player` Cargo feature enables graphics and scripting. The shared
-  library can be built and tested without graphics dependencies.
+- `src/manifest.rs` validates tot declarations; `src/plugins.rs` owns native
+  loading, foreign calls, descriptor validation and teardown.
+- The workspace contains the engine, dependency-free `sdk`, and the separate
+  `tools/headergen` development utility pinned to cbindgen 0.29.2. Regenerate with
+  `cargo run -p protogine-headergen`; normal Player builds do not run codegen.
+  `.gitattributes` keeps the generated header in LF form for exact-byte checks.
+- The default `player` Cargo feature enables graphics, scripting and native
+  plugins. The shared library can be built without graphics or native loading.
 
 ```text
 cargo fmt --all -- --check
@@ -345,7 +430,20 @@ cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
+cargo check --no-default-features --features native-plugins
+cargo test --no-default-features --features scripting,native-plugins --test plugins --test manifest
+cargo test --release --no-default-features --features scripting,native-plugins --test plugins --test manifest
+cargo test --release -p protogine-plugin-api
+cargo run -p protogine-headergen -- --check
 ```
+
+On the supported Windows native target, the `plugins` suite requires `clang`
+(or a compiler path in `CLANG`) and the MSVC/Windows SDK. It compiles independent
+C DLLs against a copied header, asserts C/Rust layout agreement, and runs native
+loads/callbacks in child processes with an independent 15-second watchdog.
+It covers refusal cases, dependency decoys, initialization order, script faults,
+partial rollback and reverse teardown. Run `cargo test --test plugins -- --ignored`
+with a graphics context to verify copied Player startup/fault captures with DLLs.
 
 On Windows with PowerShell 7 and a working desktop/graphics context, run the
 repeatable [input/shutdown probe](tests/player_input.ps1):

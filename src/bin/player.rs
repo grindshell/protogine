@@ -120,10 +120,15 @@ impl PlayerSession {
                 });
             }
             Ok(Some(bundle)) => {
-                let loaded = if capturing {
-                    GameRuntime::load_seeded(bundle.root(), ScriptLimits::default(), 0)
-                } else {
-                    GameRuntime::load(bundle.root(), ScriptLimits::default())
+                // SAFETY: The shipped bundle and explicitly declared native plugins
+                // are trusted application code. The Player supplies no DLL sandbox.
+                let loaded = unsafe {
+                    GameRuntime::load_trusted(
+                        bundle.root(),
+                        None,
+                        ScriptLimits::default(),
+                        capturing.then_some(0),
+                    )
                 };
                 match loaded {
                     Ok(runtime) => {
@@ -139,7 +144,7 @@ impl PlayerSession {
 
     fn fault(&mut self, error: ScriptError) {
         eprintln!("Game error: {error}");
-        self.runtime = None; // Drop never runs game code after a fault.
+        self.runtime = None; // Fault cleanup finished; no further Luau callbacks.
         self.faulted = true;
         self.screen = Some(StartupScreen {
             title: "Game error",

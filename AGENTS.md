@@ -14,10 +14,11 @@ for performance-sensitive work.
 
 ## Current repository
 
-The repository contains a single Cargo package, `protogine` version `0.1.0`, using
-Rust edition `2024`. The minimal `protogine-player` binary opens a Macroquad
-window with a "Missing game data" fallback. Its default `player` feature enables
-graphics and scripting; the shared library also builds with `--no-default-features`.
+The Cargo workspace contains `protogine` version `0.1.0` (Rust edition `2024`),
+the dependency-free `protogine-plugin-api` SDK, and the separate header generator.
+The `protogine-player` binary opens a Macroquad window with a "Missing game data"
+fallback. Its default `player` feature enables graphics, scripting and native
+plugins; the shared library also builds with `--no-default-features`.
 
 - [Shared library](src/lib.rs) and [bundle discovery](src/bundle.rs): look for a
   readable `game/main.luau` beside the executable, independent of the working
@@ -48,7 +49,11 @@ The [drawing API](src/drawing.rs) exposes owned clear/rectangle commands, shared
 by headless tools and the Player. The [tile sample](examples/games/tiles/main.luau)
 runs from copied source beside the Player. Capture mode seeds the VM before
 module loading and steps once per frame with neutral input and alpha 0.
-Kira audio, native plugins, the editor, and export tooling remain unimplemented.
+The optional [manifest](src/manifest.rs) and [native loader](src/plugins.rs) add
+trusted C plugin startup/cleanup before/after the VM. The [SDK](sdk/src/lib.rs)
+generates [the C header](include/protogine_plugin.h) with the separate
+[headergen tool](tools/headergen/src/main.rs). Kira audio, Luau/native batch
+invocation, the editor, and export tooling remain unimplemented.
 
 The proposed next architecture and execution phases are in
 [SCRIPTING_C_API_PLAN.md](SCRIPTING_C_API_PLAN.md). D1-D8 are accepted and initial
@@ -97,9 +102,9 @@ language runtime. See the [mlua feature documentation](https://github.com/mlua-r
 
 Keep dependencies directed toward the shared kernel; the kernel must not depend
 on the editor. Use shared code rather than maintaining separate editor and player
-implementations of gameplay. The initial layout is one package with a shared
-library and a feature-gated Player binary. Further crate/module splits remain
-open; introduce only the structure needed for the current implementation slice.
+implementations of gameplay. The engine package has a shared library and a
+feature-gated Player binary; SDK definitions and development-only header generation
+are separate workspace members. Introduce further splits only as needed.
 
 Keep tile coordinates and world/pixel coordinates explicit. Prefer simple map
 storage where appropriate; using an ECS does not require every static tile to be
@@ -123,7 +128,8 @@ behavior that depends on them.
   rather than relying on the process working directory.
 - The headless host validates init/update/draw/shutdown callbacks and expires
   scoped context functions after every call. Faults stop the session; drop never
-  runs game code. Restart creates a new host/VM. Source, import, logging, and VM
+  invokes Luau callbacks, but does release native instances. Restart creates a new
+  host/VM. Source, import, logging, and VM
   heap limits are documented in the README and implementation record.
 - VM cancellation uses mlua's protected panic propagation with
   `catch_rust_panics(false)` and a host-owned cancellation payload. Keep
@@ -163,19 +169,54 @@ Provide a C-compatible API/ABI for loading native shared libraries at runtime.
 Do not expose Rust's native ABI, references, collections, or internal `hecs` and
 `mlua` objects across this boundary.
 
-When implementing it, use `extern "C"` entry points, `#[repr(C)]` data where
+Use `extern "C"` entry points, `#[repr(C)]` data where
 needed, opaque handles, and explicit API version negotiation. Document ownership,
 allocation/freeing, error reporting, callback lifetime, and thread affinity.
 Keep unsafe code localized with safety invariants; prevent Rust panics from
 unwinding across C calls. Keep libraries loaded while their code or data remains
 reachable. Hot unloading/reloading is not an established requirement.
 
-Use `libloading` 0.9.0. The accepted first native target to verify is
-`x86_64-pc-windows-msvc`; additional targets, exported symbols, and ABI
-compatibility rules remain to be finalized in the scripting plan. The accepted
-first scope is synchronous Luau-callable batch computation: buffers carry
-inputs/results. Keep engine command buffers as a future option; scheduling and
-mutation timing are separate contracts. Treat native plugins as trusted code.
+Use `libloading` 0.9.0. ABI 1 currently supports `x86_64-pc-windows-msvc` with
+exact C layout/table sizes and one `protogine_plugin_query` export. The immutable
+declarations specify IDs, schema IDs/versions and batch signatures; Phase 5 adds
+actual invocation and Luau buffers. Keep engine command buffers as a future
+option; scheduling and mutation timing are separate contracts.
+
+- `game.tot` is optional; present files require integer `version 1` and an optional
+  ordered `plugins` array of `{id "org.example.name" library "plugins/name.dll"}`.
+  Reject unknown fields, duplicate IDs/primary paths, unsupported versions and
+  invalid paths. Every declaration is required. Limits: 64 KiB manifest, 16 plugins,
+  64 functions/plugin, 128-byte dotted lowercase IDs, 1024-byte relative DLL paths.
+- Resolve every primary path before any load, and query/validate every library
+  before init. Primary paths reject symlinks/reparse points below the canonical
+  bundle root. Windows searches adjacent dependencies and System32 only; loaded
+  module basename reuse still requires unique private dependency names. Keep
+  bundle/dependency files stable; this is trusted execution, not a native sandbox.
+- Safe `GameRuntime::load` variants reject native declarations. Unsafe
+  `load_trusted(root, data_root, limits, seed)` accepts the ABI/trust obligations.
+  Player and the native-enabled headless example opt into trusted loading.
+  Standalone `ScriptHost` is VM-only and does not load native declarations.
+- Initialize in manifest order before VM creation. Failed init cleans up itself
+  and publishes null; successful init publishes a non-null plugin-owned instance.
+  On stop/fault/drop, destroy all VM references before reverse native teardown.
+  Only normal stop invokes Luau shutdown; faults/drop skip it. All libraries stay
+  loaded until every initialized instance has received shutdown, including on
+  partial startup failure. Shutdown consumes the instance on every return status.
+  Continue after cleanup errors and preserve the primary fault.
+- Host pointers/logging are scoped to synchronous calls on the runtime thread.
+  Workers must join before return. Diagnostics use 1024 host-owned UTF-8 bytes;
+  pointer/capacity cannot change. Logging is capped at 4 KiB/message and 64 KiB/call;
+  contract faults latch even if foreign code ignores a status. Prevent unwind
+  across extern C boundaries with the SDK's `catch_status` shim. Memory corruption,
+  aborts, foreign exceptions and native hangs cannot be contained in process.
+  Guard panic-payload disposal too; if disposal panics, intentionally forget the
+  secondary payload so another destructor cannot unwind through the C boundary.
+- Edit SDK definitions, then regenerate with `cargo run -p protogine-headergen`.
+  cbindgen 0.29.2 is pinned in the development tool; the checked-in C header is a
+  generated artifact and normal engine builds do not run generation. The tool
+  decorates the generated extern prototype with the Windows export macro.
+  `.gitattributes` pins the generated header to LF for exact-byte drift checks,
+  including Windows checkouts with `core.autocrlf=true`.
 
 ## Working in this repository
 
@@ -206,6 +247,26 @@ mutation timing are separate contracts. Treat native plugins as trusted code.
   cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
   cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
   ```
+
+  Native/SDK changes also require:
+
+  ```text
+  cargo check --no-default-features --features native-plugins
+  cargo test --no-default-features --features scripting,native-plugins --test plugins --test manifest
+  cargo test --release --no-default-features --features scripting,native-plugins --test plugins --test manifest
+  cargo test --release -p protogine-plugin-api
+  cargo run -p protogine-headergen -- --check
+  cargo test --test plugins -- --ignored
+  ```
+
+  The supported Windows `plugins` tests require `clang` (or a compiler path in
+  `CLANG`) plus the MSVC/Windows SDK. C fixtures compile using only the generated
+  header and platform headers. Native execution runs in subprocesses with an
+  independent 15-second watchdog; preserve that timeout when adding fault cases.
+  The ignored native Player test requires a graphics context. See the README for
+  the independently compiled lifecycle example and dependency lookup policy.
+  The SDK's `panic_boundary` suite runs C entry points in child processes with a
+  10-second watchdog; it covers ordinary and recursively panicking payload cleanup.
 
   `scripting_feasibility` runs potentially runaway fixtures in child processes
   with a 10-second watchdog. Keep that outer timeout independent of the VM.

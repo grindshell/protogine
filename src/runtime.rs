@@ -4,6 +4,7 @@ use crate::{
     drawing::DrawCommand,
     input::{InputQueue, InputSnapshot},
     kernel::{FIXED_DT, Kernel},
+    manifest::GameManifest,
     scripting::{EngineContext, ScriptError, ScriptHost, ScriptLimits, ScriptState},
 };
 use std::path::Path;
@@ -16,6 +17,7 @@ const TICK_ROUNDING_TOLERANCE: f64 = 1e-12;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameReport {
+    /// Completed update and system passes, excluding a callback that stops early.
     pub ticks: u32,
     pub dropped_ticks: u32,
     pub clamped_seconds: f64,
@@ -23,7 +25,10 @@ pub struct FrameReport {
 }
 
 pub struct GameRuntime {
-    scripts: ScriptHost,
+    // Field order also guarantees VM destruction before native teardown on Drop.
+    scripts: Option<ScriptHost>,
+    state: ScriptState,
+    last_error: Option<ScriptError>,
     kernel: Kernel,
     input: InputQueue,
     draw_input: InputSnapshot,
@@ -32,15 +37,17 @@ pub struct GameRuntime {
     completed_ticks: u64,
     overloads: u64,
     logs: Vec<String>,
+    #[cfg(feature = "native-plugins")]
+    plugins: Option<crate::plugins::PluginSet>,
 }
 
 impl GameRuntime {
     pub fn load(root: &Path, limits: ScriptLimits) -> Result<Self, ScriptError> {
-        Ok(Self::new(ScriptHost::load(root, limits)?))
+        Self::load_inner(root, None, limits, None, false)
     }
 
     pub fn load_seeded(root: &Path, limits: ScriptLimits, seed: i32) -> Result<Self, ScriptError> {
-        Ok(Self::new(ScriptHost::load_seeded(root, limits, seed)?))
+        Self::load_inner(root, None, limits, Some(seed), false)
     }
 
     pub fn load_with_data_root(
@@ -48,14 +55,75 @@ impl GameRuntime {
         data_root: &Path,
         limits: ScriptLimits,
     ) -> Result<Self, ScriptError> {
-        Ok(Self::new(ScriptHost::load_with_data_root(
-            root, data_root, limits,
-        )?))
+        Self::load_inner(root, Some(data_root), limits, None, false)
     }
 
-    fn new(scripts: ScriptHost) -> Self {
-        Self {
-            scripts,
+    /// Load a shipped bundle, including its explicitly declared native plugins.
+    ///
+    /// # Safety
+    /// Libraries and their dependencies must be trusted and obey the SDK's ABI,
+    /// pointer, lifetime, thread and unwind contracts for the entire session.
+    /// Keep bundle/dependency files stable. See PluginSet::load_trusted.
+    #[cfg(feature = "native-plugins")]
+    pub unsafe fn load_trusted(
+        root: &Path,
+        data_root: Option<&Path>,
+        limits: ScriptLimits,
+        seed: Option<i32>,
+    ) -> Result<Self, ScriptError> {
+        Self::load_inner(root, data_root, limits, seed, true)
+    }
+
+    fn load_inner(
+        root: &Path,
+        data_root: Option<&Path>,
+        limits: ScriptLimits,
+        seed: Option<i32>,
+        trusted: bool,
+    ) -> Result<Self, ScriptError> {
+        let manifest = GameManifest::load(root).map_err(|e| ScriptError {
+            phase: "load",
+            message: e.to_string(),
+        })?;
+        if !manifest.plugins.is_empty() && !trusted {
+            return Err(ScriptError { phase: "load", message: "native plugin declarations require the native-plugins feature and explicit load_trusted".into() });
+        }
+        #[cfg(feature = "native-plugins")]
+        let mut plugins = if trusted {
+            // SAFETY: Only the unsafe public entry sets trusted=true; it accepts
+            // all native execution obligations through teardown.
+            Some(
+                unsafe { crate::plugins::PluginSet::load_trusted(root, &manifest) }.map_err(
+                    |e| ScriptError {
+                        phase: "plugins.load",
+                        message: e.to_string(),
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
+        let scripts = match ScriptHost::load_with_roots(root, data_root, limits, seed) {
+            Ok(scripts) => scripts,
+            Err(mut failure) => {
+                #[cfg(feature = "native-plugins")]
+                if let Some(plugins) = &mut plugins {
+                    if let Err(cleanup) = plugins.shutdown() {
+                        failure.message.push_str(&format!("\ncleanup: {cleanup}"));
+                    }
+                    for log in plugins.take_logs() {
+                        failure.message.push_str(&format!("\n{log}"));
+                    }
+                }
+                // `mut` is needed only when native loading is compiled in.
+                let _ = &mut failure;
+                return Err(failure);
+            }
+        };
+        Ok(Self {
+            scripts: Some(scripts),
+            state: ScriptState::Loaded,
+            last_error: None,
             kernel: Kernel::new(),
             input: InputQueue::default(),
             draw_input: InputSnapshot::default(),
@@ -63,40 +131,53 @@ impl GameRuntime {
             completed_ticks: 0,
             overloads: 0,
             logs: Vec::new(),
-        }
+            #[cfg(feature = "native-plugins")]
+            plugins,
+        })
     }
 
     pub fn state(&self) -> ScriptState {
-        self.scripts.state()
+        self.state
     }
+
     pub fn last_error(&self) -> Option<&ScriptError> {
-        self.scripts.last_error()
+        self.last_error.as_ref()
     }
+
     pub fn kernel(&self) -> &Kernel {
         &self.kernel
     }
+
     pub fn draw_commands(&self) -> &[DrawCommand] {
-        self.scripts.draw_commands()
+        self.scripts.as_ref().map_or(&[], ScriptHost::draw_commands)
     }
+
     pub fn completed_ticks(&self) -> u64 {
         self.completed_ticks
     }
+
     pub fn overloads(&self) -> u64 {
         self.overloads
     }
 
     /// Logs from the last public lifecycle call or frame, in callback order.
-    /// At most six callback log budgets per frame; replaced on the next call.
+    /// At most six script callback budgets per frame, plus bounded native
+    /// startup/cleanup logs when applicable. Replaced on the next call.
     pub fn take_logs(&mut self) -> Vec<String> {
         std::mem::take(&mut self.logs)
     }
 
     pub fn init(&mut self) -> Result<(), ScriptError> {
+        self.require_state("init", ScriptState::Loaded)?;
         self.logs.clear();
-        let result = self.scripts.init_in(Some(EngineContext::new(
-            &mut self.kernel,
-            InputSnapshot::default(),
-        )));
+        let result = self
+            .scripts
+            .as_mut()
+            .unwrap()
+            .init_in(Some(EngineContext::new(
+                &mut self.kernel,
+                InputSnapshot::default(),
+            )));
         self.finish_call(result)
     }
 
@@ -109,6 +190,7 @@ impl GameRuntime {
     }
 
     pub fn draw(&mut self, alpha: f64) -> Result<(), ScriptError> {
+        self.require_running("draw")?;
         self.logs.clear();
         self.draw_callback(alpha)
     }
@@ -138,8 +220,8 @@ impl GameRuntime {
         let due = self.accumulator.floor() as u32;
         self.accumulator -= f64::from(due);
         let ticks = due.min(MAX_FRAME_TICKS);
-        let report = FrameReport {
-            ticks,
+        let mut report = FrameReport {
+            ticks: 0,
             dropped_ticks: due - ticks,
             clamped_seconds: elapsed_seconds - clamped,
             alpha: self.accumulator,
@@ -149,6 +231,10 @@ impl GameRuntime {
         }
         for _ in 0..ticks {
             self.tick()?;
+            if self.state != ScriptState::Running {
+                return Ok(report);
+            }
+            report.ticks += 1;
         }
         self.draw_callback(report.alpha)?;
         Ok(report)
@@ -156,29 +242,56 @@ impl GameRuntime {
 
     pub fn shutdown(&mut self) -> Result<(), ScriptError> {
         self.logs.clear();
-        let result = self.scripts.shutdown_in(Some(EngineContext::new(
-            &mut self.kernel,
-            InputSnapshot::default(),
-        )));
+        if self.scripts.is_none() {
+            return Ok(());
+        }
+        let result = self
+            .scripts
+            .as_mut()
+            .unwrap()
+            .shutdown_in(Some(EngineContext::new(
+                &mut self.kernel,
+                InputSnapshot::default(),
+            )));
         self.finish_call(result)
     }
 
     fn tick(&mut self) -> Result<(), ScriptError> {
+        if self.state != ScriptState::Running {
+            return Ok(());
+        }
         let input = self.input.consume();
         let result = self
             .scripts
+            .as_mut()
+            .unwrap()
             .update_in(Some(EngineContext::new(&mut self.kernel, input)));
+        self.finish_tick(result)
+    }
+
+    fn finish_tick(&mut self, result: Result<(), ScriptError>) -> Result<(), ScriptError> {
         self.finish_call(result)?;
+        // A successful callback may still stop the session and release the VM.
+        if self.state != ScriptState::Running {
+            return Ok(());
+        }
         if let Err(error) = self.kernel.fixed_update() {
-            self.kernel.stop();
-            return Err(self.scripts.fault("systems", error.to_string()));
+            let error = self
+                .scripts
+                .as_mut()
+                .unwrap()
+                .fault("systems", error.to_string());
+            return self.finish_call(Err(error));
         }
         self.completed_ticks = self.completed_ticks.saturating_add(1);
         Ok(())
     }
 
     fn draw_callback(&mut self, alpha: f64) -> Result<(), ScriptError> {
-        let result = self.scripts.draw_in(
+        if self.state != ScriptState::Running {
+            return Ok(());
+        }
+        let result = self.scripts.as_mut().unwrap().draw_in(
             alpha,
             Some(EngineContext::new(&mut self.kernel, self.draw_input)),
         );
@@ -186,21 +299,85 @@ impl GameRuntime {
     }
 
     fn finish_call(&mut self, result: Result<(), ScriptError>) -> Result<(), ScriptError> {
-        self.logs.extend(self.scripts.take_logs());
+        #[cfg(feature = "native-plugins")]
+        if let Some(plugins) = &mut self.plugins {
+            self.logs.extend(plugins.take_logs());
+        }
+        let scripts = self.scripts.as_mut().unwrap();
+        self.logs.extend(scripts.take_logs());
+        self.state = scripts.state();
+        self.last_error = scripts.last_error().cloned();
         if matches!(self.state(), ScriptState::Stopped | ScriptState::Faulted) {
             self.kernel.stop();
+            // Release every VM reference before calling native teardown/unloading.
+            drop(self.scripts.take());
+            #[cfg(feature = "native-plugins")]
+            if let Some(mut plugins) = self.plugins.take() {
+                let cleanup = plugins.shutdown();
+                self.logs.extend(plugins.take_logs());
+                if let Err(cleanup) = cleanup {
+                    let error = ScriptError {
+                        phase: "plugins.shutdown",
+                        message: cleanup.to_string(),
+                    };
+                    if result.is_ok() {
+                        self.state = ScriptState::Faulted;
+                        self.last_error = Some(error.clone());
+                        return Err(error);
+                    }
+                    // The original callback/system error remains primary.
+                    self.logs.push(format!("cleanup: {error}"));
+                }
+            }
         }
         result
     }
 
     fn require_running(&self, phase: &'static str) -> Result<(), ScriptError> {
-        if self.state() == ScriptState::Running {
+        self.require_state(phase, ScriptState::Running)
+    }
+
+    fn require_state(&self, phase: &'static str, expected: ScriptState) -> Result<(), ScriptError> {
+        if self.state() == expected {
             Ok(())
         } else {
             Err(ScriptError {
                 phase,
-                message: format!("expected Running, session is {:?}", self.state()),
+                message: format!("expected {expected:?}, session is {:?}", self.state()),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_terminal_callback_skips_systems_and_remaining_callbacks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.luau"), "return {}").unwrap();
+        let mut runtime = GameRuntime::load(root.path(), ScriptLimits::default()).unwrap();
+        runtime.init().unwrap();
+
+        // Model a callback that returns Ok after stopping, without introducing
+        // a script-stop API before its authoring contract is defined.
+        let result = runtime.scripts.as_mut().unwrap().shutdown();
+        runtime.finish_tick(result).unwrap();
+        assert_eq!(runtime.state(), ScriptState::Stopped);
+        assert!(runtime.scripts.is_none());
+        assert!(runtime.last_error().is_none());
+        assert_eq!(runtime.completed_ticks(), 0);
+
+        for _ in 0..MAX_FRAME_TICKS {
+            runtime.tick().unwrap();
+        }
+        runtime.draw_callback(0.0).unwrap();
+        assert_eq!(runtime.completed_ticks(), 0);
+        assert!(runtime.draw_commands().is_empty());
+        // Public entry points still reject calls on a stopped session.
+        assert!(runtime.step(InputSnapshot::default()).is_err());
+        assert!(runtime.frame(FIXED_DT, InputSnapshot::default()).is_err());
+        assert!(runtime.draw(0.0).is_err());
     }
 }

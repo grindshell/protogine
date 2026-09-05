@@ -136,7 +136,7 @@ impl ScriptHost {
         Self::load_with_roots(root, Some(data_root), limits, None)
     }
 
-    fn load_with_roots(
+    pub(crate) fn load_with_roots(
         root: &Path,
         data_root: Option<&Path>,
         limits: ScriptLimits,

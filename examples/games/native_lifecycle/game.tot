@@ -1,0 +1,4 @@
+version 1
+plugins [
+    {id "org.protogine.lifecycle" library "plugins/lifecycle.dll"}
+]

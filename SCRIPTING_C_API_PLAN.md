@@ -1,6 +1,6 @@
 # ADR-001: Luau scripting and the native plugin API
 
-**Status:** D1-D8 accepted; Phases 0, 1, 1a, 2, and 3 complete on Windows MSVC; Phases 4-5 unstarted.
+**Status:** D1-D8 accepted; Phases 0, 1, 1a, 2, 3, and 4 complete on Windows MSVC; Phase 5 unstarted.
 **Date:** 2026-09-05.
 **Decider:** Project owner.
 **Baseline:** `539659e` (Player, bundle discovery, built-in capture).
@@ -14,8 +14,9 @@ and contracts remain proposals until implemented and verified.
 The Player currently discovers `game/main.luau` beside its executable, renders
 startup states, and supports unattended PNG capture. The shared library now also
 contains an optional headless Luau runtime with a kernel, velocity integration,
-and frame/input timing. The Player has no game execution yet; rendering bindings
-and plugins remain later work.
+and frame/input timing. The Player runs shipped scripts and owned drawing commands;
+native plugins initialize and shut down around the VM. Luau/native batch invocation
+is the next slice.
 
 Preserve the shared editor/Player kernel, primarily Luau-authored games, and a
 C-compatible native plugin interface. Use `hecs` 0.11.1 and `mlua` 0.12.1 with
@@ -46,7 +47,7 @@ the first implementation. D3 is accepted and implementation is authorized.
 Finalize detailed callback signatures, ABI rules, and limits in each phase,
 recording evidence and resolving incompatibilities before advancing.
 
-The tot declaration is implemented; libloading remains for Phase 4:
+The tot declaration and optional libloading dependency are implemented:
 
 ```toml
 tot = { git = "https://github.com/totlang/tot", rev = "2f407897f985654cdbb6201ad01ba05216a6e3d7", version = "=0.1.0" }
@@ -327,11 +328,12 @@ existing proposed render command list only defers drawing, not world mutation.
 
 ### ABI shape and ownership
 
-Propose one exported bootstrap symbol, `protogine_plugin_query`, followed by a
+Phase 4 implements one exported bootstrap symbol, `protogine_plugin_query`, followed by a
 versioned function table. Use an engine-owned ABI version independent of the
 engine package version. The bootstrap accepts requested ABI, destination size,
-and a host-allocated descriptor destination. Exact C declarations are a Phase 4
-deliverable, not a published header in this draft.
+and a host-allocated descriptor destination. The exact ABI 1 declarations are in
+the generated [C header](include/protogine_plugin.h); the Phase 4 implementation
+record freezes their constraints. The Luau adapter below remains Phase 5 work.
 
 | Surface | Required contract |
 | --- | --- |
@@ -406,8 +408,8 @@ scheduling or direct ECS plugins implicitly while implementing the smaller APIs.
 | 4. C ABI and loader | Dependency-light SDK definitions, generated C header, tot plugin manifest, `libloading` 0.9.0, version negotiation and teardown | Independently compile a C plugin against only the header; assert layout in C and Rust; test malformed/unsupported manifest, wrong ABI/size, missing symbol/DLL/dependency, duplicate IDs, failed init, reverse teardown, and missing required plugin |
 | 5. Luau/native integration | Buffer adapter, typed Luau wrapper, one useful batch computation | Compare pure-Luau/native results; invalid lengths/capacity/status; failed call cannot publish output; both Player and headless host use the same bridge; published benchmark method includes copying |
 
-Phase 4 should choose and pin the header-generation tool; the loader is fixed
-at `libloading` 0.9.0.
+Phase 4 pins cbindgen 0.29.2 in the separate header-generation tool; the loader is
+fixed at `libloading` 0.9.0.
 Keep Rust ABI definitions as the header's source of truth and check regeneration
 for drift. Do not invent arbitrary API symbols beyond the reviewed bootstrap and
 minimum tables just to fill out an SDK.
@@ -902,3 +904,193 @@ building the release Player:
 ```powershell
 pwsh -NoProfile -File tests/player_input.ps1
 ```
+
+## Implementation record: Phase 4
+
+### Contract freeze
+
+- ABI 1 targets `x86_64-pc-windows-msvc`, default C alignment and `extern "C"`.
+  The dependency-free `protogine-plugin-api` SDK is the source of truth;
+  `cbindgen = 0.29.2` generates `include/protogine_plugin.h` through the separate
+  `protogine-headergen` development tool. Exact versions, table sizes, zero
+  flags/reserved fields, non-null callbacks and descriptor IDs are validated.
+  No implicit append-only compatibility is claimed. Rust/C layout assertions
+  and `cargo run -p protogine-headergen -- --check` gate header drift.
+- One exported `protogine_plugin_query` copies a descriptor into host storage.
+  Tables describe init/shutdown and immutable function declarations with IDs,
+  schema IDs/versions, and synchronous byte-buffer call signatures. This phase
+  validates the declarations; invoking batch calls and Luau buffers is Phase 5.
+  IDs are at most 128 ASCII bytes: at least two dot-separated segments, each
+  beginning with a lowercase letter and continuing with lowercase letters,
+  digits or underscores. Schema versions must be nonzero. Maximum 16 plugins,
+  64 function declarations per plugin; function IDs are unique within a plugin.
+- Status values use u32, not Rust enums. Host-owned diagnostics allow 1024 UTF-8
+  bytes; returned pointer/capacity must be unchanged and length within capacity.
+  Host logging allows info/warn/error, 4 KiB per message and 64 KiB per call;
+  invalid logging and exceeded budgets latch a contract fault. Shims catch Rust
+  unwind panics. Native code is trusted; arbitrary pointers, memory corruption,
+  abort panics, foreign exceptions and native hangs are not sandboxed.
+- `game/game.tot` is optional. A present manifest requires integer `version 1`;
+  optional `plugins` is an ordered array of `{id "org.example.name" library
+  "plugins/name.dll"}` entries. Unknown fields/types/versions and duplicates
+  fail startup. UTF-8 source is capped at 64 KiB. Paths are portable relative
+  `.dll` paths of at most 1024 bytes; reject traversal, device names, symlinks and
+  reparse points below the canonical root. Resolve and deduplicate all primary
+  paths before loading; load/query/validate every descriptor before any init.
+  The bundle and dependencies must remain stable during a session.
+- `libloading = 0.9.0` uses Windows `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+  LOAD_LIBRARY_SEARCH_SYSTEM32` with absolute primary paths. Dependency lookup
+  excludes cwd, PATH and the application directory. Windows may reuse modules
+  already loaded by basename; private dependency names must avoid collisions.
+  Verify adjacent-helper success, missing-helper failure and a cwd/application
+  decoy. Other native targets return an explicit unsupported-target error.
+- Safe `GameRuntime::load` variants parse the manifest and reject any native
+  declarations. An unsafe `load_trusted` entry point, behind `native-plugins`,
+  opts into executing trusted libraries and their initializers/terminators.
+  It accepts optional data root and RNG seed with the existing script limits.
+  Player enables this feature and chooses trusted loading for its shipped bundle.
+  The headless example uses the same entry when that feature is enabled.
+  The lower-level ScriptHost remains a VM-only utility, without native loading.
+- Plugins initialize in manifest order before the VM. Init success requires a
+  non-null instance; failed init must free its own allocations and publish null.
+  Successful instances unwind in reverse order on partial startup failure.
+  Normal runtime shutdown calls script shutdown once, destroys the VM/references,
+  shuts down plugins in reverse order, then unloads libraries. Faults skip further
+  script callbacks but perform native teardown. Dropping an unclosed runtime
+  destroys the VM then tears down plugins without implicitly running Luau.
+  Shutdown always consumes its instance, including error returns; cleanup errors
+  do not skip remaining plugins. Preserve an earlier script/startup fault and
+  report cleanup diagnostics alongside it. Native startup/shutdown errors use
+  the Player's existing code 3. All libraries stay loaded through all teardown.
+- Tables, buffers and host services are valid only during a host-initiated call
+  on the runtime thread. Plugins may not retain host pointers, reenter Lua or
+  leave workers running. Input is read-only; output is host-owned scratch;
+  errors leave instance state unchanged, and no automatic buffer retry occurs.
+
+The separate SDK/tool avoids adding code generation to Player startup or normal
+builds. Explicit trusted loading keeps native safety obligations visible to Rust
+embedders; script-only APIs do not silently execute DLLs. These complete the
+accepted bootstrap/ownership design without adding ECS access or a Luau adapter.
+
+### Delivery and verification
+
+Phase 3 and its review fixes were committed as `455047a` before Phase 4 began.
+The workspace now includes the engine, dependency-free SDK, and development-only
+header generator. The generated prototype receives `PG_PLUGIN_EXPORT` in the tool
+because cbindgen's normal function prefix does not apply to extern declarations.
+No existing dependency versions changed; the lockfile adds libloading and the
+separate codegen tool's dependency graph. The loader implementation follows the
+versioned [libloading Windows API](https://docs.rs/libloading/0.9.0/libloading/os/windows/struct.Library.html);
+the header tool uses [cbindgen](https://github.com/mozilla/cbindgen).
+
+- Five manifest tests pass: optional/strict schema, unsupported versions/types,
+  duplicate declarations, size/depth/count bounds, rooted regular unique paths,
+  Windows junction refusal, and safe runtime refusal before script evaluation.
+  The junction test verifies the outside file remains intact.
+- SDK layout and panic-shim tests pass. The native suite independently compiles
+  C11 DLLs with Clang 20.1.6, `-Werror`, the Windows/MSVC SDK and only a copied
+  generated header. C assertions cover sizes, alignment and key offsets; no
+  engine or Luau headers/libraries are used to compile the plugins.
+- Forty-one watched native subprocess cases pass in debug and release. They
+  cover ordered load/query-before-init, plugin/schema metadata, empty function
+  tables, wrong ABI/size/ID, missing export/library/required dependency, duplicate
+  function IDs, null init/shutdown/function callbacks and table pointers,
+  unsupported flags, reserved fields, oversized function counts, empty/oversized
+  identifier spans, bad schema versions, malformed UTF-8/diagnostic
+  pointers/lengths, unknown status,
+  failed init, invalid instance publication, logging overflow and wrong-thread
+  host callbacks. Each native process has an independent 15-second watchdog.
+- Tests verify successful instances unwind in reverse order, including when a
+  successful init corrupts its diagnostic result. An error from the first native
+  shutdown does not skip later cleanup, and all libraries remain loaded through
+  the last shutdown. Load/init/update/draw/shutdown script faults release native
+  instances; a cleanup error preserves the primary script fault. Repeated shutdown
+  is inert. A data-file side effect proves normal Luau shutdown runs while drop
+  from Loaded/Running skips it. The VM is explicitly released before native
+  teardown; future Phase 5 VM references must retain this ordering.
+- An adjacent helper DLL succeeds despite different helpers in cwd and beside the
+  executable. Removing the adjacent helper fails before any primary query code
+  executes, so a decoy-triggered plugin error cannot falsely pass the refusal test.
+  Windows loaded-module basename reuse remains an explicit platform constraint.
+- Existing copied-Player GPU captures pass, including script-only games, error
+  screens, deterministic PNGs and exit codes. The native GPU test adds copied
+  distribution success and failed-init diagnostic PNG/code 3. The release Windows
+  input probe passes key mappings/held/edge behavior, close/Escape shutdown once,
+  and shutdown-fault exit 3.
+- The documented lifecycle C example builds independently and runs through the
+  headless runtime and copied release Player. Logs show native init, Luau init,
+  Luau shutdown, native shutdown. The release 400x260 screenshot was visually
+  checked (green rectangle on dark background); local evidence and gate logs are
+  under ignored `target/phase4-proof/`. A runnable copied demo is under ignored
+  `target/native-demo/`. A headless CLI fault probe confirms both the primary
+  script error and native cleanup diagnostic are printed before exit.
+- Header regeneration matches the checked-in file. An intentional header change
+  makes `--check` fail with the drift diagnostic; restoring it passes again.
+
+Commands passed (cached dependencies, offline):
+
+```text
+cargo fmt --all -- --check
+cargo check --offline --workspace --all-targets
+cargo test --offline --workspace
+cargo test --offline --workspace --no-default-features
+cargo clippy --offline --workspace --all-targets -- -D warnings
+cargo build --offline --release --bin protogine-player
+cargo test --offline --workspace --no-default-features --features scripting
+cargo check --offline --workspace --all-targets --all-features
+cargo clippy --offline --workspace --all-targets --all-features -- -D warnings
+cargo test --offline --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
+cargo check --offline --no-default-features --features native-plugins
+cargo test --offline --no-default-features --features scripting,native-plugins --test plugins --test manifest
+cargo test --offline --test plugins
+cargo test --offline --release --no-default-features --features scripting,native-plugins --test plugins --test manifest
+cargo run --offline -p protogine-headergen -- --check
+cargo run --offline --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo run --offline --example script_host --no-default-features --features scripting,native-plugins -- target/native-demo/game
+cargo test --offline --test player_capture -- --ignored
+cargo test --offline --test plugins -- --ignored
+pwsh -NoProfile -File tests/player_input.ps1
+```
+
+The sample build/copy commands are in the README. These results verify Windows
+MSVC x64 only. Phase 5 remains unstarted: no Luau native-call API, buffer copying,
+typed computation wrapper or performance claim exists yet. Native corruption and
+nonreturning callbacks remain process-level failures. Audio, Player writable-data
+selection, editor and export tooling remain outside this phase.
+
+### Phase 4 review fixes
+
+- `catch_status` now guards disposal of caught panic payloads. Ordinary payloads
+  are dropped; if that destructor panics, the secondary payload is intentionally
+  forgotten to prevent another destructor from unwinding through the C boundary.
+  This can leak the secondary payload on that fault path; it does not leak every
+  caught payload. No ABI definitions or generated header bytes changed.
+- The SDK's `panic_boundary` regression uses actual `extern "C"` entry points in
+  watched child processes. It checks status passthrough, ordinary panics, normal
+  payload destruction, a panicking destructor, and a secondary payload whose own
+  destructor panics. The old shim failed with process exit `0xc0000409`; all five
+  cases pass with the fix in debug and release. Keep the independent 10-second
+  watchdog and release SDK test (`cargo test --release -p protogine-plugin-api`).
+- `.gitattributes` pins `include/protogine_plugin.h` to `text eol=lf`, preserving
+  strict header drift checks. Fresh checkouts in isolated Git repositories with
+  `core.autocrlf=true` produce exactly the generated bytes with this attribute;
+  the negative control without it produces 169 CR characters. Local checkout
+  evidence and check logs are under ignored `target/phase4-fixes/`.
+- Runtime callback completion now checks for a terminal session before running
+  systems. Remaining internal ticks and drawing skip stopped sessions; frame
+  catch-up exits immediately and reports only completed ticks. Public lifecycle
+  calls retain their state checks. This is preventive hardening: current update
+  callbacks cannot return success while stopping, and no script-stop API is added.
+  A regression models that successful terminal handoff; removing the completion
+  guard reproduces the `Option::unwrap()` panic after VM teardown.
+- Five additional native rejection fixtures cover nonzero flags, null shutdown,
+  65 function declarations, and identifier lengths 0 and 129. Oversized spans
+  retain readable backing storage. Each case checks its validation diagnostic,
+  refusal before any init, and library teardown under the existing watchdog.
+
+The required workspace fmt/check/test/clippy checks, core-only and scripting-only
+configurations, all-feature checks/clippy, native-only build, headless native
+debug/release suites, runtime regression in debug/release, release SDK suite,
+release Player build, header verification and native GPU captures pass after
+these fixes. Follow-up gate and negative-control logs are under ignored
+`target/phase4-followup/`. Phase 5 remains unstarted.
