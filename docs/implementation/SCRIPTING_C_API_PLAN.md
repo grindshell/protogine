@@ -1230,8 +1230,8 @@ remain deferred pending measurements and separate lifetime/scheduling contracts.
   (Ryzen 7 5800X, Rust 1.95.0, Clang 20.1.6), 256x256 median was 30.636 ms pure
   Luau versus 8.999 ms native, about 3.4x. Tiny grids have no reliable advantage;
   the report includes p95, crossover observations and host variability.
-  These absolute figures were superseded by the interrupt-sampling record below;
-  the published report carries the current table and a controlled comparison.
+  These figures are historical; BENCHMARK.md carries the current table and the
+  deadline-enforcement comparison recorded below.
 
 The documented workspace fmt/check/test/clippy, core-only and scripting-only
 configurations, all-feature check/clippy, release scripting suite, native-only
@@ -1348,7 +1348,12 @@ review fixes for commit.
   header drift check, release Player build, both headless lifecycle examples
   (script-only and native), and both opt-in GPU capture suites all pass.
 
-### Post-completion review: interrupt deadline sampling
+### Post-completion review: interrupt deadline sampling (superseded)
+
+The deadline-enforcement correction below supersedes this optimization. The
+assumption that only cheap bytecode runs between samples was incorrect: repeated
+standard-library calls can multiply the timeout. The measurements below record
+the rejected optimization, not current deadline behavior.
 
 - Luau fires a VM interrupt on every loop back-edge and call, and the host read
   the clock on each one to enforce the callback deadline. `Budget` now splits
@@ -1450,3 +1455,34 @@ review fixes for commit.
   comparison fails both the new cache unit test and the existing slot-reuse
   runtime test.
 - Verification on Windows MSVC x64: the full gate list above passes again.
+
+### Post-completion review: deadline enforcement across expensive built-ins
+
+- Restored an exact clock check at every VM interrupt. A count of interrupts
+  cannot bound elapsed time: `table.sort`, `buffer.fill`, allocation and other
+  VM work can be expensive between checks. Selective built-in wrappers would
+  leave the same assumption elsewhere. Individual native operations remain
+  non-preemptible; the next interrupt or host check observes the deadline.
+  The 100 ms callback and 1 s startup/shutdown budgets are unchanged, as are
+  first-fault latching and protected panic cancellation.
+- Added watched probes for repeated sorting, sorting under `pcall`/`xpcall`,
+  and buffer fills, each in interpreted and native Luau execution. A successful
+  single-call control calibrates an allowance for native work and scheduler
+  noise. Repeated calls must fault within that allowance and leave the session
+  terminal. The independent 10-second child-process watchdog remains intact.
+- Before the fix the new sort regression failed at 3.190 s against a 303.790 ms
+  allowance (100 ms budget); it passes after the fix. The original release
+  probe now cancels sorting at 103.750 ms and buffer filling at 101.270 ms,
+  compared with 700–703 ms and 229 ms under sampling. Single operations can
+  still overrun; repeated expensive calls no longer multiply that overrun.
+- Re-measured the complete distance wrapper before/after this correction on
+  2026-09-06. At 256x256, pure Luau median rose from 13.202 to 29.145 ms and the
+  native wrapper from 3.732 to 8.763 ms. The native path remains about 3.3x
+  faster. Correct deadline enforcement takes priority over the rejected sampling
+  speedup; the other completed optimizations remain in place. BENCHMARK.md
+  carries the full table and method.
+- Verification on Windows MSVC x64: fmt, default/all-feature checks and Clippy,
+  workspace/core-only/scripting-only tests, release scripting tests, native-only
+  check, headless native debug/release tests, release SDK tests, header drift,
+  release Player build, headless lifecycle example and both GPU capture suites
+  passed. The new regressions also passed within the release scripting suite.

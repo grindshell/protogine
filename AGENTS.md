@@ -137,10 +137,11 @@ behavior that depends on them.
   `catch_rust_panics(false)` and a host-owned cancellation payload. Keep
   `panic=unwind` for scripting builds; test protected calls and metamethods when
   changing interruption. Ordinary caught allocation errors are recoverable;
-  host-detected budget failures remain latched outside Lua. The interrupt samples
-  the deadline once per 256 interrupts because Luau fires one per back-edge and
-  call; keep every host-initiated check exact, and re-run the distance benchmark
-  when changing the stride.
+  host-detected budget failures remain latched outside Lua. Check the deadline
+  at every VM interrupt: built-ins and VM operations can do substantial work
+  between interrupts, so a fixed interrupt stride cannot bound elapsed time.
+  Keep host-initiated checks exact and re-run the distance benchmark when
+  changing deadline enforcement.
 - `GameRuntime` owns kernel mutation and timing; standalone `ScriptHost` calls
   omit world/input bindings. World operations return owned data/opaque handles
   and release all hecs/RefCell borrows before VM work. Only init/update mutate

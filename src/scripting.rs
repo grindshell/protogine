@@ -81,19 +81,10 @@ impl fmt::Display for ScriptError {
 }
 impl std::error::Error for ScriptError {}
 
-// Luau interrupts fire on every loop back-edge and call, so sampling the clock
-// on each one dominates tight script loops. Sample once per stride instead.
-// Every host-initiated operation still checks exactly, so only pure bytecode
-// between samples can overrun, and a latched fault still cancels immediately.
-// Keep this small enough that a tight loop overruns by microseconds.
-const INTERRUPT_STRIDE: u32 = 256;
-
 #[derive(Default)]
 struct Budget {
     deadline: Cell<Option<Instant>>,
     fault: RefCell<Option<String>>,
-    /// Interrupts remaining before the next clock sample. See INTERRUPT_STRIDE.
-    countdown: Cell<u32>,
 }
 
 impl Budget {
@@ -107,32 +98,27 @@ impl Budget {
     /// Every host-initiated operation uses this, so bindings, callback
     /// completion and native returns observe the deadline precisely.
     fn check(&self) -> Option<String> {
+        self.interrupted();
+        self.fault.borrow().clone()
+    }
+
+    /// Check every VM interrupt. A single built-in or VM operation can do
+    /// substantial work (sort, buffer fill, allocation), so an interrupt count
+    /// cannot bound elapsed time. Native work remains non-preemptible; check
+    /// again at the next interrupt instead of allowing a batch of such calls.
+    fn interrupted(&self) -> bool {
+        if self.fault.borrow().is_some() {
+            return true;
+        }
         if self
             .deadline
             .get()
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             self.fail("script deadline exceeded");
-        }
-        self.fault.borrow().clone()
-    }
-
-    /// VM interrupt hot path. A latched fault cancels on the next interrupt;
-    /// the deadline is observed within one stride of interrupts.
-    fn interrupted(&self) -> bool {
-        if self.fault.borrow().is_some() {
             return true;
         }
-        match self.countdown.get() {
-            0 => {
-                self.countdown.set(INTERRUPT_STRIDE);
-                self.check().is_some()
-            }
-            remaining => {
-                self.countdown.set(remaining - 1);
-                false
-            }
-        }
+        false
     }
 }
 
@@ -593,29 +579,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interrupts_sample_the_deadline_within_one_stride_and_latch_immediately() {
+    fn interrupts_check_each_deadline_and_latch_the_first_fault() {
         let budget = Budget::default();
-        // No deadline: interrupts never cancel, however many fire.
-        for _ in 0..(INTERRUPT_STRIDE * 4) {
-            assert!(!budget.interrupted());
-        }
+        assert!(!budget.interrupted());
         assert!(budget.check().is_none());
 
-        // An elapsed deadline is noticed within one stride, bounding how long
-        // pure bytecode can run past its budget between clock samples.
+        // The preceding interrupt must not defer this check: expensive native
+        // work can have consumed the budget between the two interrupts.
         budget.deadline.set(Some(Instant::now()));
-        let mut interrupts = 0;
-        while !budget.interrupted() {
-            interrupts += 1;
-            assert!(
-                interrupts <= INTERRUPT_STRIDE,
-                "deadline must be sampled at least once per stride"
-            );
-        }
+        assert!(budget.interrupted());
         assert_eq!(budget.check().as_deref(), Some("script deadline exceeded"));
 
-        // A latched fault cancels on the very next interrupt, regardless of the
-        // countdown, and outlives clearing the deadline.
+        // A latched fault outlives clearing the deadline.
         let budget = Budget::default();
         assert!(!budget.interrupted());
         budget.fail("utility call limit exceeded");
@@ -631,13 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn host_checks_observe_an_elapsed_deadline_without_waiting_for_a_stride() {
+    fn host_checks_observe_an_elapsed_deadline() {
         let budget = Budget::default();
-        // Consume part of the stride so a naive counter would still be waiting.
         assert!(!budget.interrupted());
         budget.deadline.set(Some(Instant::now()));
-        // Bindings, callback completion and native returns must not inherit the
-        // interrupt's sampling interval.
+        // Bindings, callback completion and native returns use the same check.
         assert_eq!(budget.check().as_deref(), Some("script deadline exceeded"));
     }
 }

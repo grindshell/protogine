@@ -28,6 +28,10 @@ fn scripting_dependency_probes() {
         "host_depth",
         "host_source",
         "host_metamethod_loop",
+        "host_builtin_sort",
+        "host_builtin_sort_pcall",
+        "host_builtin_sort_xpcall",
+        "host_builtin_fill",
     ] {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "isolated_probe", "--nocapture"])
@@ -56,6 +60,10 @@ fn isolated_probe() -> mlua::Result<()> {
     let Ok(probe) = std::env::var("PROTOGINE_VM_PROBE") else {
         return Ok(());
     };
+    if probe.starts_with("host_builtin_") {
+        builtin_deadline_probe(&probe);
+        return Ok(());
+    }
     if probe.starts_with("host_") {
         host_probe(&probe);
         return Ok(());
@@ -175,6 +183,86 @@ fn isolated_probe() -> mlua::Result<()> {
         _ => panic!("unknown probe: {probe}"),
     }
     Ok(())
+}
+
+// Interrupt counts do not bound elapsed time: one table.sort or buffer.fill can
+// cost much more than a bytecode loop iteration. Keep these inside the parent's
+// independent 10-second watchdog, including the protected-call variants.
+fn builtin_deadline_probe(probe: &str) {
+    use protogine::scripting::{ScriptHost, ScriptLimits, ScriptState};
+    let (setup, operation) = match probe {
+        "host_builtin_sort" => (
+            "local values = table.create(100000, 1)",
+            "table.sort(values)",
+        ),
+        "host_builtin_sort_pcall" => (
+            "local values = table.create(100000, 1)",
+            "pcall(table.sort, values)",
+        ),
+        "host_builtin_sort_xpcall" => (
+            "local values = table.create(100000, 1); local function sort() table.sort(values) end",
+            "xpcall(sort, function() return 'caught' end)",
+        ),
+        "host_builtin_fill" => (
+            "local values = buffer.create(32 * 1024 * 1024)",
+            "buffer.fill(values, 0, 1)",
+        ),
+        _ => panic!("unknown builtin probe: {probe}"),
+    };
+    for native in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let source = |body: &str| {
+            format!(
+                "{}\n{setup}\nreturn {{ update = function() {body} end }}",
+                if native { "--!native" } else { "" }
+            )
+        };
+        // Calibrate a single non-preemptible operation on this host. The limit
+        // below allows scheduler noise and several such operations, but cannot
+        // hide a stride's worth of repeated expensive calls after the deadline.
+        std::fs::write(root.path().join("main.luau"), source(operation)).unwrap();
+        let mut control = ScriptHost::load(
+            root.path(),
+            ScriptLimits {
+                callback_timeout: Duration::from_secs(2),
+                ..ScriptLimits::default()
+            },
+        )
+        .unwrap();
+        control.init().unwrap();
+        let mut slowest = Duration::ZERO;
+        for _ in 0..3 {
+            let start = Instant::now();
+            control.update().unwrap();
+            slowest = slowest.max(start.elapsed());
+        }
+        control.shutdown().unwrap();
+        drop(control);
+
+        std::fs::write(
+            root.path().join("main.luau"),
+            source(&format!("while true do {operation} end")),
+        )
+        .unwrap();
+        let limits = ScriptLimits::default();
+        let mut host = ScriptHost::load(root.path(), limits).unwrap();
+        host.init().unwrap();
+        let start = Instant::now();
+        let error = host.update().unwrap_err();
+        let elapsed = start.elapsed();
+        let allowance = limits.callback_timeout + Duration::from_millis(100) + slowest * 4;
+        assert!(error.message.contains("deadline"), "{probe}: {error}");
+        assert!(
+            elapsed <= allowance,
+            "{probe}, native={native}: cancellation took {elapsed:?}, allowed {allowance:?} \
+             (budget {:?}, single operation {slowest:?})",
+            limits.callback_timeout
+        );
+        assert_eq!(host.state(), ScriptState::Faulted);
+        assert!(host.update().is_err());
+        host.shutdown().unwrap();
+        assert_eq!(host.state(), ScriptState::Faulted);
+    }
 }
 
 fn host_probe(probe: &str) {

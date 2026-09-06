@@ -311,11 +311,12 @@ the heap cap is not a bound on total process memory. Native work is checked
 against the deadline when control returns to the VM/host. Process execution,
 network access and script-selected DLL loading remain unavailable.
 
-Luau interrupts fire on every loop back-edge and call, so the deadline is
-sampled once per 256 interrupts rather than on each one. Every host-initiated
-operation — bindings, native returns and callback completion — still checks
-exactly, so only pure bytecode between samples can overrun, by microseconds for
-a tight loop. A latched budget failure still cancels on the next interrupt.
+The deadline is checked at every Luau VM interrupt and at host checks in
+bindings, native returns and callback completion. Interrupts cannot be sampled
+at a fixed stride: built-ins such as `table.sort` and `buffer.fill` can do
+substantial work between them. An individual non-preemptible operation may
+overrun; cancellation occurs at the next interrupt or host check, without
+allowing a batch of further expensive calls. Budget failures remain latched.
 
 ## World and fixed input
 
