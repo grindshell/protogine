@@ -1230,6 +1230,8 @@ remain deferred pending measurements and separate lifetime/scheduling contracts.
   (Ryzen 7 5800X, Rust 1.95.0, Clang 20.1.6), 256x256 median was 30.636 ms pure
   Luau versus 8.999 ms native, about 3.4x. Tiny grids have no reliable advantage;
   the report includes p95, crossover observations and host variability.
+  These absolute figures were superseded by the interrupt-sampling record below;
+  the published report carries the current table and a controlled comparison.
 
 The documented workspace fmt/check/test/clippy, core-only and scripting-only
 configurations, all-feature check/clippy, release scripting suite, native-only
@@ -1316,3 +1318,66 @@ review fixes for commit.
   A full-suite run exposed a 100 ms disk-sync timeout in the earlier utility-call
   accounting regression; give that test a two-second callback allowance while
   retaining its exact call-limit assertions. Production deadlines are unchanged.
+
+### Post-completion review: draw publication and native metadata reuse
+
+- `draw_in` cleared the published command list before validating `alpha` and the
+  session state, so a rejected argument silently blanked the frame the caller had
+  already accepted. Validation now precedes the clear. Fault and orderly shutdown
+  already clear the list, so refusing before it cannot leave stale commands
+  visible from a terminal session. The Phase 3 contract is unchanged: only a
+  successful draw publishes, and fault/stop still clears. The existing numeric
+  validation test asserted the old incidental behavior and now asserts
+  preservation; a dedicated regression covers NaN, infinite, negative and `1.0`
+  alphas, a following successful draw, and the cleared list after shutdown.
+- `ctx.native.plugins` was rebuilt on every callback, allocating one table per
+  plugin plus one per function declaration for data frozen when the registry
+  loads. `ScriptHost` now builds that read-only snapshot once, before the
+  callback deadline starts, and shares the same table with every callback; only
+  the scoped `call` function is still recreated per call. At the documented
+  16-plugin/64-function maximum this removes 1041 table allocations per callback.
+  Scripts observe a stable table: the native fixture asserts `rawequal` for the
+  registry and a nested descriptor across update, draw and shutdown, that a
+  retained reference stays valid, and that the shared table remains read-only.
+- Both regressions were confirmed against mutated copies in a separate Cargo
+  target directory: restoring the early clear fails the draw regression, and
+  rebuilding the snapshot per callback fails the native `rawequal` assertions.
+- Verification on Windows MSVC x64: fmt, default and all-feature checks and
+  Clippy, workspace/core-only/scripting-only tests, native-only check, headless
+  native debug and release suites, release scripting suites, release SDK suite,
+  header drift check, release Player build, both headless lifecycle examples
+  (script-only and native), and both opt-in GPU capture suites all pass.
+
+### Post-completion review: interrupt deadline sampling
+
+- Luau fires a VM interrupt on every loop back-edge and call, and the host read
+  the clock on each one to enforce the callback deadline. `Budget` now splits
+  that: `check` stays exact and is what every host-initiated operation uses
+  (data/filesystem/world/drawing bindings, native call entry and return, and
+  callback completion), while `interrupted` samples the clock once per 256
+  interrupts. A latched fault is still observed on the next interrupt, so only
+  the deadline's granularity changed. The 100 ms/1 s limits are unchanged.
+- The bound this introduces is on pure bytecode between samples: a tight loop
+  overruns by microseconds. Anything slow enough to matter — I/O, conversion,
+  native calls — already checks exactly on entry and return. Interrupts still
+  cannot preempt I/O, compiler/JIT work, or a native call, as before.
+- A unit test asserts the stride semantics directly: an elapsed deadline is
+  reported within at most one stride of `interrupted` calls, a latched fault
+  cancels on the very next interrupt regardless of the countdown, and `check`
+  never inherits the sampling interval. Rebuilding with the stride set so the
+  clock is never sampled makes the existing runaway-loop probes hit their
+  independent 10-second process watchdog, which is the negative control that the
+  sampling is what enforces the deadline.
+- The benchmark was re-measured because this changes the published Luau figures.
+  Rebuilt back to back in one session on the same machine and toolchain, 256x256
+  medians were 30.201 ms pure Luau / 8.882 ms native when checking every
+  interrupt, versus 13.091 ms / 3.748 ms once per 256. The every-interrupt run
+  reproduces the original Phase 5 table, establishing that the two runs are
+  comparable and that the change, not ambient load, accounts for the difference.
+  Both methods gain about 2.3x because both marshal in Luau, so the native
+  advantage is unchanged within run-to-run variation (3.40x to 3.49x) while the
+  absolute figures roughly halve. BENCHMARK.md now carries the current table,
+  the comparison, and a note that the earlier figures are superseded.
+- Verification on Windows MSVC x64: the full gate list above passes again,
+  including the scripting feasibility probes that exercise load, update, pcall,
+  xpcall, metamethod, module and native-frame cancellation.

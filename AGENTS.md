@@ -137,7 +137,10 @@ behavior that depends on them.
   `catch_rust_panics(false)` and a host-owned cancellation payload. Keep
   `panic=unwind` for scripting builds; test protected calls and metamethods when
   changing interruption. Ordinary caught allocation errors are recoverable;
-  host-detected budget failures remain latched outside Lua.
+  host-detected budget failures remain latched outside Lua. The interrupt samples
+  the deadline once per 256 interrupts because Luau fires one per back-edge and
+  call; keep every host-initiated check exact, and re-run the distance benchmark
+  when changing the stride.
 - `GameRuntime` owns kernel mutation and timing; standalone `ScriptHost` calls
   omit world/input bindings. World operations return owned data/opaque handles
   and release all hecs/RefCell borrows before VM work. Only init/update mutate
@@ -148,7 +151,8 @@ behavior that depends on them.
   kernel. See the Phase 2 contract for entity/operation limits and input timing.
 - `ctx.draw` exists only in draw and publishes a fresh owned list only after a
   successful callback. Validate finite coordinates/sizes/colors before f32
-  conversion; the 10,000-command cap latches. Fault/stop clears published commands.
+  conversion; the 10,000-command cap latches. Fault/stop clears published commands,
+  while a rejected `alpha` is recoverable and preserves the published list.
   Keep renderer semantics (clear discards previous drawing, ordered alpha-blended
   rectangles, empty frame black) aligned with headless data and GPU tests.
   See Phase 3 for capture seeding, shutdown, input mappings and fault code 3.
@@ -216,7 +220,9 @@ option; scheduling and mutation timing are separate contracts.
   secondary payload so another destructor cannot unwind through the C boundary.
 - `ctx.native.call(plugin_id, function_id, input_buffer, output_buffer)` runs only
   in init/update and returns written bytes. Native functions expire with their
-  callback; `ctx.native.plugins` contains owned read-only schema metadata. Copy
+  callback; `ctx.native.plugins` contains owned read-only schema metadata, built
+  once from the frozen registry and shared by every callback rather than rebuilt
+  per call. Copy
   input before FFI, use disjoint zeroed host output, and publish only the validated
   success prefix. Preserve the suffix and all output on failure, even for aliased
   VM buffers. Never retry automatically or pass VM/kernel pointers to plugins.

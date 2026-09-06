@@ -8,17 +8,12 @@ use crate::{
 use mlua::{Buffer, FromLuaMulti, Lua, LuaString, MultiValue, Scope, Table};
 use std::io::Read;
 
-pub(super) fn bind<'s>(
-    lua: &Lua,
-    scope: &'s Scope<'s, '_>,
-    mut plugins: Option<&'s mut PluginSet>,
-    callable: bool,
-    budget: &'s Budget,
-    logs: &'s CallbackLogs,
-) -> mlua::Result<Table> {
-    let native = lua.create_table()?;
+/// The owned, read-only `ctx.native.plugins` snapshot. Declarations are frozen
+/// when the registry loads, so the host builds this once and every callback
+/// shares it instead of rebuilding a table per declaration on each call.
+pub(super) fn metadata(lua: &Lua, plugins: Option<&PluginSet>) -> mlua::Result<Table> {
     let metadata = lua.create_table()?;
-    if let Some(plugins) = &plugins {
+    if let Some(plugins) = plugins {
         for info in plugins.infos() {
             let functions = lua.create_table()?;
             for function in &info.functions {
@@ -33,7 +28,21 @@ pub(super) fn bind<'s>(
         }
     }
     metadata.set_readonly(true);
-    native.raw_set("plugins", metadata)?;
+    Ok(metadata)
+}
+
+pub(super) fn bind<'s>(
+    lua: &Lua,
+    scope: &'s Scope<'s, '_>,
+    metadata: &Table,
+    mut plugins: Option<&'s mut PluginSet>,
+    callable: bool,
+    budget: &'s Budget,
+    logs: &'s CallbackLogs,
+) -> mlua::Result<Table> {
+    let native = lua.create_table()?;
+    // Clone the reference, not the table: the snapshot is readonly and shared.
+    native.raw_set("plugins", metadata.clone())?;
     let mut calls = 0usize;
     let mut transferred = 0usize;
     native.raw_set(

@@ -208,9 +208,12 @@ local info = ctx.native.plugins[pluginId][functionId]
 -- info.schema and info.schema_version identify the byte format.
 ```
 
-Calls are allowed only in init/update and expire with that callback. Metadata
-is an owned read-only snapshot; buffers can be retained. A runtime with no plugins
-has an empty registry. Standalone ScriptHost supplies no native API.
+Calls are allowed only in init/update and expire with that callback. Metadata is
+an owned read-only snapshot; declarations are frozen when the registry loads, so
+the host builds it once and every callback shares the same table (`rawequal`
+holds across calls, and a retained reference stays valid). Buffers can be
+retained. A runtime with no plugins has an empty registry. Standalone ScriptHost
+supplies no native API.
 
 The adapter copies input to host memory and uses disjoint zeroed output scratch.
 On validated success, it copies only the written prefix back, preserving the
@@ -307,6 +310,12 @@ the heap cap is not a bound on total process memory. Native work is checked
 against the deadline when control returns to the VM/host. Process execution,
 network access and script-selected DLL loading remain unavailable.
 
+Luau interrupts fire on every loop back-edge and call, so the deadline is
+sampled once per 256 interrupts rather than on each one. Every host-initiated
+operation — bindings, native returns and callback completion — still checks
+exactly, so only pure bytecode between samples can overrun, by microseconds for
+a tight loop. A latched budget failure still cancels on the next interrupt.
+
 ## World and fixed input
 
 Each entity has a finite f64 position in world pixels and velocity in pixels per
@@ -379,7 +388,9 @@ validation. Zero-size rectangles are allowed. Invalid arguments are catchable.
 Rectangles composite in insertion order with alpha blending.
 
 Each frame starts opaque black and each draw starts with an empty command list.
-Only a successful draw publishes its commands; fault/stop clears the list.
+Only a successful draw publishes its commands; fault/stop clears the list. A
+rejected `draw(alpha)` argument is recoverable and leaves the previously
+published list intact rather than blanking the accepted frame.
 Drawing nothing leaves a black frame. The 10,000-command cap counts clears too
 and faults the session even through `pcall`. Drawing tables are read-only and
 their functions expire with the callback. World writes remain prohibited in draw;

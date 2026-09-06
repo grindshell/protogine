@@ -685,11 +685,12 @@ fn batch_probe(root: &Path, case: &str) {
         local input = buffer.create(2)
         buffer.writeu8(input, 0, 17); buffer.writeu8(input, 1, 42)
         local output = buffer.create(4); buffer.fill(output, 0, 85)
-        local stale, entity
+        local stale, entity, registry
         return {
             init=function(ctx)
                 stale = ctx.native.call
-                local info = ctx.native.plugins['org.example.a']['example.batch']
+                registry = ctx.native.plugins
+                local info = registry['org.example.a']['example.batch']
                 assert(info.schema == 'example.empty' and info.schema_version == 1)
                 assert(not pcall(function() info.schema = 'bad' end))
                 assert(not pcall(ctx.native.call, 'unknown.plugin', 'example.batch', input, output))
@@ -699,13 +700,22 @@ fn batch_probe(root: &Path, case: &str) {
             end,
             update=function(ctx)
                 assert(not pcall(stale, 'org.example.a', 'example.batch', input, output))
+                -- Declarations are frozen at load, so one shared readonly snapshot
+                -- serves every callback and stays valid when a script retains it.
+                assert(rawequal(ctx.native.plugins, registry))
+                assert(rawequal(ctx.native.plugins['org.example.a']['example.batch'],
+                    registry['org.example.a']['example.batch']))
+                assert(registry['org.example.a']['example.batch'].schema_version == 1)
+                assert(not pcall(function() ctx.native.plugins['org.example.a'] = nil end))
                 local function call(a, b) return ctx.native.call('org.example.a', 'example.batch', a, b) end
                 BODY
             end,
             draw=function(ctx)
+                assert(rawequal(ctx.native.plugins, registry))
                 assert(not pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output))
             end,
             shutdown=function(ctx)
+                assert(rawequal(ctx.native.plugins, registry))
                 assert(not pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output))
                 ctx.log('shutdown once')
             end,

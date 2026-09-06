@@ -81,10 +81,19 @@ impl fmt::Display for ScriptError {
 }
 impl std::error::Error for ScriptError {}
 
+// Luau interrupts fire on every loop back-edge and call, so sampling the clock
+// on each one dominates tight script loops. Sample once per stride instead.
+// Every host-initiated operation still checks exactly, so only pure bytecode
+// between samples can overrun, and a latched fault still cancels immediately.
+// Keep this small enough that a tight loop overruns by microseconds.
+const INTERRUPT_STRIDE: u32 = 256;
+
 #[derive(Default)]
 struct Budget {
     deadline: Cell<Option<Instant>>,
     fault: RefCell<Option<String>>,
+    /// Interrupts remaining before the next clock sample. See INTERRUPT_STRIDE.
+    countdown: Cell<u32>,
 }
 
 impl Budget {
@@ -94,6 +103,9 @@ impl Budget {
             .get_or_insert_with(|| message.into());
     }
 
+    /// Exact check: samples the clock and reports the latched fault message.
+    /// Every host-initiated operation uses this, so bindings, callback
+    /// completion and native returns observe the deadline precisely.
     fn check(&self) -> Option<String> {
         if self
             .deadline
@@ -103,6 +115,24 @@ impl Budget {
             self.fail("script deadline exceeded");
         }
         self.fault.borrow().clone()
+    }
+
+    /// VM interrupt hot path. A latched fault cancels on the next interrupt;
+    /// the deadline is observed within one stride of interrupts.
+    fn interrupted(&self) -> bool {
+        if self.fault.borrow().is_some() {
+            return true;
+        }
+        match self.countdown.get() {
+            0 => {
+                self.countdown.set(INTERRUPT_STRIDE);
+                self.check().is_some()
+            }
+            remaining => {
+                self.countdown.set(remaining - 1);
+                false
+            }
+        }
     }
 }
 
@@ -139,6 +169,9 @@ pub struct ScriptHost {
     data: data::Data,
     filesystem: filesystem::FileSystem,
     entities: world::EntityCache,
+    /// Built once from the immutable plugin registry, then shared by callbacks.
+    #[cfg(feature = "native-plugins")]
+    native_metadata: Option<mlua::Table>,
     draw_commands: Vec<DrawCommand>,
 }
 
@@ -223,7 +256,7 @@ impl ScriptHost {
         lua.set_interrupt(move |_| {
             // Ordinary errors are catchable, and yields cannot cross all metamethod
             // boundaries. mlua's protected panic path escapes both pcall and xpcall.
-            if interrupt_budget.check().is_some() {
+            if interrupt_budget.interrupted() {
                 std::panic::resume_unwind(Box::new(Interrupted));
             }
             Ok(VmState::Continue)
@@ -257,6 +290,8 @@ impl ScriptHost {
             data,
             filesystem,
             entities,
+            #[cfg(feature = "native-plugins")]
+            native_metadata: None,
             draw_commands: Vec::new(),
         };
         let result = host.execute("load", entry, MultiValue::new(), limits.startup_timeout)?;
@@ -356,7 +391,6 @@ impl ScriptHost {
         alpha: f64,
         engine: Option<EngineContext<'_>>,
     ) -> Result<(), ScriptError> {
-        self.draw_commands.clear();
         self.require_state("draw", ScriptState::Running)?;
         if !alpha.is_finite() || !(0.0..1.0).contains(&alpha) {
             return Err(ScriptError {
@@ -364,6 +398,10 @@ impl ScriptHost {
                 message: "alpha must be finite and in [0, 1)".into(),
             });
         }
+        // Only an accepted draw replaces the published list; a rejected argument
+        // leaves it intact. Terminal states already cleared it through fault or
+        // shutdown, so refusing above cannot leave stale commands visible.
+        self.draw_commands.clear();
         self.callback(2, "draw", Some(alpha), self.limits.callback_timeout, engine)
     }
 
@@ -410,14 +448,24 @@ impl ScriptHost {
         let Some(function) = self.callbacks[index].clone() else {
             return Ok(());
         };
-        self.budget.deadline.set(Some(Instant::now() + timeout));
-        let lua = self.lua.clone();
-        let budget = self.budget.clone();
-        let logs = CallbackLogs::default();
         #[cfg(feature = "native-plugins")]
         let mut engine = engine;
         #[cfg(feature = "native-plugins")]
         let native = engine.as_mut().and_then(|e| e.plugins.take());
+        // Build the shared registry snapshot before the callback's clock starts;
+        // the declarations cannot change once a plugin set has been published.
+        #[cfg(feature = "native-plugins")]
+        if engine.is_some() && self.native_metadata.is_none() {
+            let metadata = native::metadata(&self.lua, native.as_deref());
+            match metadata {
+                Ok(metadata) => self.native_metadata = Some(metadata),
+                Err(error) => return Err(self.fault(phase, error.to_string())),
+            }
+        }
+        self.budget.deadline.set(Some(Instant::now() + timeout));
+        let lua = self.lua.clone();
+        let budget = self.budget.clone();
+        let logs = CallbackLogs::default();
         let utility_budget = utilities::UtilityBudget::new(&budget);
         let commands = RefCell::new(Vec::new());
         let result = catch_interrupt(|| {
@@ -433,12 +481,15 @@ impl ScriptHost {
                 })?;
                 context.raw_set("log", log)?;
                 #[cfg(feature = "native-plugins")]
-                if engine.is_some() {
+                if engine.is_some()
+                    && let Some(metadata) = &self.native_metadata
+                {
                     context.raw_set(
                         "native",
                         native::bind(
                             &lua,
                             scope,
+                            metadata,
                             native,
                             matches!(phase, "init" | "update"),
                             &budget,
@@ -534,5 +585,59 @@ impl ScriptHost {
         self.state = ScriptState::Faulted;
         self.last_error = Some(error.clone());
         error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupts_sample_the_deadline_within_one_stride_and_latch_immediately() {
+        let budget = Budget::default();
+        // No deadline: interrupts never cancel, however many fire.
+        for _ in 0..(INTERRUPT_STRIDE * 4) {
+            assert!(!budget.interrupted());
+        }
+        assert!(budget.check().is_none());
+
+        // An elapsed deadline is noticed within one stride, bounding how long
+        // pure bytecode can run past its budget between clock samples.
+        budget.deadline.set(Some(Instant::now()));
+        let mut interrupts = 0;
+        while !budget.interrupted() {
+            interrupts += 1;
+            assert!(
+                interrupts <= INTERRUPT_STRIDE,
+                "deadline must be sampled at least once per stride"
+            );
+        }
+        assert_eq!(budget.check().as_deref(), Some("script deadline exceeded"));
+
+        // A latched fault cancels on the very next interrupt, regardless of the
+        // countdown, and outlives clearing the deadline.
+        let budget = Budget::default();
+        assert!(!budget.interrupted());
+        budget.fail("utility call limit exceeded");
+        assert!(budget.interrupted());
+        budget.deadline.set(None);
+        assert!(budget.interrupted());
+        // The first latched message is the reported one.
+        budget.fail("a later failure");
+        assert_eq!(
+            budget.check().as_deref(),
+            Some("utility call limit exceeded")
+        );
+    }
+
+    #[test]
+    fn host_checks_observe_an_elapsed_deadline_without_waiting_for_a_stride() {
+        let budget = Budget::default();
+        // Consume part of the stride so a naive counter would still be waiting.
+        assert!(!budget.interrupted());
+        budget.deadline.set(Some(Instant::now()));
+        // Bindings, callback completion and native returns must not inherit the
+        // interrupt's sampling interval.
+        assert_eq!(budget.check().as_deref(), Some("script deadline exceeded"));
     }
 }

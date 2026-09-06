@@ -75,6 +75,33 @@ fn commands_are_owned_ordered_scoped_and_replaced_each_draw() {
 }
 
 #[test]
+fn rejected_draw_arguments_preserve_the_published_command_list() {
+    let (_root, mut host) = host(
+        r#"
+        return {draw = function(ctx) ctx.draw.clear(0, 0.5, 1, 1) end}
+    "#,
+    );
+    host.init().unwrap();
+    host.draw(0.25).unwrap();
+    let published = [DrawCommand::Clear([0.0, 0.5, 1.0, 1.0])];
+    assert_eq!(host.draw_commands(), published);
+    // A refused alpha is not a session fault, so it must not silently blank the
+    // frame the caller already accepted.
+    for alpha in [f64::NAN, -0.0001, 1.0, f64::INFINITY] {
+        assert!(host.draw(alpha).is_err(), "alpha {alpha} must be rejected");
+        assert_eq!(host.state(), ScriptState::Running);
+        assert_eq!(host.draw_commands(), published);
+    }
+    host.draw(0.75).unwrap();
+    assert_eq!(host.draw_commands(), published);
+    // Terminal states still clear the list; refusing above cannot leak it.
+    host.shutdown().unwrap();
+    assert!(host.draw_commands().is_empty());
+    assert!(host.draw(0.5).is_err());
+    assert!(host.draw_commands().is_empty());
+}
+
+#[test]
 fn numeric_validation_is_recoverable_and_never_publishes_invalid_commands() {
     let (_root, mut host) = host(
         r#"
@@ -106,7 +133,8 @@ fn numeric_validation_is_recoverable_and_never_publishes_invalid_commands() {
     assert_eq!(host.state(), ScriptState::Running);
     assert_eq!(host.draw_commands().len(), 2);
     assert!(host.draw(f64::NAN).is_err());
-    assert!(host.draw_commands().is_empty());
+    // A refused alpha is recoverable, so the accepted list stays published.
+    assert_eq!(host.draw_commands().len(), 2);
     host.draw(0.0).unwrap();
     assert_eq!(host.draw_commands().len(), 2);
 }
