@@ -227,6 +227,45 @@ fn filesystem_round_trip_permissions_and_expired_functions() {
 }
 
 #[test]
+fn failed_mkdir_unwinds_only_the_directories_it_created() {
+    // A component past the filesystem's name limit fails after the ancestors
+    // have already been created, which is the partial-failure path.
+    let root = game(
+        r#"
+        local long = string.rep('x', 300)
+        return {
+            init = function(ctx)
+                ctx.fs.mkdir('keep')
+                -- Both ancestors are created before the long component fails.
+                assert(not pcall(ctx.fs.mkdir, 'fresh/inner/' .. long))
+                local seen = {}
+                for _, entry in ctx.fs.list('data', '') do seen[entry.name] = entry.kind end
+                assert(seen.fresh == nil, 'failed mkdir must not leave ancestors behind')
+                assert(seen.keep == 'directory', 'a directory it did not create survives')
+                -- Failing below a pre-existing directory leaves that directory.
+                assert(not pcall(ctx.fs.mkdir, 'keep/child/' .. long))
+                assert(next(ctx.fs.list('data', 'keep')) == nil, 'keep must stay empty')
+                -- Retrying a good path after the failure still works.
+                ctx.fs.mkdir('fresh/inner')
+                ctx.fs.write('fresh/inner/ok.txt', 'written')
+            end,
+        }
+        "#,
+    );
+    let data = tempfile::tempdir().unwrap();
+    let mut host = load(root.path(), Some(data.path()));
+    host.init().unwrap();
+    // "keep" predates the failed call, so it survives; everything the failed
+    // calls created is gone, including the ancestors below an existing root.
+    assert!(data.path().join("keep").is_dir());
+    assert!(!data.path().join("keep/child").exists());
+    assert_eq!(
+        fs::read(data.path().join("fresh/inner/ok.txt")).unwrap(),
+        b"written"
+    );
+}
+
+#[test]
 fn filesystem_paths_and_roots_are_explicit() {
     let root = game(
         r#"
@@ -551,12 +590,21 @@ fn junctions_cannot_escape_filesystem_roots() {
         assert(not pcall(ctx.fs.write, 'link/private.txt', 'overwrite'))
         assert(not pcall(ctx.fs.mkdir, 'link/new'))
         assert(not pcall(ctx.fs.list, 'data', 'link'))
-        assert(not pcall(ctx.fs.list, 'data', ''))
+        -- A junction is visible but never traversable: listing the root that
+        -- contains it succeeds and reports it as unsupported, so one link
+        -- cannot hide every sibling from the game.
+        local seen = {}
+        for _, entry in ctx.fs.list('data', '') do seen[entry.name] = entry.kind end
+        assert(seen['link'] == 'unsupported', 'junction must be listed as unsupported')
+        assert(seen['ordinary.txt'] == 'file')
+        assert(not pcall(ctx.fs.read, 'data', 'link'))
     end }"#,
     );
     let data = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     fs::write(outside.path().join("private.txt"), "original").unwrap();
+    // A normal sibling proves the listing still reports usable entries.
+    fs::write(data.path().join("ordinary.txt"), "kept").unwrap();
     let link = data.path().join("link");
     let status = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", "New-Item -ItemType Junction -Path $env:PROTOGINE_LINK -Target $env:PROTOGINE_LINK_TARGET | Out-Null"])

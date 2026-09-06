@@ -452,6 +452,17 @@ reserved characters, and trailing dots/spaces are rejected. Symlinks/reparse
 points below either root are refused. These roots must not be concurrently
 replaced by another process; filesystem race isolation is not promised.
 
+Listing reports `kind` as `"file"`, `"directory"`, or `"unsupported"`. A name is
+reported as usable only when it can be passed back to read, list, or write, so
+links, other node types, and names outside the path policy above are listed as
+`"unsupported"` rather than failing the whole call — one entry a game cannot
+name never hides its siblings. An unsupported name may be lossy; do not use it
+as a path. Refusing to traverse those entries is unchanged.
+
+A failed `mkdir` removes the directories that call created, deepest first, so a
+partial tree is not left behind. It never removes a directory that already
+existed or one that is no longer empty.
+
 Writes sync a temporary file in the destination directory, then replace the
 destination. A failed replacement preserves the old file and cleans the temporary
 file. Replacement creates a new file; old file metadata is not retained. Directory

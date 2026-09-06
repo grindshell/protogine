@@ -162,6 +162,10 @@ behavior that depends on them.
   `ctx.fs` reads only canonical bundle/data roots; writes use a synced temporary
   file and atomic replacement in the configured data root. Keep draw writes and
   stale bindings rejected. See the Phase 1a contract for limits and path policy.
+  Listing classifies rather than refuses: entries whose names the path policy
+  cannot represent, links, and other node types are reported as `unsupported`
+  so one entry cannot hide a directory's siblings, while traversing them stays
+  refused. A failed `mkdir` unwinds only the directories that call created.
 - Save handling belongs to game scripts: schema, file layout, timing, restoration,
   and migrations. The engine may expose general filesystem access, tot parsing
   and formatting, and tot-export utilities for JSON, YAML, and TOML. Do not add

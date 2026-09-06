@@ -3,6 +3,7 @@
 use super::utilities::{BYTE_LIMIT, UtilityBudget};
 use mlua::{FromLuaMulti, Lua, LuaString, MultiValue, Scope, Table};
 use std::{
+    ffi::OsStr,
     fs::{self, File, Metadata},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -63,20 +64,8 @@ impl FileSystem {
                 let mut bytes = 0;
                 for entry in fs::read_dir(path)? {
                     let entry = entry?;
-                    let name = entry
-                        .file_name()
-                        .into_string()
-                        .map_err(|_| mlua::Error::runtime("directory name is not UTF-8"))?;
-                    segments(&name, false)?;
                     let metadata = fs::symlink_metadata(entry.path())?;
-                    reject_link(&metadata)?;
-                    let kind = if metadata.is_file() {
-                        "file"
-                    } else if metadata.is_dir() {
-                        "directory"
-                    } else {
-                        return Err(mlua::Error::runtime("unsupported filesystem entry"));
-                    };
+                    let (name, kind) = entry_kind(&entry.file_name(), &metadata);
                     bytes += name.len();
                     budget.bytes(bytes)?;
                     entries.push((name, kind));
@@ -100,24 +89,17 @@ impl FileSystem {
                 budget.begin()?;
                 let path = LuaString::from_lua_multi(args, lua)?;
                 self.write_allowed(writable)?;
-                let mut current = self.select_root("data")?.to_path_buf();
-                for part in segments(&path.to_str()?, false)? {
-                    current.push(part);
-                    match fs::symlink_metadata(&current) {
-                        Ok(meta) => {
-                            reject_link(&meta)?;
-                            if !meta.is_dir() {
-                                return Err(mlua::Error::runtime("mkdir path contains a file"));
-                            }
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            budget.check()?;
-                            fs::create_dir(&current)?;
-                        }
-                        Err(error) => return Err(error.into()),
+                let mut created = Vec::new();
+                let result = self.make_directories(budget, &path.to_str()?, &mut created);
+                if result.is_err() {
+                    // Leave no half-built tree behind. Deepest first, and
+                    // remove_dir refuses a nonempty directory, so anything a
+                    // concurrent writer placed inside one survives.
+                    for path in created.iter().rev() {
+                        let _ = fs::remove_dir(path);
                     }
                 }
-                Ok(())
+                result
             })?,
         )?;
         api.raw_set(
@@ -149,6 +131,35 @@ impl FileSystem {
         )?;
         api.set_readonly(true);
         Ok(api)
+    }
+
+    /// Create each missing directory in turn, recording what this call created
+    /// so a later failure can be unwound. Existing directories are accepted.
+    fn make_directories(
+        &self,
+        budget: &UtilityBudget<'_>,
+        path: &str,
+        created: &mut Vec<PathBuf>,
+    ) -> mlua::Result<()> {
+        let mut current = self.select_root("data")?.to_path_buf();
+        for part in segments(path, false)? {
+            current.push(part);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) => {
+                    reject_link(&meta)?;
+                    if !meta.is_dir() {
+                        return Err(mlua::Error::runtime("mkdir path contains a file"));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    budget.check()?;
+                    fs::create_dir(&current)?;
+                    created.push(current.clone());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 
     fn write_allowed(&self, writable: bool) -> mlua::Result<()> {
@@ -213,20 +224,44 @@ fn root(path: &Path) -> mlua::Result<PathBuf> {
     Ok(path)
 }
 
-fn reject_link(metadata: &Metadata) -> mlua::Result<()> {
-    let is_link = metadata.file_type().is_symlink();
+fn is_link(metadata: &Metadata) -> bool {
+    let link = metadata.file_type().is_symlink();
     #[cfg(windows)]
-    let is_link = {
+    let link = {
         use std::os::windows::fs::MetadataExt;
-        is_link || metadata.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+        link || metadata.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
     };
-    if is_link {
+    link
+}
+
+fn reject_link(metadata: &Metadata) -> mlua::Result<()> {
+    if is_link(metadata) {
         Err(mlua::Error::runtime(
             "symlinks and reparse points are not allowed",
         ))
     } else {
         Ok(())
     }
+}
+
+/// Classify one directory entry. Only entries whose name a script can pass back
+/// to read/list/write are reported as `file` or `directory`; links, other node
+/// types, and names outside the portable policy are reported as `unsupported`
+/// so that a single unrepresentable entry cannot make a directory unlistable.
+/// An unsupported name may be lossy and must not be used as a path.
+fn entry_kind(name: &OsStr, metadata: &Metadata) -> (String, &'static str) {
+    let usable = !is_link(metadata)
+        && name
+            .to_str()
+            .is_some_and(|name| segments(name, false).is_ok());
+    let kind = if usable && metadata.is_file() {
+        "file"
+    } else if usable && metadata.is_dir() {
+        "directory"
+    } else {
+        "unsupported"
+    };
+    (name.to_string_lossy().into_owned(), kind)
 }
 
 fn segments(path: &str, allow_root: bool) -> mlua::Result<Vec<&str>> {

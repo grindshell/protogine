@@ -1381,3 +1381,35 @@ review fixes for commit.
 - Verification on Windows MSVC x64: the full gate list above passes again,
   including the scripting feasibility probes that exercise load, update, pcall,
   xpcall, metamethod, module and native-frame cancellation.
+
+### Post-completion review: listing classification and mkdir unwind
+
+- `fs.list` applied the input path policy to existing directory entries and
+  aborted the whole call on the first name it could not represent, on any link,
+  and on any non-file/non-directory node. One entry a game cannot name therefore
+  hid every sibling, including its own saves. The Phase 1a path policy exists so
+  a returned name can be passed back to read/list/write, so listing now
+  classifies instead of refusing: entries meeting that bar are `file` or
+  `directory`, everything else is `unsupported`. Non-UTF-8 names are reported
+  lossily and always as `unsupported`, since a lossy name cannot be a path.
+- This changes what a listing reveals, not what it grants. `resolve` and `mkdir`
+  still refuse symlinks and reparse points below either root, so an unsupported
+  entry can be seen but never traversed, read, or written. The junction test now
+  asserts both halves: listing the containing root succeeds and reports the
+  junction as `unsupported` alongside an ordinary sibling, while reading it and
+  listing through it still fail and the outside file stays untouched.
+- `fs.mkdir` created intermediate directories one segment at a time and returned
+  on the first failure, leaving its ancestors behind with no way for a script to
+  see how far it got. The walk moved into a helper that records what it created;
+  a failure removes those deepest first. `remove_dir` refuses a nonempty
+  directory, so anything a concurrent writer placed inside one survives, and a
+  directory that already existed is never removed. Cleanup errors are ignored so
+  they cannot mask the primary failure. This matches the all-or-nothing
+  guarantee `fs.write` already gives through atomic replacement.
+- A regression drives a component past the filesystem name limit so the failure
+  lands after its ancestors exist, then asserts from Luau that the ancestors are
+  gone, that a pre-existing directory survives and stays empty, and that a
+  retry of a valid path afterwards still works. Negative controls: restoring the
+  per-entry link refusal fails the junction test, and skipping the unwind fails
+  the mkdir regression.
+- Verification on Windows MSVC x64: the full gate list above passes again.
