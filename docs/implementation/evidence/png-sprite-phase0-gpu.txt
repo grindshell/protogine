@@ -1,0 +1,8 @@
+backend=ContextInfo { backend: OpenGl, gl_version_string: "3.1.0 NVIDIA 610.62", glsl_support: GlslSupport { v130: true, v150: false, v330: false, v300es: false, v100_ext: false, v100: true }, features: Features { instancing: true, resolve_attachments: true } }
+stage=gpu_allocate_2048 us=9
+upload width=2048 height=2048 bands=512 total_us=3268 max_band_us=22
+sliced_upload passes=64 max_pass_us=128 cap_bytes=262144 exact_final_pixels=true
+stage=gpu_allocate_kenney us=7
+upload width=784 height=352 bands=36 total_us=163 max_band_us=13
+pool sessions=100 registrations=128 retired_payload_bytes=512
+GPU PASS mode=gpu

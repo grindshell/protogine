@@ -552,4 +552,8 @@ Player. Pass `-Player <executable>` to test another build. Capture/window
 environment overrides are excluded from the child process.
 
 See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance,
-and the [implementation archive](docs/implementation/README.md) for completed plans.
+and the [implementation plans](docs/implementation/README.md) for accepted and
+completed work. The next accepted milestone is
+[PNG assets and sprite drawing](docs/implementation/PNG_SPRITE_PLAN.md);
+[Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) completed its contracts and
+CPU/GPU feasibility probes. Production asset APIs remain unimplemented.

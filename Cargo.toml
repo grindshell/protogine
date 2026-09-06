@@ -22,6 +22,10 @@ required-features = ["scripting"]
 name = "native_benchmark"
 required-features = ["scripting", "native-plugins"]
 
+[[example]]
+name = "png_sprite_probe"
+required-features = ["player"]
+
 [features]
 default = ["player"]
 player = ["dep:macroquad", "dep:image", "scripting", "native-plugins"]

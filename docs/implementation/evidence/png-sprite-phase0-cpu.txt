@@ -1,0 +1,92 @@
+fixture=large.png
+read bytes=16780612 calls=514 total_us=12812
+stage=header us=70
+stage=cpu_allocate us=14
+stage=reader us=0
+decode width=2048 height=2048 color=Rgba8 bands=512 total_us=3649 max_band_us=110 conversion_us=2066
+fixture=interlaced.png
+read bytes=16782404 calls=514 total_us=12749
+stage=header us=53
+stage=cpu_allocate us=11
+stage=reader us=19259
+decode width=2048 height=2048 color=Rgba8 bands=512 total_us=709 max_band_us=7 conversion_us=2322
+fixture=kenney
+read bytes=17497 calls=2 total_us=99
+stage=header us=32
+stage=cpu_allocate us=9
+stage=reader us=0
+decode width=784 height=352 color=Rgba8 bands=36 total_us=307 max_band_us=79 conversion_us=839
+fixture=huge bytes=33
+read bytes=33 calls=2 total_us=35
+stage=header us=30
+refused fixture=huge error=Image size exceeds limit
+fixture=truncated bytes=100
+read bytes=100 calls=2 total_us=25
+stage=header us=10
+stage=cpu_allocate us=12
+stage=reader us=0
+refused fixture=truncated error=unexpected end of file
+fixture=at-limit
+read bytes=17825792 calls=545 total_us=13068
+stage=header us=17
+stage=cpu_allocate us=8
+stage=reader us=0
+decode width=2048 height=2048 color=Rgba8 bands=512 total_us=3659 max_band_us=46 conversion_us=3956
+fixture=over-limit bytes=17825793
+refused fixture=over-limit error=encoded limit
+fixture=gray
+read bytes=67 calls=2 total_us=38
+stage=header us=17
+stage=cpu_allocate us=1
+stage=reader us=0
+decode width=2 height=1 color=L8 bands=1 total_us=45 max_band_us=45 conversion_us=0
+fixture=gray-alpha
+read bytes=70 calls=2 total_us=28
+stage=header us=9
+stage=cpu_allocate us=0
+stage=reader us=0
+decode width=2 height=1 color=La8 bands=1 total_us=10 max_band_us=10 conversion_us=0
+fixture=rgb
+read bytes=72 calls=2 total_us=27
+stage=header us=9
+stage=cpu_allocate us=0
+stage=reader us=0
+decode width=2 height=1 color=Rgb8 bands=1 total_us=11 max_band_us=11 conversion_us=0
+fixture=palette
+read bytes=99 calls=2 total_us=26
+stage=header us=13
+stage=cpu_allocate us=0
+stage=reader us=0
+decode width=2 height=1 color=Rgba8 bands=1 total_us=11 max_band_us=11 conversion_us=0
+fixture=text
+read bytes=40867 calls=3 total_us=48
+stage=header us=45
+stage=cpu_allocate us=0
+stage=reader us=0
+decode width=2 height=1 color=Rgba8 bands=1 total_us=8 max_band_us=8 conversion_us=0
+fixture=icc
+read bytes=40867 calls=3 total_us=50
+stage=header us=15312
+stage=cpu_allocate us=1
+stage=reader us=0
+decode width=2 height=1 color=Rgba8 bands=1 total_us=8 max_band_us=8 conversion_us=0
+fixture=16bit bytes=70
+read bytes=70 calls=2 total_us=21
+stage=header us=12
+refused fixture=16bit error=16-bit/unsupported
+fixture=apng bytes=126
+read bytes=126 calls=2 total_us=20
+stage=header us=13
+refused fixture=apng error=APNG
+read bytes=16782404 calls=514 total_us=18755
+stage=header us=28
+stage=cpu_allocate us=9
+stage=reader us=19277
+decode width=2048 height=2048 color=Rgba8 bands=512 total_us=1140 max_band_us=18 conversion_us=15006
+worker cancel=false heartbeat_polls=551 publication=true
+read bytes=16782404 calls=514 total_us=17478
+stage=header us=20
+stage=cpu_allocate us=9
+stage=reader us=19384
+worker cancel=true heartbeat_polls=38 publication=false
+CPU PASS

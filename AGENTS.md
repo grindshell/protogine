@@ -57,7 +57,10 @@ supplies synchronous batch calls; the [distance-field example](examples/games/na
 includes a typed Luau wrapper and parity implementation. Kira audio, the editor,
 and export tooling remain unimplemented.
 
-Completed plans are indexed in [docs/implementation/README.md](docs/implementation/README.md).
+Accepted and completed plans are indexed in [docs/implementation/README.md](docs/implementation/README.md).
+The [PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) records the accepted
+next milestone. [Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) completed its
+contracts and CPU/GPU feasibility probes; production asset APIs remain unimplemented.
 The [scripting and C API plan](docs/implementation/SCRIPTING_C_API_PLAN.md) records
 accepted decisions, completed phases, verification evidence, and deferred scope.
 
@@ -326,6 +329,15 @@ option; scheduling and mutation timing are separate contracts.
   do not reintroduce a separate copy of the renderer as a capture harness. Run
   `cargo test --test player_capture -- --ignored` when a graphics context is
   available. Capture mode requires graphics even though it exits unattended.
+- The PNG/sprite Phase 0 dependency probe has its own bounded runner. It probes
+  backend APIs and reuses the Player PNG writer; it is not the production renderer.
+  When changing that probe, run `cargo build --release --example png_sprite_probe
+  --locked --offline`, then `pwsh -NoProfile -File tools/run_png_sprite_probe.ps1
+  -Mode <mode>` for `cpu`, `gpu`, `gpu-recreate`, and `gpu-early-retire`. The CPU
+  runner uses Python stdlib fixtures and a 10-second child watchdog; GPU modes use
+  30 seconds. Negative controls must fail at their named assertion. Generated
+  files go under `target/png-sprite-probe/`; durable evidence and contracts are
+  linked from the Phase 0 record.
 - Add focused behavioral tests for simulation and boundary changes. Exercise
   script errors and invalid handles, plugin ABI mismatches, and packaged-game
   loading when those capabilities exist. Verify export behavior by launching a
