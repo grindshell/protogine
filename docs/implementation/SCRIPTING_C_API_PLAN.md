@@ -1413,3 +1413,40 @@ review fixes for commit.
   per-entry link refusal fails the junction test, and skipping the unwind fails
   the mkdir regression.
 - Verification on Windows MSVC x64: the full gate list above passes again.
+
+### Post-completion review: array scope, attempt parity, wrapper cache keys
+
+- `data.array` deep-converted the whole subtree to `tot::Value` and discarded it,
+  paying a full conversion for a guarantee that does not survive the script's
+  next assignment. It now checks only the keys of the table it marks; the shared
+  density check moved into `array_len`, which `array_to_tot` also uses. Element
+  values are still validated wherever they are converted, so marking a table
+  whose contents are not data succeeds and fails at `format`/`export`. The
+  existing test already showed a marked array going invalid after mutation; a
+  new case pins the moved error and that repairing the element then converts.
+- The native adapter refused draw/shutdown calls before counting the attempt, so
+  a protected loop there was bounded only by the deadline while malformed
+  arguments in init/update latched at 129. Counting now precedes the phase
+  refusal. A watched case makes 128 refused calls in draw, logs, and confirms
+  attempt 129 latches with no call reaching the plugin. `ctx.input` reads remain
+  deliberately uncounted: they allocate nothing and cost no more than the pure
+  Luau around them, and folding them into the 4,096 world budget would break the
+  ordinary pattern of reading a button inside a per-entity loop.
+- The entity wrapper cache built a 16-byte Lua string key on every lookup. It now
+  packs the session index and hecs slot into one exact Lua number below 2^52 and
+  verifies the stored handle, so a reused slot replaces its stale wrapper rather
+  than returning it. The cache holds each session marker, which keeps indices
+  stable and prevents address reuse; `SESSION_LIMIT` bounds that at 2^20.
+- Measured on the Ryzen 7 5800X with a release harness enumerating 4,096
+  entities per tick: 3.305 ms median before, 1.506 ms after, a 2.19x improvement.
+  A probe that bypassed canonicalization entirely measured 1.670 ms, so the cache
+  is now cheaper than not having one, because a hit reuses the existing userdata
+  instead of allocating a new one. The finding that prompted this attributed the
+  cost to fresh string allocation; Luau interns short strings, so the real cost
+  was hashing and mlua reference work, but the measured share was as reported.
+  The temporary harness was removed after measuring.
+- Negative controls: restoring the deep walk fails the new `data.array` case,
+  refusing before counting fails the draw-attempt case, and dropping the handle
+  comparison fails both the new cache unit test and the existing slot-reuse
+  runtime test.
+- Verification on Windows MSVC x64: the full gate list above passes again.

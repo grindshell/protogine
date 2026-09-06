@@ -35,14 +35,18 @@ impl PartialEq for EntityHandle {
 impl Eq for EntityHandle {}
 
 impl EntityHandle {
-    /// Process-local identity for private VM caches, never a persisted/public ID.
+    /// Session marker for private VM caches, never a persisted/public ID.
     #[cfg(feature = "scripting")]
-    pub(crate) fn cache_key(&self) -> [u8; size_of::<usize>() + 8] {
-        let mut key = [0; size_of::<usize>() + 8];
-        key[..size_of::<usize>()]
-            .copy_from_slice(&(Rc::as_ptr(&self.session) as usize).to_le_bytes());
-        key[size_of::<usize>()..].copy_from_slice(&self.entity.to_bits().get().to_le_bytes());
-        key
+    pub(crate) fn session(&self) -> &Rc<()> {
+        &self.session
+    }
+
+    /// The hecs slot, unique among the live entities of one session. Generation
+    /// is deliberately excluded: a cache keyed by slot detects a reused slot by
+    /// comparing handles, so stale wrappers are replaced instead of accumulating.
+    #[cfg(feature = "scripting")]
+    pub(crate) fn slot(&self) -> u32 {
+        self.entity.id()
     }
 }
 

@@ -1,4 +1,4 @@
-//! Callback-scoped kernel bindings. No VM work happens while a kernel is borrowed.
+﻿//! Callback-scoped kernel bindings. No VM work happens while a kernel is borrowed.
 
 use super::utilities::UtilityBudget;
 use crate::{
@@ -9,7 +9,10 @@ use mlua::{
     AnyUserData, FromLuaMulti, Lua, LuaString, MetaMethod, MultiValue, Scope, Table, UserData,
     UserDataMethods,
 };
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 impl UserData for EntityHandle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -21,7 +24,17 @@ impl UserData for EntityHandle {
 
 /// Canonical wrappers while Lua retains them, including as table keys. Weak
 /// values let the VM reclaim unused wrappers and cache entries under its heap cap.
-pub(super) struct EntityCache(Table);
+pub(super) struct EntityCache {
+    values: Table,
+    /// Sessions seen by this cache, in key order. Holding the marker keeps each
+    /// index stable and stops a freed session's address from being reused.
+    sessions: RefCell<Vec<Rc<()>>>,
+}
+
+/// Enough sessions for any real host while keeping every packed key exact.
+const SESSION_LIMIT: usize = 1 << 20;
+/// 2^32, one whole u32 slot space per session, so packed keys never collide.
+const SLOT_SPACE: f64 = 4_294_967_296.0;
 
 impl EntityCache {
     pub(super) fn new(lua: &Lua) -> mlua::Result<Self> {
@@ -30,16 +43,47 @@ impl EntityCache {
         meta.raw_set("__mode", "v")?;
         meta.set_readonly(true);
         values.set_metatable(Some(meta))?;
-        Ok(Self(values))
+        Ok(Self {
+            values,
+            sessions: RefCell::new(Vec::new()),
+        })
+    }
+
+    /// Pack (session, slot) into one exact Lua number. Slots are u32 and the
+    /// session index is bounded above, so the result stays below 2^52 and needs
+    /// no allocation, unlike the byte-string key this replaces.
+    fn key(&self, entity: &EntityHandle) -> mlua::Result<f64> {
+        let mut sessions = self.sessions.borrow_mut();
+        let index = match sessions
+            .iter()
+            .position(|session| Rc::ptr_eq(session, entity.session()))
+        {
+            Some(index) => index,
+            None => {
+                if sessions.len() >= SESSION_LIMIT {
+                    return Err(mlua::Error::runtime("too many world sessions"));
+                }
+                sessions.push(entity.session().clone());
+                sessions.len() - 1
+            }
+        };
+        Ok(index as f64 * SLOT_SPACE + f64::from(entity.slot()))
     }
 
     fn get(&self, lua: &Lua, entity: &EntityHandle) -> mlua::Result<AnyUserData> {
-        let key = lua.create_string(entity.cache_key())?;
-        if let Some(value) = self.0.raw_get::<Option<AnyUserData>>(key.clone())? {
+        let key = self.key(entity)?;
+        // A slot is unique among one session's live entities, so a cached
+        // wrapper that does not match this handle belongs to a despawned entity
+        // whose slot was reused; replace it rather than returning a stale one.
+        if let Some(value) = self.values.raw_get::<Option<AnyUserData>>(key)?
+            && value
+                .borrow::<EntityHandle>()
+                .is_ok_and(|held| *held == *entity)
+        {
             return Ok(value);
         }
         let value = lua.create_userdata(entity.clone())?;
-        self.0.raw_set(key, value.clone())?;
+        self.values.raw_set(key, value.clone())?;
         Ok(value)
     }
 }
@@ -261,13 +305,42 @@ mod tests {
         lua.gc_collect().unwrap();
         let again = cache.get(&lua, &handle_a).unwrap();
         assert_eq!(state.raw_get::<String>(again.clone()).unwrap(), "player");
-        assert_eq!(cache.0.pairs::<LuaString, AnyUserData>().count(), 1);
+        assert_eq!(cache.values.pairs::<f64, AnyUserData>().count(), 1);
         drop(again);
         drop(state);
         lua.gc_collect().unwrap();
-        assert_eq!(cache.0.pairs::<LuaString, AnyUserData>().count(), 0);
+        assert_eq!(cache.values.pairs::<f64, AnyUserData>().count(), 0);
         assert!(a.position(&handle_a).is_ok());
         assert!(cache.get(&lua, &handle_a).is_ok());
+    }
+
+    #[test]
+    fn reused_slots_replace_their_stale_wrapper_without_growing_the_cache() {
+        let lua = Lua::new();
+        let cache = EntityCache::new(&lua).unwrap();
+        let mut kernel = Kernel::new();
+        let first = kernel.spawn(Position::default()).unwrap();
+        let stale = cache.get(&lua, &first).unwrap();
+        kernel.despawn(&first).unwrap();
+        let second = kernel.spawn(Position::default()).unwrap();
+        // hecs reuses the slot with a new generation, so both handles pack to
+        // the same cache key and the generation check is what separates them.
+        assert_eq!(first.slot(), second.slot());
+        assert_ne!(first, second);
+
+        let fresh = cache.get(&lua, &second).unwrap();
+        assert_ne!(stale.to_pointer(), fresh.to_pointer());
+        // The live entity is still canonical on every later lookup.
+        assert_eq!(
+            fresh.to_pointer(),
+            cache.get(&lua, &second).unwrap().to_pointer()
+        );
+        // The stale wrapper was replaced, not accumulated beside the new one.
+        assert_eq!(cache.values.pairs::<f64, AnyUserData>().count(), 1);
+        // Holding the stale wrapper never revives its entity.
+        assert!(kernel.position(&first).is_err());
+        assert!(kernel.position(&second).is_ok());
+        assert!(stale.borrow::<EntityHandle>().is_ok());
     }
 
     #[test]
@@ -293,14 +366,14 @@ mod tests {
         let mut host = ScriptHost::load(root.path(), ScriptLimits::default()).unwrap();
         let mut kernel = Kernel::new();
         // Inject refusal after userdata allocation, at the final cache write.
-        host.entities.0.set_readonly(true);
+        host.entities.values.set_readonly(true);
         host.init_in(Some(EngineContext::new(
             &mut kernel,
             InputSnapshot::default(),
         )))
         .unwrap();
         assert!(kernel.entities().unwrap().is_empty());
-        host.entities.0.set_readonly(false);
+        host.entities.values.set_readonly(false);
         host.update_in(Some(EngineContext::new(
             &mut kernel,
             InputSnapshot::default(),

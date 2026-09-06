@@ -126,10 +126,12 @@ impl Data {
                 if table.metatable().is_some() && !self.is_array(&table) {
                     return Err(mlua::Error::runtime("custom metatables are not data"));
                 }
-                // Validate before mutating the caller's table.
-                let mut walk = Walk::new(budget);
-                walk.node(0)?;
-                self.array_to_tot(&table, 0, &mut walk)?;
+                // Check this table's own keys only, and before marking it. A
+                // script may replace elements after marking, so a deep walk
+                // here would cost a full conversion for a guarantee that does
+                // not survive the next assignment; elements are validated when
+                // the value is converted.
+                array_len(&table, budget)?;
                 table.set_metatable(Some(self.array_meta.clone()))?;
                 Ok(table)
             })?,
@@ -288,29 +290,7 @@ impl Data {
         if !walk.active.insert(pointer) {
             return Err(mlua::Error::runtime("cyclic data table"));
         }
-        let len = table.raw_len();
-        walk.budget
-            .limit(len > 16_384, "data node limit exceeded")?;
-        let mut count = 0;
-        for pair in table.pairs::<Value, Value>() {
-            let (key, _) = pair?;
-            let key = match key {
-                Value::Integer(n) => n as f64,
-                Value::Number(n) => n,
-                _ => f64::NAN,
-            };
-            if !key.is_finite() || key.fract() != 0.0 || key < 1.0 || key > len as f64 {
-                return Err(mlua::Error::runtime(
-                    "arrays require dense one-based integer keys",
-                ));
-            }
-            count += 1;
-            walk.budget
-                .limit(count > 16_384, "data node limit exceeded")?;
-        }
-        if count != len {
-            return Err(mlua::Error::runtime("sparse arrays are not data"));
-        }
+        let len = array_len(table, walk.budget)?;
         let mut out = Vec::with_capacity(len);
         for i in 1..=len {
             out.push(self.to_tot(table.raw_get(i)?, depth + 1, walk)?);
@@ -318,6 +298,34 @@ impl Data {
         walk.active.remove(&pointer);
         Ok(tot::Value::Array(out))
     }
+}
+
+/// Confirm dense one-based integer keys and return the length. This is the only
+/// property that survives marking a table as an array, since the script owns the
+/// table afterwards; element values are checked wherever they are converted.
+fn array_len(table: &Table, budget: &UtilityBudget<'_>) -> mlua::Result<usize> {
+    let len = table.raw_len();
+    budget.limit(len > 16_384, "data node limit exceeded")?;
+    let mut count = 0;
+    for pair in table.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let key = match key {
+            Value::Integer(n) => n as f64,
+            Value::Number(n) => n,
+            _ => f64::NAN,
+        };
+        if !key.is_finite() || key.fract() != 0.0 || key < 1.0 || key > len as f64 {
+            return Err(mlua::Error::runtime(
+                "arrays require dense one-based integer keys",
+            ));
+        }
+        count += 1;
+        budget.limit(count > 16_384, "data node limit exceeded")?;
+    }
+    if count != len {
+        return Err(mlua::Error::runtime("sparse arrays are not data"));
+    }
+    Ok(len)
 }
 
 fn parse_integer(text: &LuaString) -> mlua::Result<tot::Integer> {

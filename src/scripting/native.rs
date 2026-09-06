@@ -51,16 +51,17 @@ pub(super) fn bind<'s>(
             if let Some(fault) = budget.check() {
                 return Err(mlua::Error::runtime(fault));
             }
-            if !callable {
-                return Err(mlua::Error::runtime("native calls require init or update"));
-            }
-            // Count malformed and missing arguments too: typed closure arguments
-            // would fail mlua's conversion before reaching the attempt budget.
+            // Count every attempt before rejecting it, including phase
+            // refusals, malformed arguments and missing ones: typed closure
+            // arguments would fail mlua's conversion before the attempt budget.
             calls += 1;
             if calls > 128 {
                 let fault = "native call/buffer limit exceeded";
                 budget.fail(fault);
                 return Err(mlua::Error::runtime(fault));
+            }
+            if !callable {
+                return Err(mlua::Error::runtime("native calls require init or update"));
             }
             let (plugin, function, input, output) =
                 <(LuaString, LuaString, Buffer, Buffer)>::from_lua_multi(args, lua)?;

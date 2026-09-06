@@ -145,7 +145,9 @@ behavior that depends on them.
   omit world/input bindings. World operations return owned data/opaque handles
   and release all hecs/RefCell borrows before VM work. Only init/update mutate
   world state. Validate session identity and generation on every handle access.
-  Canonical wrappers in a private weak VM cache preserve Luau table-key identity.
+  Canonical wrappers in a private weak VM cache preserve Luau table-key identity;
+  it packs (session, hecs slot) into one exact Lua number and compares the stored
+  handle, so a reused slot replaces its stale wrapper instead of returning it.
   Roll back unpublished entities if wrapper/cache allocation fails during spawn.
   Fixed systems run after a successful callback; session faults invalidate the
   kernel. See the Phase 2 contract for entity/operation limits and input timing.
@@ -157,7 +159,9 @@ behavior that depends on them.
   rectangles, empty frame black) aligned with headless data and GPU tests.
   See Phase 3 for capture seeding, shutdown, input mappings and fault code 3.
 - `ctx.data` preserves integer text, null, and array/object identity; ordinary
-  Luau numbers encode as finite floats. Do not silently narrow integers or omit
+  Luau numbers encode as finite floats. `data.array` checks only the keys of the
+  table it marks, since the script may replace elements afterwards; element
+  values are validated wherever they are converted. Do not silently narrow integers or omit
   unsupported export values. Data strings/tables remain in VM-owned storage.
   `ctx.fs` reads only canonical bundle/data roots; writes use a synced temporary
   file and atomic replacement in the configured data root. Keep draw writes and
@@ -234,7 +238,7 @@ option; scheduling and mutation timing are separate contracts.
   diagnostics/output and host-service faults poison the registry and latch the
   first detailed failure outside pcall. Skip systems and tear down the session.
   Enforce 16 MiB combined buffers/call, 64 MiB requested bytes and 128 call attempts
-  per callback. Script and native logs share the callback's 64 KiB budget in order.
+  per callback, counting malformed arguments and draw/shutdown phase refusals. Script and native logs share the callback's 64 KiB budget in order.
   Check deadlines around native work; native hangs remain process-level failures.
 - Edit SDK definitions, then regenerate with `cargo run -p protogine-headergen`.
   cbindgen 0.29.2 is pinned in the development tool; the checked-in C header is a

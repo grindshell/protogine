@@ -228,7 +228,8 @@ the registry and fault the session even through `pcall`. Native failures include
 plugin/function context; cleanup preserves the primary fault.
 
 Limits are 16 MiB combined input/output capacity per call, 64 MiB requested bytes
-and 128 call attempts per callback. Native and script logs share the callback's
+and 128 call attempts per callback. Every attempt counts, including malformed
+arguments and calls refused because draw or shutdown cannot use the plugin. Native and script logs share the callback's
 64 KiB total in execution order. Limits and elapsed deadlines latch outside Luau;
 native calls that never return cannot be interrupted in process.
 
@@ -409,7 +410,7 @@ errors can be caught with `pcall`; resource-limit failures fault the session.
 | `ctx.data.export(value, format)` | Export `"json"`, `"yaml"`, or `"toml"` |
 | `ctx.data.integer(decimal_text)` | Create an exact integer with immutable `.text`; `tostring` returns its digits |
 | `ctx.data.number(value)` | Read a finite Luau number or convert integer userdata within `±(2^53−1)` |
-| `ctx.data.array(table)` | Validate and mark a dense one-based array, including an empty array |
+| `ctx.data.array(table)` | Mark a dense one-based array, including an empty array |
 | `ctx.data.null` | Distinct null value; unlike nil, it survives in tables |
 | `ctx.data.kind(value)` | `object`, `array`, `integer`, `float`, `null`, `boolean`, or `string` |
 
@@ -420,6 +421,11 @@ parsed floats use f64 precision. Object keys are sorted for repeatable output.
 Comments, source key order, and float spelling are not retained. Mixed/sparse
 tables, cycles, custom metatables, unsupported userdata, invalid UTF-8 data,
 nil values, NaN, and infinities cannot be serialized.
+
+`array` checks the keys of the table it marks, not the elements: the script owns
+that table afterwards and may replace any element, so element values are checked
+where they are converted, by `format` and `export`. Marking a table whose
+contents are not data therefore succeeds and fails at conversion.
 
 JSON preserves integer digits, though another reader may round them. YAML export
 supports signed/unsigned 64-bit integers. TOML requires an object root, signed

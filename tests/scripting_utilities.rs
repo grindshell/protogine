@@ -156,6 +156,11 @@ fn invalid_values_and_unsupported_exports_are_catchable() {
             local cycle = {}; cycle.self = cycle; fails(d.format, cycle)
             fails(d.array, {[2] = true}); fails(d.array, {x = true})
             local a = d.array({1, 2, 3}); a[2] = nil; fails(d.format, a)
+            -- Marking checks this table's own keys; elements are checked where
+            -- they are converted, since the script owns the table afterwards.
+            local deep = d.array({{bad = function() end}})
+            fails(d.format, deep); fails(d.export, deep, 'json')
+            deep[1] = {ok = 1}; assert(d.format(deep))
             fails(d.export, d.array({}), 'toml')
             fails(d.export, d.null, 'toml'); fails(d.export, 42, 'toml')
             fails(d.export, {n = d.integer('18446744073709551616')}, 'yaml')

@@ -575,6 +575,7 @@ fn native_batch_contracts() {
         "calls",
         "calls-invalid-types",
         "calls-missing-args",
+        "draw-attempts",
         "logs",
         "host",
         "world",
@@ -712,7 +713,7 @@ fn batch_probe(root: &Path, case: &str) {
             end,
             draw=function(ctx)
                 assert(rawequal(ctx.native.plugins, registry))
-                assert(not pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output))
+                DRAW
             end,
             shutdown=function(ctx)
                 assert(rawequal(ctx.native.plugins, registry))
@@ -749,6 +750,8 @@ fn batch_probe(root: &Path, case: &str) {
         "calls-missing-args" => {
             "for i=1,128 do assert(not pcall(ctx.native.call)) end; ctx.log('128 rejected calls'); pcall(ctx.native.call)"
         }
+        // The budget under test is draw's, so update must not touch the plugin.
+        "draw-attempts" => "ctx.log('update done')",
         "logs" => {
             "local line=string.rep('x',4000); for i=1,16 do ctx.log(line) end; for i=1,100 do pcall(call,input,output) end"
         }
@@ -785,7 +788,23 @@ fn batch_probe(root: &Path, case: &str) {
         "#
         }
     };
-    fs::write(root.join("main.luau"), common.replace("BODY", body)).unwrap();
+    let draw = match case {
+        // A phase refusal consumes the callback's native attempt budget just as
+        // a malformed argument does, so a protected loop cannot run unbounded.
+        "draw-attempts" => {
+            r#"
+            local function refused()
+                return pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output)
+            end
+            for i = 1, 128 do assert(not refused()) end
+            ctx.log('128 refused in draw')
+            refused() -- attempt 129 latches even under pcall
+            "#
+        }
+        _ => "assert(not pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output))",
+    };
+    let source = common.replace("BODY", body).replace("DRAW", draw);
+    fs::write(root.join("main.luau"), source).unwrap();
     // Non-timeout cases should test their specific budgets on slow/debug hosts.
     let limits = ScriptLimits {
         callback_timeout: if case == "44" {
@@ -839,6 +858,24 @@ fn batch_probe(root: &Path, case: &str) {
                     .any(|s| s == "delivered" || s == "output changed")
             );
         }
+    } else if case == "draw-attempts" {
+        result.unwrap();
+        assert_eq!(runtime.completed_ticks(), 1);
+        let error = runtime.draw(0.0).unwrap_err();
+        assert!(
+            error.message.contains("native call/buffer limit"),
+            "{error}"
+        );
+        assert_eq!(runtime.state(), ScriptState::Faulted);
+        assert!(
+            runtime
+                .take_logs()
+                .iter()
+                .any(|s| s == "128 refused in draw"),
+            "the first 128 refusals must stay recoverable"
+        );
+        // Refused calls never reach the plugin, in any phase.
+        assert_eq!(trace(root).matches("call org.example.a\n").count(), 0);
     } else {
         result.unwrap();
         assert_eq!(runtime.completed_ticks(), 1);
