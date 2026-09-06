@@ -328,6 +328,9 @@ impl PluginSet {
     /// Execute once using host-owned input and disjoint zeroed output scratch.
     /// Only validated success returns bytes. A contract fault refuses every later
     /// call, while shutdown remains available. No VM or kernel access occurs here.
+    /// Oversize buffers and scratch allocation refusal return CallError::Rejected
+    /// without poisoning this registry. The Luau adapter separately latches its
+    /// script buffer/attempt budgets as session faults, including oversized buffers.
     pub fn call(
         &mut self,
         plugin_id: &str,

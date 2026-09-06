@@ -490,6 +490,13 @@ Contracts finalized in this slice:
   orderly stop. No callbacks after a fault, implicit script execution on drop,
   callback return values, or public coroutine API. `ctx.log` is the first host
   operation and its scoped function expires after each call.
+- The explicit standard-library allowlist is Luau's sandboxed base functions plus
+  `table`, `string`, `utf8`, `math`, `bit32`, `buffer`, `vector`, and `debug`.
+  Retain Luau's diagnostic-only `debug.info` and `debug.traceback` for game-authored
+  diagnostics. Host error tracebacks do not depend on that library. This is Luau's
+  two-function subset: no registry access, local/upvalue mutation or hooks. Remove
+  `loadstring`, `getfenv`, `setfenv`, `collectgarbage`, `newproxy`, and `print` from
+  the base environment; logging uses scoped `ctx.log`.
 - Require uses mlua's Luau resolver with canonical bundle-root validation and
   canonical file cache keys. Extensionless relative path segments select UTF-8
   `.luau` files; aliases, dotted segments, directory init modules, and escaping
@@ -582,8 +589,9 @@ Player or interpret a plugin manifest; manifest schema validation remains Phase 
   and cannot stand for a data value. `data.integer(decimal_text)` preserves
   arbitrary integers in immutable userdata with a `.text` field. All ordinary
   Luau numbers represent finite floats; parsing floats normalizes them to f64.
-  `data.number(integer)` explicitly converts only the safe integer range
-  `[-(2^53-1), 2^53-1]`. `data.kind(value)` reports the data kind.
+  `data.number(integer_userdata)` converts integer userdata only within the safe
+  range `[-(2^53-1), 2^53-1]`; finite ordinary Luau numbers pass through unchanged.
+  `data.kind(value)` reports the data kind.
   Object keys are sorted for repeatable output; source order/comments/float
   spelling are not preserved. Mixed/sparse tables, cycles, custom metatables,
   unsupported userdata, invalid UTF-8, and nonfinite numbers are errors.
@@ -600,7 +608,8 @@ Player or interpret a plugin manifest; manifest schema validation remains Phase 
   `fs.mkdir(path)` creates data subdirectories; `fs.write(path, bytes)` creates or
   replaces a data file atomically using a synced tempfile in the destination
   directory. Failed replacement preserves the previous file; crash durability
-  of the directory entry is not promised. Parent directories must already exist.
+  of the directory entry is not promised. `fs.write` requires existing parent
+  directories; `fs.mkdir` creates intermediate directories as needed.
   Writes/mkdir are allowed only in init/update/orderly shutdown; reads/list are
   also available in draw. All function references expire with their callback.
 - Paths use portable relative `/` segments, at most 4096 UTF-8 bytes; absolute,
@@ -1125,6 +1134,9 @@ Phase 5. The following detailed contract is frozen before implementation:
   unknown statuses, malformed diagnostics, host-service violations, changed
   output pointer/capacity, out-of-bounds written length or nonzero failure length
   poison the registry and latch a detailed session fault even under pcall.
+- Direct Rust `PluginSet::call` rejects oversized buffers recoverably without
+  poisoning the registry. The Luau adapter additionally enforces latched script
+  resource budgets, so its oversized buffers fault the session.
 - The independent C example computes an unweighted four-neighbor tile-grid
   distance field from one source (one batched result for all cells). Input schema
   `protogine.grid_distance`, version 1: little-endian u32 width, height, source
@@ -1236,3 +1248,28 @@ review fixes for commit.
   workspace/core-only/scripting-only tests, release scripting tests, release Player
   build and headless lifecycle example pass, as does the copied Player capture
   suite. Logs are under ignored `target/review-fix-checks/`.
+
+### Post-completion review: contract and coverage clarifications
+
+- Correct the lifecycle sample's stale drawing comment and scope parent-directory
+  requirements to `fs.write`. Clarify integer-userdata conversion and document
+  `FrameReport::clamped_seconds` as discarded wall time without renaming the API.
+- Retain and document the existing Luau debug subset and assert its exposed
+  functions in the host capability test. Feature-gated mutable bindings replace
+  unused-mut workarounds without changing native cleanup or callback ownership.
+- Share portable segment validation between manifest and filesystem paths,
+  including CONIN$/CONOUT$ and COM/LPT superscript device forms. Keep each caller's
+  length, extension and root policy. Add device-name refusal/ordinary-name controls,
+  manifest 128/129-byte ID and 1024/1025-byte path boundaries, and watched native
+  cases for well-typed invalid IDs and safe loading with no plugin registry.
+- Native scratch allocation refusal remains an explicit coverage gap: neither
+  `try_reserve_exact` failure has deterministic injection. Both allocations precede
+  foreign execution and output publication; RAII releases scratch without an entity
+  or plugin-state rollback. The recoverable return paths are source-reviewed but
+  unexercised. An allocator injection mechanism is deferred.
+- All required Rust, scripting and native feature/debug/release checks pass,
+  including Clippy, SDK tests, header drift, the lifecycle example, and native and
+  regular Player captures. Logs are under ignored `target/external-review-checks/`.
+  A full-suite run exposed a 100 ms disk-sync timeout in the earlier utility-call
+  accounting regression; give that test a two-second callback allowance while
+  retaining its exact call-limit assertions. Production deadlines are unchanged.

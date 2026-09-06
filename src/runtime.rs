@@ -20,6 +20,8 @@ pub struct FrameReport {
     /// Completed update and system passes, excluding a callback that stops early.
     pub ticks: u32,
     pub dropped_ticks: u32,
+    /// Wall time discarded by the 250 ms clamp: elapsed minus accepted time.
+    /// For a 1.0-second frame this is 0.75 seconds, before catch-up tick dropping.
     pub clamped_seconds: f64,
     pub alpha: f64,
 }
@@ -105,7 +107,9 @@ impl GameRuntime {
         };
         let scripts = match ScriptHost::load_with_roots(root, data_root, limits, seed) {
             Ok(scripts) => scripts,
-            Err(mut failure) => {
+            Err(failure) => {
+                #[cfg(feature = "native-plugins")]
+                let mut failure = failure;
                 #[cfg(feature = "native-plugins")]
                 if let Some(plugins) = &mut plugins {
                     if let Err(cleanup) = plugins.shutdown() {
@@ -115,8 +119,6 @@ impl GameRuntime {
                         failure.message.push_str(&format!("\n{log}"));
                     }
                 }
-                // `mut` is needed only when native loading is compiled in.
-                let _ = &mut failure;
                 return Err(failure);
             }
         };

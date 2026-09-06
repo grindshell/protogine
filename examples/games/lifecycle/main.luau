@@ -10,7 +10,6 @@ return {
         ctx.log(string.format("Tick %d: %.6f seconds", counter.ticks, counter.time))
     end,
     draw = function(ctx, alpha)
-        -- The headless host has no drawing API yet.
     end,
     shutdown = function(ctx)
         ctx.log("Protogine script stopped")

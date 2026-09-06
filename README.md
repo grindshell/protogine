@@ -285,6 +285,13 @@ once per VM; loaded source changes require a new host. Cycles and failed imports
 return script errors; failed results are not cached. Keep bundle files stable
 while the session is running.
 
+The standard-library allowlist is Luau's sandboxed base functions plus `table`,
+`string`, `utf8`, `math`, `bit32`, `buffer`, `vector`, and `debug`. Luau's `debug`
+contains only `info` and `traceback`, retained for game-authored diagnostics; host
+error tracebacks are captured independently. Registry access, local/upvalue
+mutation and debug hooks are unavailable. The host removes `loadstring`, `getfenv`,
+`setfenv`, `collectgarbage`, `newproxy`, and `print`; games log through `ctx.log`.
+
 Defaults are 64 MiB of VM heap, one second for load/init/shutdown execution, and
 100 ms per update/draw. Each source file is limited to 256 KiB, with at most 256
 compiled modules and 64 active imports including the entry module. Logging is
@@ -336,8 +343,10 @@ to directions, Space to `action`, and Backspace to `cancel`. Escape exits the Pl
 
 Frames clamp incoming time to 250 ms and run at most five ticks. Excess whole
 ticks are discarded, retaining fractional progress as draw alpha. `FrameReport`
-reports tick count, discarded ticks, clamped seconds, and alpha; `overloads()`
-counts affected frames. Invalid time leaves the clock/input/session untouched.
+reports tick count, discarded ticks, wall time discarded by the clamp
+(`clamped_seconds`), and alpha; `overloads()` counts affected frames. A 1.0-second
+frame reports 0.75 discarded seconds before any catch-up ticks are dropped.
+Invalid time leaves the clock/input/session untouched.
 Tick boundaries tolerate `1e-12` of a tick of rounding error; other fractions,
 including tiny inputs near zero, remain accumulated.
 Pending press/release edges wait through zero-tick frames, reach only the first
@@ -388,7 +397,7 @@ errors can be caught with `pcall`; resource-limit failures fault the session.
 | `ctx.data.format(value)` | Write a tot document from those values |
 | `ctx.data.export(value, format)` | Export `"json"`, `"yaml"`, or `"toml"` |
 | `ctx.data.integer(decimal_text)` | Create an exact integer with immutable `.text`; `tostring` returns its digits |
-| `ctx.data.number(value)` | Read a finite float or convert an integer within `±(2^53−1)` |
+| `ctx.data.number(value)` | Read a finite Luau number or convert integer userdata within `±(2^53−1)` |
 | `ctx.data.array(table)` | Validate and mark a dense one-based array, including an empty array |
 | `ctx.data.null` | Distinct null value; unlike nil, it survives in tables |
 | `ctx.data.kind(value)` | `object`, `array`, `integer`, `float`, `null`, `boolean`, or `string` |

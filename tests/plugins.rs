@@ -578,6 +578,8 @@ fn native_batch_contracts() {
         "logs",
         "host",
         "world",
+        "invalid-ids",
+        "safe-runtime",
     ] {
         cases.push((case.into(), echo.clone()));
     }
@@ -603,6 +605,33 @@ fn native_batch_contracts() {
 }
 
 fn batch_probe(root: &Path, case: &str) {
+    if case == "safe-runtime" {
+        // Leave the fixture DLL beside the game, but declare no plugins. Safe
+        // loading must supply an empty API without loading or calling the DLL.
+        fs::write(root.join("game.tot"), "version 1").unwrap();
+        fs::write(root.join("main.luau"), r#"
+            return {update = function(ctx)
+                assert(next(ctx.native.plugins) == nil)
+                local input = buffer.create(2)
+                local output = buffer.create(4); buffer.fill(output, 0, 85)
+                local ok, err = pcall(ctx.native.call, 'org.example.a', 'example.batch', input, output)
+                assert(not ok and string.find(tostring(err), 'unknown native plugin', 1, true))
+                assert(buffer.tostring(output) == string.rep(string.char(85), 4))
+                local entity = ctx.world.spawn(10, 20)
+                ctx.world.set_velocity(entity, 60, 0)
+            end}
+        "#).unwrap();
+        let mut runtime = GameRuntime::load(root, ScriptLimits::default()).unwrap();
+        runtime.init().unwrap();
+        runtime.step(InputSnapshot::default()).unwrap();
+        assert_eq!(runtime.state(), ScriptState::Running);
+        assert_eq!(runtime.completed_ticks(), 1);
+        assert_eq!(runtime.kernel().snapshot().unwrap()[0].position.x, 11.0);
+        runtime.shutdown().unwrap();
+        assert_eq!(runtime.state(), ScriptState::Stopped);
+        assert!(trace(root).is_empty(), "safe load executed native code");
+        return;
+    }
     if matches!(case, "host" | "poison") {
         let manifest = GameManifest::load(root).unwrap();
         // SAFETY: Controlled C fixture; native calls are inside the watched child.
@@ -633,11 +662,10 @@ fn batch_probe(root: &Path, case: &str) {
                 .call("org.example.a", "missing.function", &[], 0)
                 .is_err()
         );
-        assert!(
-            plugins
-                .call("org.example.a", "example.batch", &[], usize::MAX)
-                .is_err()
-        );
+        assert!(matches!(
+            plugins.call("org.example.a", "example.batch", &[], usize::MAX),
+            Err(protogine::plugins::CallError::Rejected(_))
+        ));
         assert_eq!(
             plugins
                 .call("org.example.a", "example.batch", &[0, 255], 2)
@@ -716,6 +744,18 @@ fn batch_probe(root: &Path, case: &str) {
         }
         "world" => {
             "assert(call(input,output) == 2); ctx.world.set_velocity(entity, buffer.readu8(output,0), 0)"
+        }
+        "invalid-ids" => {
+            r#"
+            for _, ids in {{'Org.example.a', 'example.batch'}, {'org.example.a', 'example-batch'}} do
+                local ok, err = pcall(ctx.native.call, ids[1], ids[2], input, output)
+                assert(not ok and string.find(tostring(err), 'invalid native identifier', 1, true))
+                assert(buffer.tostring(output) == string.rep(string.char(85), 4))
+            end
+            -- A valid call still works after both recoverable refusals.
+            assert(call(input, output) == 2)
+            assert(buffer.readu8(output, 0) == 238 and buffer.readu8(output, 1) == 213)
+        "#
         }
         "44" => {
             r#"
@@ -823,7 +863,7 @@ fn batch_probe(root: &Path, case: &str) {
             "no retry or later native call"
         );
     }
-    if matches!(case, "0" | "30" | "world") {
+    if matches!(case, "0" | "30" | "world" | "invalid-ids") {
         assert_eq!(
             trace(root).matches("call org.example.a\n").count(),
             if case == "30" { 4 } else { 1 }

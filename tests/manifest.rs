@@ -52,6 +52,14 @@ fn manifests_and_library_paths_have_bounded_validation() {
         "a.dll.",
         "a.dll ",
         "CON.dll",
+        "CONIN$.dll",
+        "conout$/a.dll",
+        "COM¹.dll",
+        "com².dll",
+        "COM³.dll",
+        "LPT¹.dll",
+        "lpt²/a.dll",
+        "LPT³.dll",
         "a//b.dll",
         "NUL/a.dll",
         "a.exe",
@@ -74,6 +82,46 @@ fn manifests_and_library_paths_have_bounded_validation() {
         ))
         .is_err()
     );
+}
+
+#[test]
+fn manifest_identifier_and_library_length_boundaries() {
+    for length in [128, 129] {
+        let id = format!("org.{}", "a".repeat(length - 4));
+        let result = GameManifest::parse(&format!(
+            r#"version 1 plugins [{{id "{id}" library "a.dll"}}]"#
+        ));
+        if length == 128 {
+            assert_eq!(result.unwrap().plugins[0].id, id);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("128 bytes"));
+        }
+    }
+    for length in [1024, 1025] {
+        let path = format!("{}{}.dll", "a/".repeat(500), "b".repeat(length - 1004));
+        let result = GameManifest::parse(&format!(
+            r#"version 1 plugins [{{id "org.a" library "{path}"}}]"#
+        ));
+        if length == 1024 {
+            assert_eq!(result.unwrap().plugins[0].library, path);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("1024 bytes"));
+        }
+    }
+    for path in [
+        "COM10.dll",
+        "LPT1_extra.dll",
+        "CONIN_extra.dll",
+        "plugins/雪.dll",
+    ] {
+        assert!(
+            GameManifest::parse(&format!(
+                r#"version 1 plugins [{{id "org.a" library "{path}"}}]"#
+            ))
+            .is_ok(),
+            "{path}"
+        );
+    }
 }
 
 #[test]

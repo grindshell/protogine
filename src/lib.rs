@@ -1,5 +1,7 @@
 //! Shared engine code, usable without a graphics context.
 
+mod portable_path;
+
 pub mod bundle;
 pub mod drawing;
 pub mod input;

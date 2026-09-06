@@ -316,6 +316,13 @@ fn module_paths_and_host_capabilities_are_restricted() {
         assert(io == nil and os == nil and package == nil and coroutine == nil)
         assert(loadstring == nil and getfenv == nil and setfenv == nil)
         assert(not pcall(function() math.pi = 0 end))
+        -- Luau's diagnostic subset is deliberate; VM mutation APIs stay absent.
+        for name, fn in debug do
+            assert((name == 'info' or name == 'traceback') and type(fn) == 'function')
+        end
+        assert(string.find(debug.info(1, 's'), 'main.luau', 1, true))
+        assert(string.find(debug.traceback('diagnostic'), 'diagnostic', 1, true))
+        assert(not pcall(function() debug.extra = true end))
         return {}
     "#,
     );

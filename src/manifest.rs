@@ -194,23 +194,7 @@ fn library_segments(path: &str) -> Result<Vec<&str>, ManifestError> {
     }
     let parts: Vec<_> = path.split('/').collect();
     for part in &parts {
-        let stem = part
-            .split('.')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_uppercase();
-        let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || (stem.len() == 4
-                && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                && matches!(stem.as_bytes()[3], b'1'..=b'9'));
-        if part.is_empty()
-            || matches!(*part, "." | "..")
-            || part.ends_with([' ', '.'])
-            || device
-            || part
-                .chars()
-                .any(|c| c.is_control() || "\\:*?\"<>|".contains(c))
-        {
+        if !crate::portable_path::valid_segment(part) {
             return Err(error(
                 "library must use portable relative path segments without traversal",
             ));

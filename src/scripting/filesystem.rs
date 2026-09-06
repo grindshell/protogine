@@ -238,26 +238,7 @@ fn segments(path: &str, allow_root: bool) -> mlua::Result<Vec<&str>> {
     }
     let parts: Vec<_> = path.split('/').collect();
     for part in &parts {
-        let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
-        let device = matches!(
-            stem.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-        ) || ["COM", "LPT"].iter().any(|prefix| {
-            stem.strip_prefix(prefix).is_some_and(|n| {
-                matches!(
-                    n,
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                )
-            })
-        });
-        if part.is_empty()
-            || matches!(*part, "." | "..")
-            || part.ends_with(['.', ' '])
-            || device
-            || part.chars().any(|ch| {
-                ch.is_control() || matches!(ch, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
-            })
-        {
+        if !crate::portable_path::valid_segment(part) {
             return Err(mlua::Error::runtime(
                 "path must use portable relative slash-separated names",
             ));

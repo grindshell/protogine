@@ -191,6 +191,14 @@ fn filesystem_paths_and_roots_are_explicit() {
                 assert(not pcall(ctx.fs.write, path, 'bad'), path)
                 assert(not pcall(ctx.fs.mkdir, path), path)
             end
+            for _, path in {'CONIN$.dll', 'conout$/a.dll', 'COM¹.dll', 'com².dll', 'COM³.dll', 'LPT¹.dll', 'lpt²/a.dll', 'LPT³.dll'} do
+                assert(not pcall(ctx.fs.write, path, 'bad'), path)
+                assert(not pcall(ctx.fs.mkdir, path), path)
+            end
+            for _, path in {'COM10.dll', 'LPT1_extra.dll', 'CONIN_extra.dll', '雪.dll'} do
+                ctx.fs.write(path, 'allowed')
+                assert(ctx.fs.read('data', path) == 'allowed')
+            end
             assert(not pcall(ctx.fs.read, 'unknown', 'main.luau'))
             assert(not pcall(ctx.fs.read, 'data', 'missing'))
             assert(not pcall(ctx.fs.write, 'missing/child', 'bad'))
@@ -286,7 +294,16 @@ fn malformed_utility_arguments_count_toward_callback_limit() {
             let data = tempfile::tempdir().unwrap();
             let path = data.path().join("progress.tot");
             fs::write(&path, "original").unwrap();
-            let mut host = load(root.path(), Some(data.path()));
+            // This tests call accounting; allow disk sync time under suite load.
+            let mut host = ScriptHost::load_with_data_root(
+                root.path(),
+                data.path(),
+                ScriptLimits {
+                    callback_timeout: std::time::Duration::from_secs(2),
+                    ..ScriptLimits::default()
+                },
+            )
+            .unwrap();
             let result = host.init();
             assert_eq!(fs::read_to_string(&path).unwrap(), "original", "{invalid}");
             if exceed {

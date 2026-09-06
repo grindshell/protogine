@@ -183,6 +183,8 @@ impl ScriptHost {
         {
             return Err(load_error(mlua::Error::runtime("invalid script limits")));
         }
+        // Luau DEBUG exposes only info/traceback for game-authored diagnostics;
+        // it supplies no registry, local/upvalue mutation or hook APIs.
         let libraries = StdLib::TABLE
             | StdLib::STRING
             | StdLib::UTF8
@@ -402,7 +404,7 @@ impl ScriptHost {
         phase: &'static str,
         number: Option<f64>,
         timeout: Duration,
-        mut engine: Option<EngineContext<'_>>,
+        engine: Option<EngineContext<'_>>,
     ) -> Result<(), ScriptError> {
         self.logs.clear();
         let Some(function) = self.callbacks[index].clone() else {
@@ -413,9 +415,9 @@ impl ScriptHost {
         let budget = self.budget.clone();
         let logs = CallbackLogs::default();
         #[cfg(feature = "native-plugins")]
+        let mut engine = engine;
+        #[cfg(feature = "native-plugins")]
         let native = engine.as_mut().and_then(|e| e.plugins.take());
-        // Mutable access is needed only to detach the scoped native capability.
-        let _ = &mut engine;
         let utility_budget = utilities::UtilityBudget::new(&budget);
         let commands = RefCell::new(Vec::new());
         let result = catch_interrupt(|| {
