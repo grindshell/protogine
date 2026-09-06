@@ -610,8 +610,9 @@ Player or interpret a plugin manifest; manifest schema validation remains Phase 
   Root trees must not be concurrently replaced by another process; these helpers
   do not claim an OS security boundary against hostile filesystem races.
 - Limits: 1 MiB per file/data input/output and per converted tree's string bytes,
-  16,384 data nodes, nesting 64, 1024 directory entries, 128 utility calls and
-  8 MiB of file transfer per callback. Resource/deadline failures latch a session
+  16,384 data nodes, nesting 64, 1024 directory entries, 128 utility call attempts
+  (including malformed or missing arguments) and 8 MiB of file transfer per
+  callback. Resource/deadline failures latch a session
   fault; ordinary validation/conversion/I/O failures are catchable. Parsing,
   conversion, and synchronous I/O cannot be preempted while inside native code.
 
@@ -706,8 +707,9 @@ commands remain Phase 3.
   Validate all resulting positions before committing the system's changes.
   Nonfinite results fault the session; no engine systems run after a failed
   callback. No gameplay behavior depends on hecs traversal order.
-- Cap live entities at 16,384 and world operations at 4,096 per callback. Both
-  limits latch session faults even through protected calls. Invalid handles,
+- Cap live entities at 16,384 and world call attempts at 4,096 per callback,
+  including malformed or missing arguments. Both limits latch session faults even
+  through protected calls. Invalid handles,
   nonfinite arguments, and phase violations are ordinary catchable errors.
 - Input uses six logical buttons: `up`, `down`, `left`, `right`, `action`,
   `cancel`. The application supplies held/pressed/released sets; the runtime
@@ -1219,3 +1221,18 @@ fixes. The native debug tests were rebuilt after the isolated mutation probes;
 future probes use a separate Cargo target directory. Gate and negative-control
 logs are under ignored `target/phase5-fixes/`. The owner approved Phase 5 and its
 review fixes for commit.
+
+### Post-completion review: callback attempt accounting
+
+- Data/filesystem and world bindings count attempts before fallible mlua argument
+  conversion, matching the native adapter. Invalid types and missing arguments
+  consume their callback budget; ordinary argument errors remain catchable within
+  the limit. Exceeding it latches a fault and blocks subsequent writes and systems.
+- Regressions cover each affected binding with invalid types and missing arguments,
+  exact limits, callback budget reset, unchanged files after protected failures,
+  and skipped system ticks. Both regression tests reproduced writes after an
+  exceeded limit before the fix and pass afterward.
+- Verification on Windows MSVC: required Rust/scripting fmt, check, clippy,
+  workspace/core-only/scripting-only tests, release scripting tests, release Player
+  build and headless lifecycle example pass, as does the copied Player capture
+  suite. Logs are under ignored `target/review-fix-checks/`.

@@ -145,6 +145,81 @@ fn permissions_expired_functions_and_validation_are_catchable() {
 }
 
 #[test]
+fn malformed_world_arguments_count_toward_callback_limit() {
+    for invalid in [
+        "w.spawn(0, {})",
+        "w.spawn()",
+        "w.despawn({})",
+        "w.despawn()",
+        "w.position({})",
+        "w.position()",
+        "w.velocity({})",
+        "w.velocity()",
+        "w.set_position(e, 0, {})",
+        "w.set_position()",
+        "w.set_velocity(e, {}, 0)",
+        "w.set_velocity()",
+    ] {
+        for exceed in [false, true] {
+            let root = game(&format!(
+                r#"local e
+                return {{
+                    init = function(ctx)
+                        e = ctx.world.spawn(0, 0)
+                        ctx.world.set_velocity(e, 60, 0)
+                    end,
+                    update = function(ctx)
+                        local w = ctx.world
+                        assert(not pcall(function() {invalid} end))
+                        for i = 1, 4094 do w.position(e) end
+                        if {exceed} then w.position(e) end
+                        local ok = pcall(w.set_position, e, 10, 20)
+                        if {exceed} then
+                            pcall(ctx.fs.write, 'progress.tot', 'overwritten')
+                        else
+                            assert(ok)
+                        end
+                    end,
+                }}"#,
+            ));
+            let data = tempfile::tempdir().unwrap();
+            let path = data.path().join("progress.tot");
+            fs::write(&path, "original").unwrap();
+            let mut runtime = GameRuntime::load_with_data_root(
+                root.path(),
+                data.path(),
+                ScriptLimits {
+                    callback_timeout: Duration::from_secs(2),
+                    ..ScriptLimits::default()
+                },
+            )
+            .unwrap();
+            runtime.init().unwrap();
+            let result = runtime.step(InputSnapshot::default());
+            assert_eq!(fs::read_to_string(&path).unwrap(), "original", "{invalid}");
+            if exceed {
+                let error = result.expect_err(invalid);
+                assert!(
+                    error.message.contains("world operation limit exceeded"),
+                    "{invalid}: {error}"
+                );
+                assert_eq!(runtime.state(), ScriptState::Faulted);
+                assert_eq!(runtime.completed_ticks(), 0);
+                assert_eq!(runtime.kernel().snapshot(), Err(KernelError::Inactive));
+            } else {
+                result.unwrap_or_else(|error| panic!("{invalid}: {error}"));
+                assert_eq!(state(&runtime)[0].0, Position { x: 11.0, y: 20.0 });
+                // The caught argument error counts once, the 4096th operation
+                // succeeds, and another callback starts with a fresh budget.
+                runtime.step(InputSnapshot::default()).unwrap();
+                assert_eq!(runtime.completed_ticks(), 2);
+                assert_eq!(state(&runtime)[0].0, Position { x: 11.0, y: 20.0 });
+            }
+        }
+    }
+}
+
+#[test]
 fn resource_limits_fault_even_inside_protected_calls() {
     for (source, updates, expected) in [
         (

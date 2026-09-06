@@ -323,8 +323,9 @@ Enumeration reuses retained userdata, so handles also work as Luau table keys;
 unused wrappers are eligible for garbage collection. Callback errors do not roll
 back prior mutations, but a spawn that fails to publish its handle removes the
 unpublished entity. Live entities are capped at 16,384, with
-4,096 world operations per callback; exceeding either limit faults the session
-even through `pcall`. Ordinary validation and permission errors remain catchable.
+4,096 world call attempts per callback, including malformed or missing arguments;
+exceeding either limit faults the session even through `pcall`. Ordinary validation
+and permission errors remain catchable.
 
 `ctx.input.held(name)`, `pressed(name)`, and `released(name)` read logical buttons
 `up`, `down`, `left`, `right`, `action`, and `cancel`. The Rust caller supplies an
@@ -436,8 +437,9 @@ choose when to perform it. A fault may skip shutdown; do not rely on it alone.
 
 Limits are 1 MiB per file/data input/output and per converted tree's string bytes,
 16,384 data nodes, nesting 64, and 1024 directory entries. Each callback allows
-128 utility calls and 8 MiB of file transfers. These bounds supplement the VM
-heap and callback deadline; native parsing, conversion, and I/O are not preemptible.
+128 utility call attempts (including malformed or missing arguments) and 8 MiB of
+file transfers. These bounds supplement the VM heap and callback deadline; native
+parsing, conversion, and I/O are not preemptible.
 
 The example creates a chosen data directory, then lets Luau restore and persist
 its own progress. Run this command twice to see the counter resume:

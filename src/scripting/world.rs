@@ -5,7 +5,10 @@ use crate::{
     input::{Button, InputSnapshot},
     kernel::{EntityHandle, Kernel, KernelError, Position, Velocity},
 };
-use mlua::{AnyUserData, Lua, LuaString, MetaMethod, Scope, Table, UserData, UserDataMethods};
+use mlua::{
+    AnyUserData, FromLuaMulti, Lua, LuaString, MetaMethod, MultiValue, Scope, Table, UserData,
+    UserDataMethods,
+};
 use std::cell::{Cell, RefCell};
 
 impl UserData for EntityHandle {
@@ -69,6 +72,8 @@ impl<'a> EngineContext<'a> {
         self
     }
 
+    // Count attempts before fallible conversion so malformed arguments cannot
+    // bypass the world operation budget.
     fn begin(
         &self,
         budget: &UtilityBudget<'_>,
@@ -96,8 +101,9 @@ impl<'a> EngineContext<'a> {
         let world = lua.create_table()?;
         world.raw_set(
             "spawn",
-            scope.create_function(move |lua, (x, y): (f64, f64)| {
+            scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, true, writable)?;
+                let (x, y) = <(f64, f64)>::from_lua_multi(args, lua)?;
                 let result = self.kernel.borrow_mut().spawn(Position { x, y });
                 let entity = kernel_result(budget, result)?;
                 match cache.get(lua, &entity) {
@@ -116,8 +122,9 @@ impl<'a> EngineContext<'a> {
         )?;
         world.raw_set(
             "despawn",
-            scope.create_function(move |_, handle: AnyUserData| {
+            scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, true, writable)?;
+                let handle = AnyUserData::from_lua_multi(args, lua)?;
                 let handle = entity(handle)?;
                 let result = self.kernel.borrow_mut().despawn(&handle);
                 kernel_result(budget, result)
@@ -125,8 +132,9 @@ impl<'a> EngineContext<'a> {
         )?;
         world.raw_set(
             "position",
-            scope.create_function(move |lua, handle: AnyUserData| {
+            scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, false, writable)?;
+                let handle = AnyUserData::from_lua_multi(args, lua)?;
                 let handle = entity(handle)?;
                 let result = self.kernel.borrow().position(&handle);
                 let value = kernel_result(budget, result)?;
@@ -135,8 +143,9 @@ impl<'a> EngineContext<'a> {
         )?;
         world.raw_set(
             "velocity",
-            scope.create_function(move |lua, handle: AnyUserData| {
+            scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, false, writable)?;
+                let handle = AnyUserData::from_lua_multi(args, lua)?;
                 let handle = entity(handle)?;
                 let result = self.kernel.borrow().velocity(&handle);
                 let value = kernel_result(budget, result)?;
@@ -145,8 +154,9 @@ impl<'a> EngineContext<'a> {
         )?;
         world.raw_set(
             "set_position",
-            scope.create_function(move |_, (handle, x, y): (AnyUserData, f64, f64)| {
+            scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, true, writable)?;
+                let (handle, x, y) = <(AnyUserData, f64, f64)>::from_lua_multi(args, lua)?;
                 let handle = entity(handle)?;
                 let result = self
                     .kernel
@@ -157,8 +167,9 @@ impl<'a> EngineContext<'a> {
         )?;
         world.raw_set(
             "set_velocity",
-            scope.create_function(move |_, (handle, x, y): (AnyUserData, f64, f64)| {
+            scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, true, writable)?;
+                let (handle, x, y) = <(AnyUserData, f64, f64)>::from_lua_multi(args, lua)?;
                 let handle = entity(handle)?;
                 let result = self
                     .kernel

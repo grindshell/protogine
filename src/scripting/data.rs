@@ -4,8 +4,8 @@ mod export;
 
 use super::utilities::UtilityBudget;
 use mlua::{
-    AnyUserData, Lua, LuaString, MetaMethod, Scope, Table, UserData, UserDataFields,
-    UserDataMethods, Value,
+    AnyUserData, FromLuaMulti, Lua, LuaString, MetaMethod, MultiValue, Scope, Table, UserData,
+    UserDataFields, UserDataMethods, Value,
 };
 use std::collections::HashSet;
 
@@ -49,8 +49,9 @@ impl Data {
         api.raw_set("null", self.null.clone())?;
         api.raw_set(
             "parse",
-            scope.create_function(move |lua, source: LuaString| {
+            scope.create_function(move |lua, args: MultiValue| {
                 budget.begin()?;
+                let source = LuaString::from_lua_multi(args, lua)?;
                 budget.bytes(source.as_bytes().len())?;
                 let value = match tot::parse(&source.to_str()?) {
                     Ok(value) => value,
@@ -119,8 +120,9 @@ impl Data {
         )?;
         api.raw_set(
             "array",
-            scope.create_function(move |_, table: Table| {
+            scope.create_function(move |lua, args: MultiValue| {
                 budget.begin()?;
+                let table = Table::from_lua_multi(args, lua)?;
                 if table.metatable().is_some() && !self.is_array(&table) {
                     return Err(mlua::Error::runtime("custom metatables are not data"));
                 }
@@ -144,8 +146,9 @@ impl Data {
         )?;
         api.raw_set(
             "export",
-            scope.create_function(move |lua, (value, format): (Value, LuaString)| {
+            scope.create_function(move |lua, args: MultiValue| {
                 budget.begin()?;
+                let (value, format) = <(Value, LuaString)>::from_lua_multi(args, lua)?;
                 let value = self.to_tot(value, 0, &mut Walk::new(budget))?;
                 let text = export::export(&value, &format.to_str()?)?;
                 budget.bytes(text.len())?;

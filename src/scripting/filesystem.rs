@@ -1,7 +1,7 @@
 //! Explicit bundle/data roots and bounded synchronous filesystem operations.
 
 use super::utilities::{BYTE_LIMIT, UtilityBudget};
-use mlua::{Lua, LuaString, Scope, Table};
+use mlua::{FromLuaMulti, Lua, LuaString, MultiValue, Scope, Table};
 use std::{
     fs::{self, File, Metadata},
     io::{Read, Write},
@@ -37,8 +37,9 @@ impl FileSystem {
         let api = lua.create_table()?;
         api.raw_set(
             "read",
-            scope.create_function(move |lua, (root, path): (LuaString, LuaString)| {
+            scope.create_function(move |lua, args: MultiValue| {
                 budget.begin()?;
+                let (root, path) = <(LuaString, LuaString)>::from_lua_multi(args, lua)?;
                 let path = self.resolve(&root.to_str()?, &path.to_str()?, false, false)?;
                 if !path.is_file() {
                     return Err(mlua::Error::runtime("read requires a regular file"));
@@ -54,8 +55,9 @@ impl FileSystem {
         )?;
         api.raw_set(
             "list",
-            scope.create_function(move |lua, (root, path): (LuaString, LuaString)| {
+            scope.create_function(move |lua, args: MultiValue| {
                 budget.begin()?;
+                let (root, path) = <(LuaString, LuaString)>::from_lua_multi(args, lua)?;
                 let path = self.resolve(&root.to_str()?, &path.to_str()?, true, false)?;
                 let mut entries = Vec::new();
                 let mut bytes = 0;
@@ -94,8 +96,9 @@ impl FileSystem {
         )?;
         api.raw_set(
             "mkdir",
-            scope.create_function(move |_, path: LuaString| {
+            scope.create_function(move |lua, args: MultiValue| {
                 budget.begin()?;
+                let path = LuaString::from_lua_multi(args, lua)?;
                 self.write_allowed(writable)?;
                 let mut current = self.select_root("data")?.to_path_buf();
                 for part in segments(&path.to_str()?, false)? {
@@ -119,8 +122,9 @@ impl FileSystem {
         )?;
         api.raw_set(
             "write",
-            scope.create_function(move |_, (path, bytes): (LuaString, LuaString)| {
+            scope.create_function(move |lua, args: MultiValue| {
                 budget.begin()?;
+                let (path, bytes) = <(LuaString, LuaString)>::from_lua_multi(args, lua)?;
                 self.write_allowed(writable)?;
                 budget.transfer(bytes.as_bytes().len())?;
                 let path = self.resolve("data", &path.to_str()?, false, true)?;

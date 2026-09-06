@@ -34,6 +34,8 @@ impl<'a> UtilityBudget<'a> {
         self.check()
     }
 
+    /// Count attempts before fallible argument conversion, including missing or
+    /// malformed arguments that mlua would reject before a typed closure runs.
     pub(super) fn begin(&self) -> mlua::Result<()> {
         self.calls.set(self.calls.get() + 1);
         self.limit(self.calls.get() > 128, "utility call limit exceeded")

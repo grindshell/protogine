@@ -250,6 +250,65 @@ fn absent_data_root_grants_only_bundle_reads() {
 }
 
 #[test]
+fn malformed_utility_arguments_count_toward_callback_limit() {
+    for invalid in [
+        "ctx.data.parse({})",
+        "ctx.data.parse()",
+        "ctx.data.array(false)",
+        "ctx.data.array()",
+        "ctx.data.export({}, {})",
+        "ctx.data.export()",
+        "ctx.fs.read('bundle', {})",
+        "ctx.fs.read()",
+        "ctx.fs.list('bundle', {})",
+        "ctx.fs.list()",
+        "ctx.fs.mkdir({})",
+        "ctx.fs.mkdir()",
+        "ctx.fs.write('progress.tot', {})",
+        "ctx.fs.write()",
+    ] {
+        for exceed in [false, true] {
+            let root = game(&format!(
+                r#"return {{
+                    init = function(ctx)
+                        for i = 1, 127 do ctx.data.kind(false) end
+                        assert(not pcall(function() {invalid} end))
+                        if {exceed} then
+                            pcall(function() {invalid} end)
+                            pcall(ctx.fs.write, 'progress.tot', 'overwritten')
+                        end
+                    end,
+                    update = function(ctx)
+                        ctx.fs.write('progress.tot', 'next callback')
+                    end,
+                }}"#,
+            ));
+            let data = tempfile::tempdir().unwrap();
+            let path = data.path().join("progress.tot");
+            fs::write(&path, "original").unwrap();
+            let mut host = load(root.path(), Some(data.path()));
+            let result = host.init();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "original", "{invalid}");
+            if exceed {
+                let error = result.expect_err(invalid);
+                assert!(
+                    error.message.contains("utility call limit exceeded"),
+                    "{invalid}: {error}"
+                );
+                assert_eq!(host.state(), ScriptState::Faulted);
+            } else {
+                result.unwrap_or_else(|error| panic!("{invalid}: {error}"));
+                assert_eq!(host.state(), ScriptState::Running);
+                // Argument errors at attempt 128 are recoverable; the next
+                // callback gets a fresh budget and can still save normally.
+                host.update().unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), "next callback");
+            }
+        }
+    }
+}
+
+#[test]
 fn utility_limits_latch_even_when_caught() {
     for body in [
         "pcall(d.parse, string.rep('x', 1024 * 1024 + 1))",
