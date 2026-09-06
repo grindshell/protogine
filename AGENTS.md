@@ -49,6 +49,12 @@ The [drawing API](src/drawing.rs) exposes owned clear/rectangle commands, shared
 by headless tools and the Player. The [tile sample](examples/games/tiles/main.luau)
 runs from copied source beside the Player. Capture mode seeds the VM before
 module loading and steps once per frame with neutral input and alpha 0.
+The optional `assets` feature, which `scripting` enables, adds the bundle-rooted
+[image service](src/assets.rs) with its [store](src/assets/store.rs) and
+[bounded worker](src/assets/worker.rs). Identity, status and bound types compile
+without a decoder, a VM or a window. [Rooted traversal](src/rooted_path.rs) is
+shared with `ctx.fs` and differs only in its final-node policy. No Luau image or
+sprite API exists yet.
 The optional [manifest](src/manifest.rs) and [native loader](src/plugins.rs) add
 trusted C plugin startup/cleanup before/after the VM. The [SDK](sdk/src/lib.rs)
 generates [the C header](include/protogine_plugin.h) with the separate
@@ -60,7 +66,9 @@ and export tooling remain unimplemented.
 Accepted and completed plans are indexed in [docs/implementation/README.md](docs/implementation/README.md).
 The [PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) records the accepted
 next milestone. [Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) completed its
-contracts and CPU/GPU feasibility probes; production asset APIs remain unimplemented.
+contracts and CPU/GPU feasibility probes. Phase 1 implemented the headless asset
+service; the Luau bindings, runtime integration and shared renderer remain
+unimplemented.
 The [scripting and C API plan](docs/implementation/SCRIPTING_C_API_PLAN.md) records
 accepted decisions, completed phases, verification evidence, and deferred scope.
 
@@ -174,6 +182,18 @@ behavior that depends on them.
   cannot represent, links, and other node types are reported as `unsupported`
   so one entry cannot hide a directory's siblings, while traversing them stays
   refused. A failed `mkdir` unwinds only the directories that call created.
+- `AssetStore` roots PNG requests at the canonical bundle, resolving spellings
+  synchronously so coalescing and handle identity are decided before returning.
+  Content work is staged across bounded passes on one worker that owns no VM,
+  kernel, plugin or GPU object. The store grants every allowance and reserves
+  every buffer before the worker allocates it; at most one grant is outstanding,
+  so a busy worker accumulates no credits. Admission, path and queue refusals
+  are immediate errors; post-admission failures are inspectable failed jobs
+  with `io`, `format`, `unsupported`, `limit` or `capacity` codes, and only
+  worker disconnection or a broken invariant is a service fault. Identities are
+  append-only per session and never reissued, including after a rolled back
+  publication. Unload invalidates every alias but does not free pixels a caller
+  still pins. See the Phase 1 record for limits and the frozen status schema.
 - Save handling belongs to game scripts: schema, file layout, timing, restoration,
   and migrations. The engine may expose general filesystem access, tot parsing
   and formatting, and tot-export utilities for JSON, YAML, and TOML. Do not add
@@ -270,6 +290,14 @@ option; scheduling and mutation timing are separate contracts.
   cargo build --release --bin protogine-player
   ```
 
+  Asset changes also require the decoder-only configuration, which builds and
+  tests the store without a VM or a window:
+
+  ```text
+  cargo test --workspace --no-default-features --features assets
+  cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
+  ```
+
   Scripting changes also require the real headless feature configuration and
   the combined Player/scripting configuration:
 
@@ -277,7 +305,7 @@ option; scheduling and mutation timing are separate contracts.
   cargo test --workspace --no-default-features --features scripting
   cargo check --workspace --all-targets --all-features
   cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
+  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets
   cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
   ```
 
@@ -310,6 +338,14 @@ option; scheduling and mutation timing are separate contracts.
 
   `scripting_feasibility` runs potentially runaway fixtures in child processes
   with a 10-second watchdog. Keep that outer timeout independent of the VM.
+  `assets` verifies rooting, path policy, coalescing and identity, staged
+  passes, decoded pixels, admission and storage bounds, eviction, cancellation
+  at every stage, and worker teardown, with no VM or graphics context. Its small
+  PNG fixtures and expected RGBA bytes are committed under `tests/fixtures/assets`
+  and regenerated with `python tools/asset_fixtures.py`; the maximum-size
+  fixtures are built in the test from stored DEFLATE blocks. Both specify
+  expected bytes independently of this engine's decoder, so regenerate rather
+  than recording whatever an implementation produced.
   `scripting_utilities` verifies conversions, rooted I/O, retained-value/stale-call
   behavior, limits, file replacement failure, and script-owned save/load.
   `kernel` and `runtime` cover handles, immediate writes, system ordering, scoped

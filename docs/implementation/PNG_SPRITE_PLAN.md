@@ -1,10 +1,11 @@
 # ADR-002: Bundle PNG assets and sprite drawing
 
-**Status:** Accepted design; Phase 0 complete. Phases 1-4 not started.
+**Status:** Accepted design; Phases 0 and 1 complete. Phases 2-4 not started.
 P1-P8, including the P7 manual-eviction extension, accepted 2026-09-06.
 The [Phase 0 record](PNG_SPRITE_PHASE0.md) freezes the implementation contracts
-and records dependency/worker/GPU feasibility evidence. Production APIs remain
-unimplemented.
+and records dependency/worker/GPU feasibility evidence. Phase 1 implemented the
+headless asset service; its record is at the end of this document. The Luau
+bindings, runtime integration, shared renderer and sample remain unimplemented.
 **Date:** 2026-09-06.
 **Decider:** Project owner.
 **Baseline:** `61a72adb93c94c4a5dada0a7c0384f2f44490976`.
@@ -641,7 +642,7 @@ behavior or pixels. Keep changes as separate logical slices.
 | Phase | Work and primary files | Exit / stop gate |
 | --- | --- | --- |
 | 0. Contract and feasibility — complete | `examples/png_sprite_probe.rs`, fixture/watchdog tools, and `PNG_SPRITE_PHASE0.md`. | Contracts frozen; exact CPU/GPU pixels, metadata/interlace worker behavior, bounded upload passes, 100 pool cycles, capture lifetime and negative controls passed on the recorded Windows stack. Production integration remains later work. |
-| 1. Headless asset service | `src/assets.rs` and supporting modules; rooted-read extraction; `Cargo.toml`, `src/lib.rs`; `tests/assets.rs`. Implement admitted jobs, stage advancement, bounds, cache/identity, decode and teardown. | Identical decoded pixels through bounded service passes without VM/GPU. Rooting, coalescing, rollback, cancellation-safe teardown, queue fairness, storage pressure and stale/foreign IDs pass. Existing filesystem regressions remain intact. |
+| 1. Headless asset service — complete | `src/assets.rs` and supporting modules; rooted-read extraction; `Cargo.toml`, `src/lib.rs`; `tests/assets.rs`. Implement admitted jobs, stage advancement, bounds, cache/identity, decode and teardown. | Identical decoded pixels through bounded service passes without VM/GPU. Rooting, coalescing, rollback, cancellation-safe teardown, queue fairness, storage pressure and stale/foreign IDs pass. Existing filesystem regressions remain intact. |
 | 2. Luau and runtime integration | `src/scripting/assets.rs`, `src/scripting/drawing.rs`, `src/scripting.rs`, `src/runtime.rs`, `src/drawing.rs`; runtime/test drivers. | Init/update requests work in ScriptHost and GameRuntime; callbacks continue while loading. Status/error/readiness, eviction utilities, canonical wrappers, publication, budgets and cleanup obey frozen contracts. Preload/completion-trace tests use the same service path. No GPU dependency enters scripting-only builds. |
 | 3. Shared renderer and Player | `src/rendering.rs`, `src/bin/player.rs`, readiness acknowledgements and fault integration; actual Player captures/input probes. | Bounded upload passes publish only complete images; rendering never forces loading. One admission/upload sequence per uncached image, explicit eviction/reload, queued-frame pinning, mixed ordering, shutdown captures and repeated-session pool bounds pass. Pending work is cleaned on faults/exit. Existing rectangle/startup/native captures pass. |
 | 4. Authoring sample and delivery | `examples/games/sprites/` using the supplied Kenney sheet and provenance; README/AGENTS/index updates; complete verification matrix. | Copied Player shows a responsive loading state, then the room and animated controllable character. Requests during update and PNG replacement without rebuilding are demonstrated. Deterministic preload replay, live loading interaction, and limitations are recorded. |
@@ -803,6 +804,167 @@ applicable check matrix, copied-game and interactive evidence, documentation
 matching final APIs/limits, and no unresolved correctness gate. Archive the plan
 as completed only then. Until implementation starts, documentation changes need
 only content, link, and diff review; this draft does not require running Rust tests.
+
+## Phase 1 completion record
+
+Completed 2026-09-06 on Windows 10 x64, MSVC, stable rustc. This phase touched
+no graphics code and required no graphics context.
+
+### Changed files
+
+- `src/assets.rs`: identity, status, error and bound types with no dependency on
+  a decoder, a VM or a window. `ImageId` is a `Copy` scalar of a process-unique
+  session number and an append-only image number with private construction.
+  `UploadAck` is defined here for Phase 3 and is not yet produced.
+- `src/assets/store.rs`: the session-local registry, admission, path and
+  spelling caches, byte accounting, grants, publication, eviction and teardown.
+- `src/assets/worker.rs`: one bounded worker owning file reads, decoder
+  construction, native row decoding and RGBA conversion.
+- `src/rooted_path.rs`: traversal extracted from the filesystem bindings. The
+  final-node policy is a parameter, so `ctx.fs` keeps today's behavior while
+  asset loading adds the regular-file requirement, canonicalization and the
+  containment recheck.
+- `src/scripting/filesystem.rs`: uses the shared helper and maps its errors back
+  to the existing diagnostics verbatim; no behavior change.
+- `Cargo.toml`, `src/lib.rs`: the `assets` feature, `scripting` enabling it, and
+  `image` pinned exactly at `=0.24.9`. `player` no longer names `image`
+  directly; it reaches it through `scripting`.
+- `tests/assets.rs`, `tests/fixtures/assets/`, `tools/asset_fixtures.py`.
+  `.gitattributes` now also pins `*.rgba` alongside `*.png`: the expected-pixel
+  files are raw bytes that can contain CR, and they are compared exactly.
+- `README.md`, `AGENTS.md`, `docs/implementation/README.md`.
+
+### Implemented contracts
+
+`AssetStore::new(root)` canonicalizes an absolute root and starts one worker.
+`request_png` validates, resolves and admits synchronously. `service` runs one
+non-blocking pass; `advance(wait)` runs exactly one pass and waits for the
+outstanding grant; `drain(timeout)` is the bounded preload helper with its own
+watchdog. `status`, `size` and `image` return owned snapshots or a pinning
+owner. `take_settled` hands the host the state transitions since the last drain.
+`unload` and `roll_back` are the two eviction entry points; `shutdown` is
+idempotent and joins the worker.
+
+Store and worker exchange one command and one reply at a time over bounded
+channels. The worker performs at most eight quanta or one non-preemptible stage
+per grant, with a 2 ms soft cutoff between operations, and holds no policy: the
+store computes each read allowance from the remaining per-image cap plus the
+overflow probe and free staging, and reserves output and scratch before the
+worker allocates either. Cancellation sets a per-job flag, marks the image
+terminal immediately, and discards whatever the worker returns; a job the worker
+still holds is abandoned explicitly before the next job starts, so no partial
+buffer outlives its identity.
+
+### Contract refinements made during implementation
+
+- **Terminal entries and registry slots.** A failed or unloaded image leaves
+  every path and spelling lookup the moment it settles, but keeps its registry
+  slot until `take_settled` takes its transition. This keeps the frozen "no
+  immortal terminal registry" rule while giving the host exactly one chance to
+  copy terminal status into VM-owned values, and bounds undrained transitions to
+  the registry size instead of letting them grow. A host that never drains stops
+  admitting rather than accumulating history.
+- **Decoder scratch is reserved conservatively.** `image` 0.24.9 does not expose
+  a PNG's interlace method, so every job reserves the whole native frame the
+  Adam7 path would decode eagerly, plus one conversion band. That is at most
+  16 MiB and 32 KiB, matching the frozen ceilings, and it is a separate counter
+  from the 64 MiB retained-content budget. Detecting interlacing would require a
+  second PNG header parser in the engine and was not added.
+- **`roll_back` is the Phase 2 publication hook.** Rust admission has no
+  fallible step after its checks, so the burned-identity path is exposed as an
+  explicit operation for the VM wrapper publication that Phase 2 adds, and is
+  exercised from queued, loading and ready states.
+- **The early metadata check is retained and is not the authority.** A file
+  whose metadata already exceeds 17 MiB is refused before any read. A file at
+  exactly the cap is still read in full and accepted, which is what the test
+  asserts, so the accepted size is decided by bytes that actually arrived.
+
+### Behavioral observations
+
+- The Kenney sheet loads with 17,497 bytes read and 36 conversion bands, and its
+  stage trace is exactly `waiting, read, header, allocate, decode, complete`.
+  Both figures match the Phase 0 measurements for the same file, from a
+  separate implementation of the same grant policy.
+- The pass count for that sheet is deliberately not fixed. A pass is bounded by
+  both the eight-band grant and the 2 ms soft cutoff, so it ranges from eleven
+  passes when every grant is used in full to one band per pass when it is not.
+  This debug run took 19. The test asserts that range rather than a constant,
+  because a time cutoff that never bit would not be a cutoff.
+- No pass exceeded eight work quanta of reads or eight conversion bands, and the
+  final pixels are identical to the same file drained in one call.
+- The maximum incompressible fixture encodes to 16,780,612 bytes: above the
+  16 MiB decoded size and inside the 17 MiB encoded cap, confirming the headroom
+  correction. That is byte-for-byte the size Phase 0's independently encoded
+  fixture reached, since incompressible input lands in stored blocks either way.
+  Two of them fit the 34 MiB aggregate staging allowance. Because
+  exactly one job reads at a time, observed staging peaked near one encoded file
+  rather than near the aggregate ceiling, so that ceiling is a bound rather than
+  the binding constraint; the per-image cap and registry are what admission
+  actually presses against.
+- Filling the store to 64 MiB with four maximum images makes the fifth job fail
+  as `capacity` after its dimensions are validated and before any output is
+  allocated, and unloading one image lets the retry succeed.
+- The 256-entry spelling memo can only be reached where the platform supplies
+  aliases: at most 128 images can be live, and evicting an image drops its
+  spellings with it. The bound is therefore covered on Windows through case
+  aliases, and the portable test covers the live-only invariant instead.
+  Nothing is lowercased to manufacture aliases on case-sensitive filesystems.
+- Cancelling at each of ten pass counts released every reservation, published
+  nothing, and left no service fault. Dropping a store mid-load joined its
+  worker every time.
+- Pinned pixels survive both `unload` and `shutdown` until the owner drops, and
+  the store's resident byte count reflects that rather than the logical state.
+
+### Commands and results
+
+All passed on this machine:
+
+```text
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo test --workspace --no-default-features
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release --bin protogine-player
+cargo test --workspace --no-default-features --features assets
+cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
+cargo test --workspace --no-default-features --features scripting
+cargo check --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --release --no-default-features --features scripting --test assets --test drawing --test runtime
+cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
+cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo test --test player_capture -- --ignored
+cargo test --test plugins -- --ignored
+```
+
+`tests/assets.rs` contains 30 tests, three of them Windows-only, and runs in
+about 3.5 seconds in debug and 1.3 seconds in release. The existing filesystem,
+scripting, runtime, drawing, plugin and capture suites pass unchanged, including
+the ignored GPU captures, which confirms the traversal extraction and the
+feature reshuffle changed no existing behavior.
+
+`cargo tree` confirms the boundaries: `--no-default-features` resolves only
+hecs and tot; adding `assets` adds image 0.24.9 and png 0.17.16 with no mlua or
+Macroquad; adding `scripting` adds mlua on top of that. `Cargo.lock` is
+unchanged, so the exact `image` pin matched the already resolved version.
+
+`tests/player_input.ps1` was not rerun: physical input, Player shutdown and the
+renderer are untouched by this phase. The distance benchmark was not rerun for
+the same reason, since deadline enforcement did not change.
+
+### Unresolved gaps for later phases
+
+- No Luau API exists yet. `ctx.assets`, the canonical VM wrappers, the attempt
+  budget, phase checks and terminal status retained on handles are Phase 2, and
+  `roll_back` is unused until then.
+- `GpuResidency` is always `Unavailable`, and `UploadAck` has no producer until
+  the Phase 3 renderer exists. Nothing here proves rendered pixels.
+- `GameRuntime` and `ScriptHost` do not own a store yet, so the frozen
+  once-per-frame grant, update-boundary publication and capture drain are not
+  wired up. The store's pass function is the one those will call.
+- Service faults are recorded and reported through `service_fault`, but no
+  caller turns one into a session fault yet.
 
 ## Planning evidence
 

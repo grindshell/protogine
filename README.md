@@ -492,6 +492,50 @@ cargo run --example script_host --no-default-features --features scripting -- ex
 The script writes `progress.tot` during update and rejects an unsupported schema
 version without overwriting the existing data. There is no engine save lifecycle.
 
+## Bundle image loading
+
+The optional `assets` feature adds a bundle-rooted PNG service that needs no VM
+and no graphics context. **There is no Luau image or sprite API yet**: this is
+the Rust `protogine::assets::AssetStore` used by tools and, later, by the script
+bindings and renderer. See the
+[PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) for the milestone.
+
+A request names a bundle-relative `.png` path with portable slash-separated
+segments, never a path relative to the working directory, the module directory
+or the executable. Path validation and rooted resolution are synchronous, so a
+missing file, a refused spelling, or a full queue or registry is an immediate
+error that publishes no handle. Everything after that is staged across bounded
+service passes on one worker: reading, header parsing, output allocation,
+decoding and RGBA conversion. Content problems become inspectable failed jobs
+rather than errors at the call site.
+
+Accepted input is a static PNG with RGB, RGBA, grayscale, grayscale-alpha or
+indexed color, including palette transparency and 1/2/4-bit grayscale, and
+including interlaced images. APNG and 16-bit channels are refused explicitly
+rather than silently reduced. Output is tightly packed top-to-bottom RGBA8 with
+straight alpha, without ICC or gamma correction, premultiplication or flipping.
+
+| Bound | Value |
+| --- | --- |
+| Registry | 128 pending or resident images per store |
+| Job queue | 8 admitted jobs, one active worker and decoder, FIFO |
+| Encoded file | 17 MiB, checked against actual reads plus a one-byte probe |
+| Encoded staging | 34 MiB outstanding, including partial and failed reads |
+| Dimensions | Both in `1..=2048` |
+| Decoded image | 16 MiB per image, 64 MiB reserved, live and pinned per store |
+| Work per pass | 32 KiB work units, eight per pass, one non-preemptible stage |
+| Request spellings | 256 memoized, replaced in insertion order |
+
+Repeat requests for one canonical path reuse the same identity, and case
+aliases that resolve to one file on a case-insensitive filesystem reuse one
+image; nothing is lowercased to manufacture aliases elsewhere. `unload`
+invalidates a logical image for every alias and cancels any pending job, but
+bytes a caller still holds stay alive until it drops them. Identities are
+append-only, so a later request after a failure or unload is a new image and a
+stale one is refused by inspection. The byte ceilings are accounting rules and
+the 2 ms per-pass target is a scheduling cutoff, not a latency guarantee:
+filesystem calls, decompression and allocation can each overrun it.
+
 ## Code and checks
 
 - `src/lib.rs` exposes shared code; `src/bundle.rs` implements discovery.
@@ -502,6 +546,10 @@ version without overwriting the existing data. There is no engine save lifecycle
   and fixed-step execution; `src/scripting/world.rs` supplies scoped bindings.
 - `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and `utilities.rs`
   implement scoped data/I/O services and their shared callback limits.
+- `src/assets.rs` defines image identities, status snapshots and bounds without
+  any decoder; `src/assets/store.rs` and `src/assets/worker.rs` implement the
+  optional bounded PNG service. `src/rooted_path.rs` holds the traversal rules
+  shared with `ctx.fs`, differing only in the final-node policy.
 - `src/manifest.rs` validates tot declarations; `src/plugins.rs` owns native
   loading, foreign calls, descriptor validation and teardown.
 - The workspace contains the engine, dependency-free `sdk`, and the separate
@@ -509,7 +557,9 @@ version without overwriting the existing data. There is no engine save lifecycle
   `cargo run -p protogine-headergen`; normal Player builds do not run codegen.
   `.gitattributes` keeps the generated header in LF form for exact-byte checks.
 - The default `player` Cargo feature enables graphics, scripting and native
-  plugins. The shared library can be built without graphics or native loading.
+  plugins. `scripting` enables `assets`, and `assets` alone builds the PNG
+  service without a VM or a window. The shared library can be built without
+  graphics, decoding or native loading.
 
 ```text
 cargo fmt --all -- --check
@@ -517,10 +567,12 @@ cargo check --workspace --all-targets
 cargo test --workspace
 cargo test --workspace --no-default-features
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-default-features --features assets
+cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets
 cargo check --no-default-features --features native-plugins
 cargo test --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
 cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest

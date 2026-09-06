@@ -1,7 +1,10 @@
 //! Shared engine code, usable without a graphics context.
 
 mod portable_path;
+#[cfg(feature = "assets")]
+mod rooted_path;
 
+pub mod assets;
 pub mod bundle;
 pub mod drawing;
 pub mod input;

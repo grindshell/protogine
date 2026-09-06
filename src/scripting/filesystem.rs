@@ -1,6 +1,7 @@
 //! Explicit bundle/data roots and bounded synchronous filesystem operations.
 
 use super::utilities::{BYTE_LIMIT, UtilityBudget};
+use crate::rooted_path::{self, PathError, Policy};
 use mlua::{FromLuaMulti, Lua, LuaString, MultiValue, Scope, Table};
 use std::{
     ffi::OsStr,
@@ -8,6 +9,14 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+
+/// Preserve this API's existing diagnostics over the shared traversal rules.
+fn path_error(error: PathError) -> mlua::Error {
+    match error {
+        PathError::Io(error) => error.into(),
+        other => mlua::Error::runtime(other.to_string()),
+    }
+}
 
 pub(super) struct FileSystem {
     bundle: PathBuf,
@@ -142,11 +151,11 @@ impl FileSystem {
         created: &mut Vec<PathBuf>,
     ) -> mlua::Result<()> {
         let mut current = self.select_root("data")?.to_path_buf();
-        for part in segments(path, false)? {
+        for part in rooted_path::segments(path, false).map_err(path_error)? {
             current.push(part);
             match fs::symlink_metadata(&current) {
                 Ok(meta) => {
-                    reject_link(&meta)?;
+                    rooted_path::reject_link(&meta).map_err(path_error)?;
                     if !meta.is_dir() {
                         return Err(mlua::Error::runtime("mkdir path contains a file"));
                     }
@@ -184,6 +193,8 @@ impl FileSystem {
         }
     }
 
+    /// Keep this API's final-node policy: the resolved node is neither required
+    /// to be a regular file nor canonicalized here, exactly as before.
     fn resolve(
         &self,
         name: &str,
@@ -191,25 +202,17 @@ impl FileSystem {
         allow_root: bool,
         allow_missing_file: bool,
     ) -> mlua::Result<PathBuf> {
-        let mut current = self.select_root(name)?.to_path_buf();
-        let parts = segments(path, allow_root)?;
-        for (i, part) in parts.iter().enumerate() {
-            current.push(part);
-            match fs::symlink_metadata(&current) {
-                Ok(meta) => {
-                    reject_link(&meta)?;
-                    if i + 1 < parts.len() && !meta.is_dir() {
-                        return Err(mlua::Error::runtime("path contains a non-directory"));
-                    }
-                }
-                Err(error)
-                    if allow_missing_file
-                        && i + 1 == parts.len()
-                        && error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(current)
+        let root = self.select_root(name)?;
+        rooted_path::resolve(
+            root,
+            path,
+            Policy {
+                allow_root,
+                allow_missing_file,
+                canonical_file: false,
+            },
+        )
+        .map_err(path_error)
     }
 }
 
@@ -224,36 +227,16 @@ fn root(path: &Path) -> mlua::Result<PathBuf> {
     Ok(path)
 }
 
-fn is_link(metadata: &Metadata) -> bool {
-    let link = metadata.file_type().is_symlink();
-    #[cfg(windows)]
-    let link = {
-        use std::os::windows::fs::MetadataExt;
-        link || metadata.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
-    };
-    link
-}
-
-fn reject_link(metadata: &Metadata) -> mlua::Result<()> {
-    if is_link(metadata) {
-        Err(mlua::Error::runtime(
-            "symlinks and reparse points are not allowed",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 /// Classify one directory entry. Only entries whose name a script can pass back
 /// to read/list/write are reported as `file` or `directory`; links, other node
 /// types, and names outside the portable policy are reported as `unsupported`
 /// so that a single unrepresentable entry cannot make a directory unlistable.
 /// An unsupported name may be lossy and must not be used as a path.
 fn entry_kind(name: &OsStr, metadata: &Metadata) -> (String, &'static str) {
-    let usable = !is_link(metadata)
+    let usable = !rooted_path::is_link(metadata)
         && name
             .to_str()
-            .is_some_and(|name| segments(name, false).is_ok());
+            .is_some_and(|name| rooted_path::segments(name, false).is_ok());
     let kind = if usable && metadata.is_file() {
         "file"
     } else if usable && metadata.is_dir() {
@@ -262,22 +245,4 @@ fn entry_kind(name: &OsStr, metadata: &Metadata) -> (String, &'static str) {
         "unsupported"
     };
     (name.to_string_lossy().into_owned(), kind)
-}
-
-fn segments(path: &str, allow_root: bool) -> mlua::Result<Vec<&str>> {
-    if path.len() > 4096 || (path.is_empty() && !allow_root) {
-        return Err(mlua::Error::runtime("invalid filesystem path length"));
-    }
-    if path.is_empty() {
-        return Ok(Vec::new());
-    }
-    let parts: Vec<_> = path.split('/').collect();
-    for part in &parts {
-        if !crate::portable_path::valid_segment(part) {
-            return Err(mlua::Error::runtime(
-                "path must use portable relative slash-separated names",
-            ));
-        }
-    }
-    Ok(parts)
 }

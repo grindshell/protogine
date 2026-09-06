@@ -2,3 +2,5 @@
 /include/protogine_plugin.h text eol=lf
 # PNG fixtures and captured evidence are compared byte-for-byte.
 *.png -text
+# Expected decoded pixels are raw bytes, not text, and can contain CR.
+*.rgba -text
