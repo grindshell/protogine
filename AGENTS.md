@@ -69,7 +69,7 @@ accepted decisions, completed phases, verification evidence, and deferred scope.
 | ECS foundation for the core update loop | `hecs` | `0.11.1` | Engine-owned update ordering |
 | Audio | `kira` | `0.12.4` | Route engine audio through Kira |
 | Luau scripting host | `mlua` | `0.12.1` | Enable `luau-jit` |
-| Structured game data and manifest | `tot` | `0.1.0` | Git dependency from `https://github.com/totlang/tot`; use `game/game.tot` |
+| Structured game data and manifest | `tot` | `0.2.0` | Git dependency from `https://github.com/totlang/tot`; use `game/game.tot` |
 | Runtime native-library loading | `libloading` | `0.9.0` | Keep behind the native plugin boundary |
 
 These versions are project requirements. Verify versions, features, and target
@@ -162,8 +162,9 @@ behavior that depends on them.
   and migrations. The engine may expose general filesystem access, tot parsing
   and formatting, and tot-export utilities for JSON, YAML, and TOML. Do not add
   engine-owned save slots or automatic world serialization. Verify reusable
-  exporter availability and conversion rules before assuming a `tot-export`
-  crate exists; the inspected tot revision keeps YAML/TOML conversion in its CLI.
+  exporter conversion rules: tot 0.2.0 provides YAML/TOML library APIs behind
+  the `yaml`/`toml` features, enabled by `scripting`. Use TOML `NullPolicy::Error`
+  to reject nulls. Conversion diagnostics use tot paths with zero-based indices.
 
 ## Native plugin boundary
 

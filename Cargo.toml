@@ -25,7 +25,7 @@ required-features = ["scripting", "native-plugins"]
 [features]
 default = ["player"]
 player = ["dep:macroquad", "dep:image", "scripting", "native-plugins"]
-scripting = ["dep:mlua", "dep:tempfile", "dep:toml", "dep:yaml_serde"]
+scripting = ["dep:mlua", "dep:tempfile", "tot/toml", "tot/yaml"]
 native-plugins = ["dep:libloading", "dep:protogine-plugin-api"]
 
 [dependencies]
@@ -36,9 +36,10 @@ libloading = { version = "=0.9.0", optional = true }
 protogine-plugin-api = { path = "sdk", optional = true }
 mlua = { version = "=0.12.1", features = ["luau-jit"], optional = true }
 tempfile = { version = "=3.27.0", optional = true }
-toml = { version = "=1.1.4", optional = true }
-yaml_serde = { version = "=0.10.7", optional = true }
-tot = { git = "https://github.com/totlang/tot", rev = "2f407897f985654cdbb6201ad01ba05216a6e3d7", version = "=0.1.0" }
+tot = { git = "https://github.com/totlang/tot", rev = "031226fdcd930421580161faf6e8755bfba88517", version = "=0.2.0" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Independently parse the scripting export fixtures.
+toml = "=1.1.4"
+yaml_serde = "=0.10.7"

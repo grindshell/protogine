@@ -781,8 +781,12 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tot"
-version = "0.1.0"
-source = "git+https://github.com/totlang/tot?rev=2f407897f985654cdbb6201ad01ba05216a6e3d7#2f407897f985654cdbb6201ad01ba05216a6e3d7"
+version = "0.2.0"
+source = "git+https://github.com/totlang/tot?rev=031226fdcd930421580161faf6e8755bfba88517#031226fdcd930421580161faf6e8755bfba88517"
+dependencies = [
+ "toml 1.1.4+spec-1.1.0",
+ "yaml_serde",
+]
 
 [[package]]
 name = "ttf-parser"

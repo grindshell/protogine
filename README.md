@@ -413,8 +413,11 @@ nil values, NaN, and infinities cannot be serialized.
 JSON preserves integer digits, though another reader may round them. YAML export
 supports signed/unsigned 64-bit integers. TOML requires an object root, signed
 64-bit integers, and no null values anywhere. Unsupported values raise errors
-with their data path; no values are silently dropped. The TOML dependency is
-used for export only; game manifests still use tot.
+with their data path; no values are silently dropped. Exports use the tot 0.2.0
+library, with TOML's null policy explicitly set to error. Conversion diagnostics
+use tot paths with zero-based array indices (Luau arrays remain one-based).
+The `scripting` feature enables tot's YAML/TOML converters; `ctx.data.parse`
+continues to read tot, and game manifests still use tot.
 
 `ScriptHost::load` grants bundle reads. To grant writes, the embedding application
 calls `GameRuntime::load_with_data_root(bundle, data, limits)` (also available on

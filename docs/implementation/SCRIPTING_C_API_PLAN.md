@@ -21,7 +21,7 @@ batch computations through scoped, validated buffer calls.
 Preserve the shared editor/Player kernel, primarily Luau-authored games, and a
 C-compatible native plugin interface. Use `hecs` 0.11.1 and `mlua` 0.12.1 with
 `luau-jit`; retain Macroquad 0.4.16 and Kira 0.12.4 for their respective services.
-Use `tot` 0.1.0 from its GitHub repository for structured game data and
+Use `tot` 0.2.0 from its GitHub repository for structured game data and
 `libloading` 0.9.0 for runtime native-library loading. Save handling belongs to
 game scripts; general filesystem and data-conversion utilities may support it.
 The C API is initially a plugin interface into a running Protogine instance;
@@ -36,7 +36,7 @@ embedding the whole engine into another application is a separate capability.
 | D3 | Accepted 2026-09-05 | One runtime thread; fixed 60 Hz gameplay `update`, with `draw` at the presentation frame rate | Separate variable-rate and fixed-rate update callbacks provide more presentation hooks but require explicit ownership and ordering rules |
 | D4 | Accepted 2026-09-05 | First native target to verify: `x86_64-pc-windows-msvc` | Supporting more targets immediately requires matching SDK, loader, dependency, and JIT evidence |
 | D5 | Accepted 2026-09-05 | Source modules, explicit native plugin declarations, complete runtime restart | Bytecode distribution, automatic DLL discovery, and live reload each add separate compatibility/lifetime contracts |
-| D6 | Accepted 2026-09-05 | Use tot for `game/game.tot`; depend on `tot` 0.1.0 from GitHub | Do not use TOML for the manifest or substitute the sibling checkout as the normal dependency |
+| D6 | Accepted 2026-09-05; updated to 0.2.0 at owner request | Use tot for `game/game.tot`; depend on `tot` 0.2.0 from GitHub | Do not use TOML for the manifest or substitute the sibling checkout as the normal dependency |
 | D7 | Accepted 2026-09-05 | Scripts own saves; engine may provide filesystem, tot parsing/formatting, and JSON/YAML/TOML export utilities | Engine-owned save schemas, slots, migrations, and save timing are outside the engine contract |
 | D8 | Accepted 2026-09-05 | Use `libloading` 0.9.0 for runtime C API plugins | The loader supplies library/symbol access; Protogine still defines ABI and lifetime rules |
 
@@ -50,15 +50,18 @@ recording evidence and resolving incompatibilities before advancing.
 The tot declaration and optional libloading dependency are implemented:
 
 ```toml
-tot = { git = "https://github.com/totlang/tot", rev = "2f407897f985654cdbb6201ad01ba05216a6e3d7", version = "=0.1.0" }
+tot = { git = "https://github.com/totlang/tot", rev = "031226fdcd930421580161faf6e8755bfba88517", version = "=0.2.0" }
 libloading = "=0.9.0"
 ```
 
-The tot revision is the inspected GitHub HEAD on the date above, with package
-version 0.1.0. Verify it in Phase 0 and commit the resolved `Cargo.lock`; the
-version constraint checks the package version, not a Git tag. `../tot` is a
-source reference for development, not the shipped dependency source. The TOML
-syntax above is for Cargo's own manifest; game manifests use tot.
+The tot revision matches the inspected GitHub HEAD and `v0.2.0` tag, verified
+with `git ls-remote`, and declares package version 0.2.0. The version constraint
+checks the package version, not a Git tag; `Cargo.lock` records the revision.
+`../tot` is a source reference for development, not the shipped dependency source.
+The `scripting` feature enables `tot/yaml` and `tot/toml`; the core remains free
+of conversion dependencies. The TOML syntax above is for Cargo's own manifest;
+game manifests use tot. Historical verification records below retain their
+original dependency versions; the upgrade record follows Phase 1a.
 
 ## Proposed ownership and dependency boundaries
 
@@ -247,12 +250,10 @@ with its mutation permissions and execution order defined separately.
 - Proposed access phases are init/update and orderly shutdown; draw performs no
   filesystem writes. A game must not rely solely on shutdown to save: faults and
   process termination can skip that callback. The engine does not save for it.
-- The inspected tot 0.1.0 library exposes parse/format and JSON export. YAML/TOML
-  conversion is currently in `tot-cli`, not a reusable `tot-export` crate. Treat
-  `tot-export` as the requested capability, not an assumed dependency. Before
-  implementing those formats, select small in-process adapters or a reusable
-  upstream library if one becomes available; do not invoke the CLI per game call
-  or change the sibling repository as part of this plan.
+- tot 0.2.0 exposes parse/format and JSON export, plus reusable YAML/TOML
+  converters behind its `yaml`/`toml` features. Use these library APIs rather
+  than copied adapters or CLI invocation. TOML export must explicitly select
+  `NullPolicy::Error`; its default omission policy violates the script contract.
 - Freeze the Luau value mapping before publishing the utilities. Preserve or
   explicitly reject arbitrary-size integers, integer/float distinctions, null
   versus absent values, and empty arrays versus objects. TOML cannot represent
@@ -579,9 +580,9 @@ This slice adds scoped `ctx.data` and `ctx.fs` utilities. It does not wire the
 Player or interpret a plugin manifest; manifest schema validation remains Phase 4.
 
 - `data.parse(text)` and `data.format(value)` use the pinned tot library.
-  `data.export(value, format)` supports JSON through tot and small in-process
-  adapters to `yaml_serde` 0.10.7 and `toml` 1.1.4. These match the inspected
-  upstream CLI's adapter choices, without invoking that CLI or modifying tot.
+  `data.export(value, format)` uses tot 0.2.0's JSON/YAML/TOML library APIs.
+  The `scripting` feature enables tot's YAML/TOML converters. Direct `yaml_serde`
+  and `toml` dependencies are test-only, for independent output parsing.
   TOML is only an export target; `game.tot` remains tot.
 - Ordinary Luau tables are string-keyed objects; `data.array(table)` marks a
   dense one-based array, including empty arrays. Parsed arrays retain this tag.
@@ -599,6 +600,8 @@ Player or interpret a plugin manifest; manifest schema validation remains Phase 
   rejects integers outside signed/unsigned 64-bit range. TOML requires an object
   root, rejects null anywhere and integers outside signed 64-bit range. Export
   uses f64 floats; there is no implicit omission or lossy integer conversion.
+  TOML selects `NullPolicy::Error`. Conversion diagnostics use tot paths with
+  zero-based indices; Luau arrays remain one-based.
 - `ScriptHost::load` grants only bundle reads. `load_with_data_root` additionally
   accepts an existing absolute writable directory. Both roots are canonicalized
   and must be disjoint. The host selects the location; no process-working-directory
@@ -633,8 +636,9 @@ lexemes but complicate ordinary Luau editing and require separate heap accountin
 ### Phase 1a verification record — 2026-09-05
 
 Implemented in `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and
-`utilities.rs`; bindings are added by the shared host. Cargo pins the adapter
-versions above and uses tempfile 3.27.0 for same-directory file replacement.
+`utilities.rs`; bindings are added by the shared host. At this phase Cargo pinned
+yaml_serde 0.10.7 and toml 1.1.4 as adapters, with tempfile 3.27.0 for same-directory
+file replacement. The tot 0.2.0 upgrade below replaces the adapters.
 The selected libraries provide in-process serializers
 ([yaml_serde](https://docs.rs/yaml_serde/0.10.7/yaml_serde/),
 [toml](https://docs.rs/toml/1.1.4/toml/)) and a replacement operation
@@ -684,6 +688,45 @@ capture are unchanged; the opt-in GPU capture was not rerun. Filesystem behavior
 on other targets and crash durability remain unverified. Platform data-directory
 selection remains the embedding application's responsibility; plugin manifest
 interpretation is Phase 4.
+
+### tot 0.2.0 upgrade record — 2026-09-05
+
+Pinned GitHub revision `031226fdcd930421580161faf6e8755bfba88517`, matching
+upstream HEAD, `v0.2.0`, and the inspected sibling checkout. Replaced copied
+YAML/TOML adapters with `tot::yaml::to_string` and `tot::toml::to_string`, selecting
+`NullPolicy::Error`. No Luau import API was added; `data.parse` still reads tot.
+Upstream conversion errors now use tot paths with zero-based indices instead of
+the former `$` paths with one-based indices. Integer/null/root restrictions,
+sorted output, utility budgets, and scoped filesystem access remain in force.
+The parser's exact depth diagnostic is unchanged and its boundary tests pass.
+
+All 15 scripting utility tests pass in debug and release, including added signed
+integer boundaries, null refusal inside arrays, quoted diagnostic paths, and
+successful export after a caught refusal without mutating the input. Independent
+YAML/TOML parsers verify output types. `cargo tree --no-default-features -e normal`
+confirms the core has only hecs and dependency-free tot; scripting enables the
+two converter features. The lockfile changes only tot's revision/version and its
+converter dependency edges.
+
+Passed on Windows MSVC x64 with Rust 1.95.0 (tot requires Rust 1.88):
+
+```text
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo check --workspace --all-targets --all-features
+cargo test --workspace
+cargo test --workspace --no-default-features
+cargo test --workspace --no-default-features --features scripting
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --release --bin protogine-player
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities
+cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+```
+
+The default workspace suite initially hit sandbox-denied Clang access; its rerun
+with compiler access passed, including native plugin fixtures. Opt-in GPU captures
+were not rerun; rendering/input code is unchanged. Other targets remain unverified.
 
 ## Phase 2 implementation contract
 

@@ -57,7 +57,7 @@ fn tot_round_trip_preserves_value_kinds_and_large_integers() {
 }
 
 #[test]
-fn export_adapters_produce_typed_yaml_and_toml() {
+fn library_exports_produce_typed_yaml_and_toml() {
     let root = game(
         r#"
         return { init = function(ctx)
@@ -68,6 +68,8 @@ fn export_adapters_produce_typed_yaml_and_toml() {
             ctx.log(d.export({null = d.null, array = d.array({}), object = {}}, 'yaml'))
             ctx.log(d.export({n = d.integer('18446744073709551615')}, 'yaml'))
             ctx.log(d.export({n = d.integer('9223372036854775807')}, 'toml'))
+            ctx.log(d.export({n = d.integer('-9223372036854775808')}, 'yaml'))
+            ctx.log(d.export({n = d.integer('-9223372036854775808'), array = d.array({})}, 'toml'))
         end }
     "#,
     );
@@ -90,6 +92,48 @@ fn export_adapters_produce_typed_yaml_and_toml() {
     assert_eq!(yaml["n"].as_u64(), Some(u64::MAX));
     let toml: toml::Value = toml::from_str(&logs[4]).unwrap();
     assert_eq!(toml["n"].as_integer(), Some(i64::MAX));
+    let yaml: yaml_serde::Value = yaml_serde::from_str(&logs[5]).unwrap();
+    assert_eq!(yaml["n"].as_i64(), Some(i64::MIN));
+    let toml: toml::Value = toml::from_str(&logs[6]).unwrap();
+    assert_eq!(toml["n"].as_integer(), Some(i64::MIN));
+    assert!(toml["array"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn export_refusals_report_tot_paths_without_dropping_array_values() {
+    let root = game(
+        r#"
+        return { init = function(ctx)
+            local d = ctx.data
+            local values = d.array({d.integer('1'), d.null, d.integer('3')})
+            local value = {['a.b'] = values}
+            local ok, err = pcall(d.export, value, 'toml')
+            assert(not ok and string.find(tostring(err), '"a.b"[1]', 1, true))
+            assert(#values == 3 and values[2] == d.null)
+            assert(d.export(value, 'json') == '{"a.b":[1,null,3]}')
+            for _, format in {'yaml', 'toml'} do
+                values[2] = d.integer('-9223372036854775809')
+                local ok, err = pcall(d.export, value, format)
+                assert(not ok and string.find(tostring(err), '"a.b"[1]', 1, true))
+                assert(values[2].text == '-9223372036854775809')
+            end
+            values[2] = d.integer('2')
+            ctx.log(d.export(value, 'toml'))
+        end }
+    "#,
+    );
+    let mut host = load(root.path(), None);
+    host.init().unwrap();
+    assert_eq!(host.state(), ScriptState::Running);
+    let value: toml::Value = toml::from_str(&host.take_logs()[0]).unwrap();
+    let values = value["a.b"].as_array().unwrap();
+    assert_eq!(
+        values
+            .iter()
+            .map(toml::Value::as_integer)
+            .collect::<Vec<_>>(),
+        [Some(1), Some(2), Some(3)]
+    );
 }
 
 #[test]
@@ -113,6 +157,7 @@ fn invalid_values_and_unsupported_exports_are_catchable() {
             fails(d.array, {[2] = true}); fails(d.array, {x = true})
             local a = d.array({1, 2, 3}); a[2] = nil; fails(d.format, a)
             fails(d.export, d.array({}), 'toml')
+            fails(d.export, d.null, 'toml'); fails(d.export, 42, 'toml')
             fails(d.export, {n = d.integer('18446744073709551616')}, 'yaml')
             fails(d.export, {n = d.integer('9223372036854775808')}, 'toml')
             local ok, err = pcall(d.export, {nested = {bad = d.null}}, 'toml')

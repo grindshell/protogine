@@ -56,7 +56,7 @@ impl Data {
                 let value = match tot::parse(&source.to_str()?) {
                     Ok(value) => value,
                     Err(error) => {
-                        // The pinned tot 0.1.0 has no typed error kind. Match its
+                        // The pinned tot 0.2.0 has no typed error kind. Match its
                         // depth diagnostic exactly, since syntax errors can quote
                         // user text. Recheck this diagnostic when updating tot.
                         budget.limit(
