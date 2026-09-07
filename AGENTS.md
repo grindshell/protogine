@@ -56,8 +56,12 @@ without a decoder, a VM or a window. [Rooted traversal](src/rooted_path.rs) is
 shared with `ctx.fs` and differs only in its final-node policy. The
 [asset bindings](src/scripting/assets.rs) expose that service as `ctx.assets`,
 and `ctx.draw.sprite` publishes owned `DrawCommand::Sprite` values. The
-[loading sample](examples/games/loading/main.luau) requests during update and
-draws a progress bar until its sheet is ready.
+[sprite sample](examples/games/sprites/main.luau) requests both of its PNGs
+during update, draws a progress bar for each until it is ready, and then draws
+a tiled room and an animated character; [its tests](tests/sprites_sample.rs)
+replay it headlessly and a [Player capture](tests/player_capture.rs) runs it
+from a copied distribution. Its committed art comes from
+[`tools/sample_sprites.py`](tools/sample_sprites.py).
 The optional `graphics` feature, which `player` enables, adds the
 [shared renderer](src/rendering.rs): a context-lifetime pool of GPU allocation
 slots, bounded staged uploads and ordered command submission, with no VM
@@ -72,12 +76,12 @@ includes a typed Luau wrapper and parity implementation. Kira audio, the editor,
 and export tooling remain unimplemented.
 
 Accepted and completed plans are indexed in [docs/implementation/README.md](docs/implementation/README.md).
-The [PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) records the accepted
-next milestone. [Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) completed its
-contracts and CPU/GPU feasibility probes. Phase 1 implemented the headless asset
-service, Phase 2 its Luau and runtime integration, and Phase 3 the shared
-renderer, GPU residency and Player integration; the authoring sample remains
-unimplemented.
+The [PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) is complete.
+[Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) froze its contracts and
+CPU/GPU feasibility probes; Phase 1 implemented the headless asset service,
+Phase 2 its Luau and runtime integration, Phase 3 the shared renderer, GPU
+residency and Player integration, and Phase 4 the authoring sample and its
+delivery evidence.
 The [scripting and C API plan](docs/implementation/SCRIPTING_C_API_PLAN.md) records
 accepted decisions, completed phases, verification evidence, and deferred scope.
 
@@ -367,15 +371,17 @@ option; scheduling and mutation timing are separate contracts.
   cargo test --workspace --no-default-features --features scripting
   cargo check --workspace --all-targets --all-features
   cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets
+  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
   cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
-  cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/loading
-  cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/loading
+  cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/sprites
+  cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/sprites
   ```
 
   The last two are the staged and preloaded asset drivers. The three-tick
   lifecycle run is not a completion check for staged loading: read the printed
-  `assets [...]` trace and confirm the sheet actually completed.
+  `assets [...]` trace and confirm both sheets actually completed. Regenerating
+  the sample's art needs `python tools/sample_sprites.py`, which rewrites the
+  committed PNGs identically and prints their sizes.
 
   Native/SDK changes also require:
 
@@ -425,6 +431,13 @@ option; scheduling and mutation timing are separate contracts.
   PNG fixtures and needs no graphics context. Foreign handles and rolled back
   publication need a harness the VM cannot reach and are unit tests in
   `src/scripting/assets.rs`, as the world bindings do.
+  `sprites_sample` drives the committed `examples/games/sprites` bundle itself,
+  not a fixture copy: update-time requests, the two images becoming drawable
+  independently while movement continues, row-major room commands against the
+  cells and border the sample documents, unload and reload, and the same state
+  and animation frame at 30, 60 and 144 FPS after a preload. It maps image IDs
+  onto logical paths through the sizes the sample logs, since IDs differ between
+  sessions and the two shipped PNGs have deliberately different dimensions.
   `rendering` verifies the renderer's command validation and admission
   bookkeeping with no graphics context: `MacroquadRenderer::new` allocates
   nothing, `attach` on an empty pool touches no texture, and `validate` is
@@ -436,10 +449,23 @@ option; scheduling and mutation timing are separate contracts.
   `drawing` verifies command publication/validation, expired bindings, faults,
   and seeded sample state without graphics. `player_capture` verifies the actual
   copied Player, source edits, seeded PNG bytes, movement, compositing and faults.
+  Its sprite-sample test copies the Player, the Luau and the PNGs into an
+  isolated distribution, runs it from an unrelated working directory, and checks
+  the loading frame, the loaded frame's exact tinted texels, repeat capture
+  bytes, PNG replacement without a rebuild, a failed decode that stops nothing,
+  and the fault a missing asset raises.
   On Windows, run `cargo build --release --bin protogine-player` followed by
   `pwsh -NoProfile -File tests/player_input.ps1` when changing physical input or
   Player shutdown. The probe requires PowerShell 7 and a working graphics context;
   it checks each key mapping, held/edge state, Escape/close cleanup and fault exit.
+  Capture mode steps with neutral input, so it can never show a game reacting to
+  a key. `powershell -NoProfile -File tools/run_sprites_probe.ps1` posts real key
+  events to a live Player running the sprite sample and reads back what the game
+  did: movement up to the first solid tile and no further, both walk frames, the
+  idle frame on release, turning around, and Space evicting both images so the
+  next tick requests and reloads them. It runs the committed sample with one statement
+  added, a position log at the end of update, and fails if that insertion no
+  longer applies. Rerun it when changing the sample, physical input or eviction.
 
   Check additional target/feature configurations as they are introduced and
   document their actual commands here. `cargo run --bin protogine-player` opens

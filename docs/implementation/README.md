@@ -9,14 +9,16 @@ root unless noted otherwise.
 
 ## In progress
 
-- [PNG_SPRITE_PLAN.md](PNG_SPRITE_PLAN.md) — Staged bundle-local PNG loading,
-  sprite drawing, headless asset support, shared rendering, and script-controlled
-  eviction. P1-P8 accepted; [Phase 0](PNG_SPRITE_PHASE0.md) complete with contracts
-  and CPU/GPU evidence. Phase 1 delivered the headless asset service, Phase 2
-  its Luau and runtime integration, and Phase 3 the shared renderer and Player
-  integration. Phase 4 has not started.
+No plan is currently in progress.
 
 ## Completed
 
+- [PNG_SPRITE_PLAN.md](PNG_SPRITE_PLAN.md) — Completed staged bundle-local PNG
+  loading, sprite drawing, headless asset support, shared rendering, and
+  script-controlled eviction. [Phase 0](PNG_SPRITE_PHASE0.md) froze the contracts
+  with CPU/GPU evidence; Phase 1 delivered the headless asset service, Phase 2
+  its Luau and runtime integration, Phase 3 the shared renderer and Player
+  integration, and Phase 4 the authoring sample and delivery evidence.
 - [SCRIPTING_C_API_PLAN.md](SCRIPTING_C_API_PLAN.md) — Completed Luau scripting and
-  native C plugin milestone for Windows MSVC x64: Phases 0–5, including Phase 1a.
+  native C plugin milestone for Windows MSVC x64: Phases 0–5, including Phase 1a,
+  with one post-completion amendment.

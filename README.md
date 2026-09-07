@@ -39,6 +39,27 @@ The tile cruises horizontally. Arrows steer, Space pauses, and Backspace resets
 its position. Edit the copied Luau files and relaunch to change the game without
 rebuilding Rust. The sample uses code-drawn tiles and no external assets.
 
+The [sprite sample](examples/games/sprites/main.luau) draws a tiled room and an
+animated character from PNGs the bundle carries, so its `assets` directory has
+to travel with its source:
+
+```powershell
+cargo build --release --bin protogine-player
+New-Item -ItemType Directory -Force target/sprites-demo/game/assets | Out-Null
+Copy-Item target/release/protogine-player.exe target/sprites-demo/
+Copy-Item examples/games/sprites/*.luau target/sprites-demo/game/
+Copy-Item examples/games/sprites/assets/*.png target/sprites-demo/game/assets/
+& ./target/sprites-demo/protogine-player.exe
+```
+
+Both images are requested from the first update, so the first frames show a
+loading state with a progress bar per image while input already works. Arrows
+move, Backspace returns to the spawn, and Space unloads both images so the next
+tick requests them again and the loading state runs live. Replacing either PNG
+in the copied bundle changes the artwork without rebuilding anything; see
+[examples/README.md](examples/README.md) for their provenance and the shapes a
+replacement has to keep.
+
 ## Screenshot capture
 
 The Player includes a capture mode for snapshot tests and agent-driven visual
@@ -487,17 +508,19 @@ visible immediately. A large image therefore
 takes many frames; draw a loading state until its status is ready. Rust drivers
 can call `advance_assets(wait)` for one pass or `drain_assets(timeout)` to settle
 every admitted job under its own watchdog, without running callbacks or advancing
-simulation. The [loading sample](examples/games/loading/main.luau) requests during
-update and draws a progress bar until the sheet is ready:
+simulation. The [sprite sample](examples/games/sprites/main.luau) requests both
+of its images during update and draws a progress bar for each until it is ready:
 
 ```text
-cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/loading
-cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/loading
+cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/sprites
+cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/sprites
 ```
 
 The first form stages loading across ticks and prints the work each tick
 performed. `--preload` drains after init and after each step, which is the
-deterministic readiness schedule capture mode uses.
+deterministic readiness schedule capture mode uses. One job runs at a time in
+request order, so the sample asks for its small character sheet first and draws
+it while the much larger tileset is still decoding.
 
 ## Script data and filesystem utilities
 
@@ -596,9 +619,9 @@ version without overwriting the existing data. There is no engine save lifecycle
 ## Bundle image loading
 
 The optional `assets` feature adds a bundle-rooted PNG service that needs no VM
-and no graphics context. **There is no Luau image or sprite API yet**: this is
-the Rust `protogine::assets::AssetStore` used by tools and, later, by the script
-bindings and renderer. See the
+and no graphics context: the Rust `protogine::assets::AssetStore` behind
+`ctx.assets` and the shared renderer, usable on its own by tools. The rules
+below are the ones those bindings expose. See the
 [PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) for the milestone.
 
 A request names a bundle-relative `.png` path with portable slash-separated
@@ -673,7 +696,7 @@ cargo clippy --workspace --all-targets --no-default-features --features assets -
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
 cargo check --no-default-features --features native-plugins
 cargo test --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
 cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
@@ -704,9 +727,24 @@ It also verifies exit code 3 for a shutdown fault. Logs remain beside the copied
 Player. Pass `-Player <executable>` to test another build. Capture/window
 environment overrides are excluded from the child process.
 
+Capture mode steps with neutral input, so no capture can show a game reacting to
+a key. The [sprite sample probe](tools/run_sprites_probe.ps1) posts real key
+events to a live Player instead and reads back what the game did:
+
+```powershell
+powershell -NoProfile -File tools/run_sprites_probe.ps1
+```
+
+It runs the committed sample with one statement added, a position log at the end
+of update, and checks movement up to the first solid tile and no further, both
+walk frames, the idle frame on release, turning around, and Space evicting both
+images so the next tick requests and reloads them.
+
 See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance,
 and the [implementation plans](docs/implementation/README.md) for accepted and
-completed work. The next accepted milestone is
-[PNG assets and sprite drawing](docs/implementation/PNG_SPRITE_PLAN.md);
-[Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) completed its contracts and
-CPU/GPU feasibility probes. Production asset APIs remain unimplemented.
+completed work. [PNG assets and sprite
+drawing](docs/implementation/PNG_SPRITE_PLAN.md) is complete: its
+[Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) froze the contracts and the
+CPU/GPU feasibility probes, and the four delivery phases built the asset
+service, the Luau API, the shared renderer and the sprite sample. Every limit
+and API described above is implemented.

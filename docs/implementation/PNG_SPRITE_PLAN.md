@@ -1,12 +1,14 @@
 # ADR-002: Bundle PNG assets and sprite drawing
 
-**Status:** Accepted design; Phases 0-3 complete. Phase 4 not started.
+**Status:** Complete. Phases 0-4 delivered, with the full check matrix run.
 P1-P8, including the P7 manual-eviction extension, accepted 2026-09-06.
 The [Phase 0 record](PNG_SPRITE_PHASE0.md) freezes the implementation contracts
 and records dependency/worker/GPU feasibility evidence. Phase 1 implemented the
-headless asset service, Phase 2 its Luau and runtime integration, and Phase 3
-the shared renderer, GPU residency and Player integration; their records are at
-the end of this document. The authoring sample remains unimplemented.
+headless asset service, Phase 2 its Luau and runtime integration, Phase 3 the
+shared renderer, GPU residency and Player integration, and Phase 4 the authoring
+sample and its delivery evidence; their records are at the end of this document.
+Implemented APIs and limits are documented in the README; the unresolved gaps
+each phase records are the standing limitations.
 **Date:** 2026-09-06.
 **Decider:** Project owner.
 **Baseline:** `61a72adb93c94c4a5dada0a7c0384f2f44490976`.
@@ -437,7 +439,7 @@ are therefore the engine's own encoded-byte cap and the `max_image_width`/
 `max_image_height` header check, not `max_alloc`. See the
 [image 0.24.9 limit contract](https://docs.rs/image/0.24.9/image/io/struct.Limits.html).
 
-## Luau API and drawing semantics (not yet implemented)
+## Luau API and drawing semantics
 
 | API | Contract |
 | --- | --- |
@@ -632,8 +634,9 @@ fallback screens, seeding, and tick counts persist.
 All P1-P8 scope decisions are accepted. Phase 0 completed its five exits in the
 linked record: shared decoding/retained CPU pixels; bounded worker selection;
 job/error/budget/catch-up contracts; CPU/GPU readiness and deterministic draining;
-logical unload with alias/pinning/cancellation rules. It establishes feasibility
-and contracts, not production implementation. Phases 1-4 remain unstarted.
+logical unload with alias/pinning/cancellation rules. It established feasibility
+and contracts, not production implementation; Phases 1-4 then delivered them,
+and each records its evidence at the end of this document.
 
 Each phase ends with a focused diff review and evidence recorded here. A failed
 gate blocks dependent work; record the reason and proposed contract adjustment.
@@ -646,7 +649,7 @@ behavior or pixels. Keep changes as separate logical slices.
 | 1. Headless asset service — complete | `src/assets.rs` and supporting modules; rooted-read extraction; `Cargo.toml`, `src/lib.rs`; `tests/assets.rs`. Implement admitted jobs, stage advancement, bounds, cache/identity, decode and teardown. | Identical decoded pixels through bounded service passes without VM/GPU. Rooting, coalescing, rollback, cancellation-safe teardown, queue fairness, storage pressure and stale/foreign IDs pass. Existing filesystem regressions remain intact. |
 | 2. Luau and runtime integration — complete | `src/scripting/assets.rs`, `src/scripting/drawing.rs`, `src/scripting.rs`, `src/runtime.rs`, `src/drawing.rs`; runtime/test drivers. | Init/update requests work in ScriptHost and GameRuntime; callbacks continue while loading. Status/error/readiness, eviction utilities, canonical wrappers, publication, budgets and cleanup obey frozen contracts. Preload/completion-trace tests use the same service path. No GPU dependency enters scripting-only builds. |
 | 3. Shared renderer and Player — complete | `src/rendering.rs`, `src/bin/player.rs`, readiness acknowledgements and fault integration; actual Player captures/input probes. | Bounded upload passes publish only complete images; rendering never forces loading. One admission/upload sequence per uncached image, explicit eviction/reload, queued-frame pinning, mixed ordering, shutdown captures and repeated-session pool bounds pass. Pending work is cleaned on faults/exit. Existing rectangle/startup/native captures pass. |
-| 4. Authoring sample and delivery | `examples/games/sprites/` using the supplied Kenney sheet and provenance; README/AGENTS/index updates; complete verification matrix. | Copied Player shows a responsive loading state, then the room and animated controllable character. Requests during update and PNG replacement without rebuilding are demonstrated. Deterministic preload replay, live loading interaction, and limitations are recorded. |
+| 4. Authoring sample and delivery — complete | `examples/games/sprites/` using the supplied Kenney sheet and provenance; README/AGENTS/index updates; complete verification matrix. | Copied Player shows a responsive loading state, then the room and animated controllable character. Requests during update and PNG replacement without rebuilding are demonstrated. Deterministic preload replay, live loading interaction, and limitations are recorded. |
 
 Player subprocess evidence must identify per-image admissions/completions and
 aggregate read/decode/upload work with bounded test diagnostics; a once-per-session
@@ -1101,7 +1104,9 @@ graphics context.
   existing primary-fault handling.
 - `src/bin/player.rs`: skips sprite commands until the Phase 3 renderer exists.
 - `examples/script_host.rs`: `--preload` and `--ticks`, plus the per-stage asset
-  trace. `examples/games/loading/` is the driver bundle it exercises.
+  trace. `examples/games/loading/` is the driver bundle it exercises. (Phase 4
+  removed that bundle and pointed these commands at `examples/games/sprites`;
+  the commands recorded below are what this phase actually ran.)
 - `tests/script_assets.rs`, `README.md`, `AGENTS.md`, `examples/README.md`,
   `docs/implementation/README.md`.
 
@@ -1609,6 +1614,257 @@ unchanged.
   describe what the engine holds, not what the driver frees.
 - Phase 4's authoring sample remains unimplemented; `examples/games/loading/` is
   a driver bundle, not that deliverable.
+
+## Phase 4 completion record
+
+Completed 2026-09-07 from `508c318`, on Windows 10 x64, MSVC, rustc 1.95.0,
+OpenGL `3.1.0 NVIDIA 610.62`: the same stack every earlier phase used. The
+shipped sample, its committed art and provenance, the delivery documentation and
+the full applicable check matrix. This is the last delivery phase, so it also
+closes the plan.
+
+### Changed files
+
+- `examples/games/sprites/main.luau` (new, 212 lines) and `room.luau` (new, 41):
+  the authoring sample. `main.luau` requests both PNGs from update, draws a
+  loading state per image until each is ready, then the room and an animated
+  controllable character; `room.luau` is the tile array, its legend of sheet
+  cells and tints, and the spawn.
+- `examples/games/sprites/assets/tiles.png` (new, 17,497 bytes) and
+  `character.png` (new, 170 bytes): the bundle's own art. `fc /b` reports no
+  differences between `tiles.png` and the committed Kenney sheet.
+- `tools/sample_sprites.py` (new, 127 lines): derives both files from that sheet
+  with the Python standard library alone, so the crop is a statement that can be
+  rechecked rather than a recorded first result.
+- `tools/run_sprites_probe.ps1` (new, 152 lines): posts real Windows key events
+  to a live Player running the sample and reads back what the game did.
+- `tests/sprites_sample.rs` (new, 402 lines, 5 tests): headless coverage of the
+  committed bundle.
+- `tests/player_capture.rs` (+248 lines, now 695 and 3 ignored tests): the
+  copied-Player sample capture. `blended` became `near`, since a tinted opaque
+  texel needs the same one-byte tolerance for a different reason.
+- `examples/games/loading/` removed: it was the Phase 2 driver bundle this
+  sample supersedes, its comment about the Player drawing only rectangles was
+  stale after Phase 3, and it held a third copy of the same sheet. The staged
+  and preloaded driver commands now name `examples/games/sprites`.
+- `README.md`, `AGENTS.md`, `examples/README.md`,
+  `docs/implementation/README.md`: the sample, its provenance and replacement
+  rules, the new checks, and the plan's status. Two stale claims were corrected
+  while there: the README said there was no Luau image or sprite API, and both
+  README and AGENTS still called this the next milestone.
+
+### Implemented contracts
+
+- **The sample.** A 30x17 tile array of 16-pixel sheet cells drawn at 2x fills
+  960x544, with a 56-pixel status band under it. Tints turn one monochrome sheet
+  into stone, foliage and timber. The character is two frames of `character.png`
+  at 32x32, mirrored by `flip_x` when it faces left. Arrows move it two pixels
+  per tick with per-axis collision against solid tiles, Backspace returns it to
+  the spawn, and Space unloads both images so the next tick requests them again.
+- **Requests during update.** Neither image is requested from init. The same
+  branch that issues the first request issues the reload after an eviction, so
+  there is one code path rather than a startup special case.
+- **Independent readiness.** The two images are separate logical assets and each
+  is drawn as soon as it is ready. One job runs at a time in request order, so
+  the sample asks for the small character sheet first and draws it while the
+  tileset is still decoding; the room keeps its shape as placeholder rectangles
+  until then.
+- **Animation advances in update.** `steps` counts moving ticks and the frame is
+  `(steps // 8) % 2`, so which frame a draw shows depends on completed ticks and
+  not on the presentation frame rate. Positions stay whole pixels.
+- **Sizes read once.** Dimensions are read in the update that first observes
+  readiness and kept, never queried inside the per-tile draw loop. A drawn frame
+  makes at most four `ctx.assets` calls, all in update, against the 256-call
+  per-callback budget, and publishes 517 draw commands against the 10,000 cap.
+- **Provenance.** `examples/README.md` records the CC0 attribution, the exact
+  sheet cells the character crop comes from, the generator command, and what a
+  replacement PNG has to keep. The two encodings differ deliberately: the
+  tileset stays 1-bit indexed and the character sheet is 8-bit RGBA, so the
+  sample loads both PNG color types.
+
+### Contract refinements made during implementation
+
+- **Identifying images by logical path.** IDs differ between sessions, and no
+  binding exposes one to a script, so the tests compose two mappings the session
+  itself produces: the sample logs `ready <path> <width>x<height>` once per
+  image, and the store maps an ID to its size. The two shipped PNGs therefore
+  have deliberately different dimensions, and `path_of` asserts that no two
+  logged sizes collide, so the composition fails loudly rather than silently
+  guessing if the art is ever replaced with same-sized files.
+- **A missing asset stops the session; a corrupt one does not.** Resolution is
+  synchronous, so a missing file refuses at the call and the sample, which does
+  not catch it, faults with exit code 3 and the logical path in the message. A
+  file that resolves but cannot decode becomes an inspectable failed job: the
+  bar turns red, the placeholder stays, and the other image still loads. Both
+  are asserted, and the sample's header says which is which.
+- **Capture mode cannot show a partially loaded frame.** It drains before every
+  captured draw by design, so the loading capture is necessarily the frame whose
+  requests have not yet reached an update boundary. What has no pixel evidence
+  is the middle state, not staged loading itself: the headless trace and the
+  live probe both record it, and the gate asks for a responsive loading state
+  rather than a still frame of one.
+- **A one-byte tolerance for tinted samples, correcting this plan.** The
+  verification section asks for exact opaque samples. That cannot be met here,
+  because this stack applies three different conversions and none of them is
+  fixed by the sprite contract. Solving the measured bytes for a model, and
+  confirming it against every expected color in the capture test:
+  a rectangle's normalized color is truncated to eight bits, the product of a
+  truncated tint with a texel is rounded, and the clear color is rounded.
+  `PLACEHOLDER_FLOOR` needs the first (0.10, 0.12, 0.16 gives 25, 30, 40, where
+  rounding gives 26, 31, 41), the wall sprite needs the second (a tint of 0.40
+  truncates to 102, and 102/255 x 249 = 99.6 measures 100, not 99), and the
+  clear needs the third (0.05 x 255 = 12.75 measures 13). No two-rule model
+  covers them: truncating the color and rounding the product accounts for seven
+  of the eight sampled colors and misses only the clear, which rounds at the
+  color step instead, and the other three pairings of the two rules miss three
+  or six. That single remaining mismatch is why the model needs all three rules.
+  The vertex half is not a guess: Macroquad 0.4.16 converts a `Color` to bytes
+  with `(val.r * 255.) as u8` in `src/color.rs`, which truncates. So `near`
+  carries a one-byte tolerance for tinted and blended samples, and colors the
+  contract does pin down stay exact. It costs no discriminating power: the
+  closest two expected colors in that test differ by about 49.
+
+### Behavioral observations
+
+- **Staged, debug, `--ticks 200`:** both requested at tick 1;
+  `assets/character.png` ready at tick 8 and `assets/tiles.png` at tick 53 in
+  one run, with `reads=4 bytes=17667 bands=37` and 1,105,920 resident bytes. The
+  byte and band counts are fixed by the art, but the ticks are not: a pass
+  yields on a 2 ms cutoff, so how much of a decode fits in one varies with the
+  machine. Runs here landed between 8 and 9 for the character and 53 and 56 for
+  the tileset. The room is placeholder rectangles for all of them while input
+  already works, and the character precedes the tileset in every run, which is
+  what the ordering test asserts rather than a tick number.
+- **Preloaded, `--preload --ticks 4`:** both requested at tick 1, both settled
+  by the tick-1 drain (27 service passes), both observed ready at tick 2. That
+  is the readiness schedule capture mode uses, and it is identical at every
+  frame rate.
+- **Captures**, 960x600, from a copied Player in an unrelated working directory
+  with the executable, both `.luau` files and both PNGs copied:
+  `PLAYER_CAPTURE_FRAME=1` is the loading state, `=2` is the game after 2
+  completed ticks. Inspected both: the loading frame shows the room's walls,
+  trees, cacti and fences as flat rectangles, the character as a filled square
+  at the spawn, and two bars with a queued sliver; the loaded frame shows the
+  tinted tiles, the character's first frame, and two full green bars. Frame 2
+  reproduces byte-for-byte across runs.
+- **Exact texels at frame 2:** the corner wall tile samples (100, 107, 125),
+  which is the sheet's (249, 250, 251) times the legend's wall tint. Two texels
+  distinguish the animation frames: (2, 9) of cell (27,1) is set only in frame 0
+  and (2, 10) only in frame 1, so the capture asserts the first is the character
+  color and the second is the clear color.
+- **Replacement without rebuilding.** Overwriting `character.png` with a 32x16
+  opaque magenta image changes only the character; overwriting `tiles.png` with
+  a 144x96 one changes only the room and is reported as
+  `ready assets/tiles.png 144x96 at tick 2`. The same executable ran all three.
+- **Live input**, `tools/run_sprites_probe.ps1`: holding Right moved the
+  character from x=448 to x=640 and no further, which is the fence beyond the
+  chamber; both walk frames appeared while moving and frame 0 returned on
+  release; the row never changed; Left turned it to face -1 and moved it back;
+  Space evicted both images and the next tick requested and reloaded them;
+  Escape exited 0. The tick numbers depend on how long the script holds a key,
+  so they differ between runs; in one, both were requested at tick 1 and ready
+  at ticks 6 and 16, evicted at 219, re-requested at 220 and ready again at 227
+  and 237. That is ten live ticks with the character drawn over a placeholder
+  room, twice, which is the responsive loading state a still frame cannot show.
+  Those figures are also the release Player's loading cost, against the 8 and 53
+  of the debug headless run above.
+- **Frame-rate replay.** After a preload, 30 ticks right then 30 ticks down end
+  at (508, 316) showing the second animation frame at 30, 60 and 144 FPS, and
+  the per-tick traces agree wherever two rates share a tick count.
+
+### Negative controls
+
+Each was applied, observed to fail at its named assertion, and reverted.
+
+- One border tile changed from wall to floor: `border tile 0,0` fails.
+- The animation advanced from a draw counter instead of `steps`: the 30 FPS
+  frame assertion fails, because 30 draws are not 60 ticks.
+- The request order reversed: the character no longer becomes drawable before
+  the room.
+- The idle frame index inverted: the capture's `the idle frame's texel` fails
+  with the clear color instead of the character's.
+- The right-hand fence moved one tile right: the live probe reports the
+  character reaching 672 instead of 640.
+
+### Commands and results
+
+All passed on this machine:
+
+```text
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo test --workspace --no-default-features
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-default-features --features assets
+cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
+cargo check --workspace --all-targets --no-default-features --features graphics
+cargo test --workspace --no-default-features --features graphics
+cargo clippy --workspace --all-targets --no-default-features --features graphics -- -D warnings
+cargo test --workspace --no-default-features --features scripting
+cargo check --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
+cargo test --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
+cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
+cargo test --release -p protogine-plugin-api
+cargo run -p protogine-headergen -- --check
+cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/sprites
+cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/sprites
+cargo build --release --bin protogine-player
+cargo test --test player_capture -- --ignored
+cargo test --test plugins -- --ignored
+pwsh -NoProfile -File tests/player_input.ps1
+powershell -NoProfile -File tools/run_sprites_probe.ps1
+python tools/sample_sprites.py
+```
+
+`tests/sprites_sample.rs` adds 5 tests and needs no graphics context;
+`tests/player_capture.rs` is now 3 ignored tests. Regenerating the art rewrites
+both committed PNGs identically. `cargo tree` still shows `--features scripting`
+resolving image and mlua with no Macroquad, and `--features graphics` resolving
+Macroquad and image with no mlua. `Cargo.lock` is unchanged: this phase adds no
+dependency.
+
+The GPU harness was not rerun and the distance benchmark was not rerun: neither
+the renderer nor deadline enforcement changed in this phase.
+
+### Closed gaps
+
+- Phase 2 recorded that `examples/games/loading/` was a driver bundle with no
+  room, no animation timing contract and no replay evidence, and Phase 3 that
+  the authoring sample remained unimplemented. This sample supplies all three,
+  and takes over that bundle's role as the staged and preloaded driver.
+
+### Unresolved gaps
+
+- Cross-GPU pixel equality is still not established. Every pixel here is from
+  the one Windows NVIDIA OpenGL stack used since Phase 0, and the byte a tint
+  produces depends on that backend's float-to-byte conversion, which is why the
+  tinted assertions carry a one-byte tolerance.
+- The sample's layout is fixed at the default 960x600 window, as the plan
+  specifies. Other `PLAYER_WIDTH`/`PLAYER_HEIGHT` values crop or letterbox it
+  rather than reflowing the grid.
+- In a release Player the loading state lasts a few frames rather than seconds,
+  because both images are small. The long staged trace above is from a debug
+  build. Neither is a latency guarantee.
+- The live probe runs the committed sample with one added statement, a position
+  log at the end of update, so it is not literally the shipped file. The
+  insertion is inert by construction rather than by inspection: it reads locals
+  that update has already computed, and reading them has no observable effect,
+  so nothing it does can change `x`, `y`, `steps` or `facing`. Its only costs
+  are two utility calls against a 128-call budget, one interpolation against the
+  callback deadline, and log volume. The script also fails if its anchor line
+  moves, so a refactor cannot leave it silently probing something else.
+- No test asserts a fractional tint alpha at the pixel level, and none publishes
+  one at the command level either: `script_assets` covers fractional red, green
+  and blue and refuses out-of-range alpha, but every accepted tint it publishes
+  has `a = 1`. The removed `examples/games/loading/` used `a = 0.35` and was
+  never captured, so nothing regressed with it. Alpha is the same array element
+  as the three covered channels, which is why this is a note and not a hole.
+- No screenshot is committed. The captures are reproducible from the recorded
+  commands, as in Phase 3.
 
 ## Planning evidence
 
