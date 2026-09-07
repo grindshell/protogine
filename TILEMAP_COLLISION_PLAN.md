@@ -456,7 +456,15 @@ Every marker names the exact assertion text. Generic `assertion` or `panicked`
 substrings are refused as markers: they match any failure at all, which would
 reduce the harness to "something broke" and silently absorb a control that moved
 to a different failure site. Where a control fails elsewhere in release, both
-markers are recorded and the profile selects. Named assertions: `stop must
+markers are recorded and the profile selects.
+
+That rule is not precautionary. Seven markers were originally generic, and
+tightening them caught a wrong guess on the first new control written afterwards:
+`region-negative-origin` was expected to fail at `index out of bounds`, and
+actually fails at `range start index 18446744073709551615 out of range for slice
+of length 15` in release while hitting the `contains` assertion in debug. Under a
+`panicked` marker that control would have reported success while verifying
+nothing. Named assertions: `stop must
 release map storage`, `a far coordinate must saturate one cell out`, `cell_at did
 not converge` (debug) and `the cell left of a negative origin is -1, not 0`
 (release), `tile ID at 1,0`, `solidity at 3,0`, `must be solid`, `region must

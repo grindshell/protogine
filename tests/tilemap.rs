@@ -286,6 +286,13 @@ fn malformed_dimensions_ids_and_arrays_are_refused_by_reason() {
         Err(TileMapError::CellCount),
         "the cell product bound must refuse a 1024x1024 map"
     );
+    // `new` re-runs `check` unconditionally, so this pins that the early-out and
+    // the authoritative path agree here too, as they do for every case above.
+    assert_eq!(
+        TileMap::new(product, vec![true], Vec::new()).err(),
+        Some(TileMapError::CellCount),
+        "construction must refuse the cell product for the same reason"
+    );
 
     // The largest legal shape is accepted, so the bounds above are exclusive of
     // the legal values rather than off by one.
