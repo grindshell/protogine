@@ -1,4 +1,4 @@
-﻿#![cfg(feature = "assets")]
+#![cfg(feature = "assets")]
 
 //! Phase 1 behavior for the headless asset service: rooting, admission,
 //! identity, bounded staged processing, decoding, eviction and teardown.
@@ -17,8 +17,11 @@ use protogine::assets::{
 };
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
+    process::Command,
     sync::Mutex,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -1061,6 +1064,48 @@ fn the_encoded_cap_admits_exactly_seventeen_mebibytes_and_probes_one_further_byt
     assert_eq!(store.staged_bytes(), 0);
 }
 
+/// The early metadata refusal cannot prove that the cap is decided by bytes
+/// that actually arrived, because it rejects an oversized file before the first
+/// read. Growing the file after its metadata has already been accepted is the
+/// only way the read-based check and its one-byte overflow probe can fire, and
+/// it is the case that check exists for.
+#[test]
+fn a_file_that_grows_after_its_metadata_check_is_refused_by_the_reads() {
+    let root = bundle();
+    let (_, encoded) = maximum_image();
+    let mut at_limit = encoded;
+    at_limit.resize(ENCODED_IMAGE_LIMIT, 0);
+    let path = root.path().join("growing.png");
+    fs::write(&path, &at_limit).unwrap();
+
+    let mut store = store(root.path());
+    let id = store.request_png("growing.png").unwrap();
+    // Two passes open the file and dispatch its first read grant, so the
+    // worker's metadata check has already accepted exactly the cap. Only a
+    // quantum of a 17 MiB file has been read, so the appended byte lands far
+    // ahead of the reader.
+    store.advance(WATCHDOG);
+    store.advance(WATCHDOG);
+    assert_eq!(store.status(id).unwrap().state, ImageState::Loading);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[0])
+        .unwrap();
+
+    assert!(store.drain(WATCHDOG));
+    let status = store.status(id).unwrap();
+    assert_eq!(status.state, ImageState::Failed);
+    assert_eq!(status.error.unwrap().code, AssetErrorCode::Limit);
+    // The probe read exactly one byte past the cap and refused there, rather
+    // than reading whatever else the file had grown to hold.
+    assert_eq!(status.bytes_read, ENCODED_IMAGE_LIMIT + 1);
+    assert_eq!(store.staged_bytes(), 0);
+    assert_eq!(store.resident_bytes(), 0);
+    assert!(store.service_fault().is_none());
+}
+
 #[test]
 fn two_maximum_files_load_within_the_aggregate_staging_allowance() {
     let root = bundle();
@@ -1165,4 +1210,100 @@ fn status_snapshots_are_owned_and_survive_later_service_passes() {
     assert_eq!(store.status(id).unwrap().state, ImageState::Ready);
     let retained: ImageId = queued.id;
     assert!(store.status(retained).is_some());
+}
+
+// ---- process-bounded decoder probes -------------------------------------
+
+/// Decoder work runs to completion inside non-preemptible stages, and a store
+/// joins its worker on drop, so neither `drain`'s deadline nor an unwinding
+/// assertion can bound a decoder that never returns. Run the adversarial
+/// fixtures in child processes, as `scripting_feasibility` does for the VM, so a
+/// regression fails in ten seconds instead of hanging Cargo. The in-process
+/// tests above keep their own assertions; what these add is the outer bound.
+#[test]
+fn adversarial_decoder_fixtures_stay_inside_a_process_watchdog() {
+    for probe in [
+        "truncated",
+        "corrupt",
+        "wrong_format",
+        "sixteen_bit",
+        "apng",
+        "huge_dimensions",
+        "interlaced",
+        "maximum",
+        "maximum_drop",
+    ] {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "isolated_probe", "--nocapture"])
+            .env("PROTOGINE_ASSET_PROBE", probe)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + WATCHDOG;
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "{probe}: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("{probe} exceeded the 10-second process timeout");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
+fn isolated_probe() {
+    let Ok(probe) = std::env::var("PROTOGINE_ASSET_PROBE") else {
+        return;
+    };
+    let root = bundle();
+    // The two full decodes are here because of the stages they run, not because
+    // their pixels need rechecking: the eagerly decoded Adam7 frame, and a
+    // maximum image whose allocation and conversion are the largest this
+    // milestone accepts. The rest are refusals reached through the decoder.
+    let refusal = match probe.as_str() {
+        "truncated" | "corrupt" | "wrong_format" => Some(AssetErrorCode::Format),
+        "sixteen_bit" | "apng" => Some(AssetErrorCode::Unsupported),
+        "huge_dimensions" => Some(AssetErrorCode::Limit),
+        "interlaced" => None,
+        "maximum" | "maximum_drop" => {
+            let (pixels, encoded) = maximum_image();
+            fs::write(root.path().join("art.png"), &encoded).unwrap();
+            let mut store = store(root.path());
+            let id = store.request_png("art.png").unwrap();
+            if probe == "maximum_drop" {
+                // Tear the store down while the worker still holds the file,
+                // the decoder and its buffers. The join is unconditional, so
+                // only this watchdog bounds it.
+                store.advance(WATCHDOG);
+                store.advance(WATCHDOG);
+                drop(store);
+                return;
+            }
+            assert!(store.drain(WATCHDOG), "{probe} did not settle");
+            assert_eq!(store.image(id).unwrap().rgba(), pixels, "{probe}");
+            return;
+        }
+        other => panic!("unknown asset probe: {other}"),
+    };
+    install(root.path(), &probe, "art.png");
+    let mut store = store(root.path());
+    let id = store.request_png("art.png").unwrap();
+    assert!(store.drain(WATCHDOG), "{probe} did not settle");
+    let status = store.status(id).unwrap();
+    match refusal {
+        Some(code) => {
+            assert_eq!(status.state, ImageState::Failed, "{probe}");
+            assert_eq!(status.error.unwrap().code, code, "{probe}");
+        }
+        None => {
+            assert_eq!(status.state, ImageState::Ready, "{probe}");
+            assert_eq!(store.image(id).unwrap().rgba(), expected(&probe), "{probe}");
+        }
+    }
+    assert!(store.service_fault().is_none(), "{probe}");
 }

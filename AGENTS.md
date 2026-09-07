@@ -340,7 +340,10 @@ option; scheduling and mutation timing are separate contracts.
   with a 10-second watchdog. Keep that outer timeout independent of the VM.
   `assets` verifies rooting, path policy, coalescing and identity, staged
   passes, decoded pixels, admission and storage bounds, eviction, cancellation
-  at every stage, and worker teardown, with no VM or graphics context. Its small
+  at every stage, and worker teardown, with no VM or graphics context. It runs
+  the adversarial decoder fixtures in child processes with a 10-second watchdog,
+  because decoder stages are not preemptible and a store joins its worker on
+  drop, so an in-process deadline cannot bound one that never returns. Its small
   PNG fixtures and expected RGBA bytes are committed under `tests/fixtures/assets`
   and regenerated with `python tools/asset_fixtures.py`; the maximum-size
   fixtures are built in the test from stored DEFLATE blocks. Both specify

@@ -923,9 +923,31 @@ scheduling-accuracy correction, not a new latency guarantee.
 The whole command list below was rerun after both fixes, including the ignored
 GPU captures and plugin suites, with the same results.
 
-The review also recorded three gaps it did not fix, carried to the list of
-unresolved gaps below: the missing child-process watchdog, the unexercised
-read-based encoded cap, and the unreachable `Reply::Abandoned`.
+Two evidence gaps the same review found are also closed, in a second pass.
+
+- **Adversarial fixtures now run under a process watchdog.** Decoder work runs
+  to completion inside non-preemptible stages, and a store joins its worker on
+  drop, so neither `drain`'s deadline nor an unwinding assertion can bound a
+  decoder that never returns: the frozen contract asks for a child process, as
+  `scripting_feasibility` already uses for the VM.
+  `adversarial_decoder_fixtures_stay_inside_a_process_watchdog` spawns nine
+  probes with a 10-second kill deadline: the five refusals reached through the
+  decoder, the header-limit fixture, the eagerly decoded Adam7 frame, a full
+  maximum image, and a store dropped mid-load so its unconditional join is
+  bounded too. Verified by temporarily adding a probe that sleeps: the parent
+  killed it and failed in 10 seconds instead of hanging Cargo.
+- **The read-based encoded cap is now exercised.** The early metadata refusal
+  cannot prove the cap is decided by bytes that arrived, because it rejects an
+  oversized file before the first read.
+  `a_file_that_grows_after_its_metadata_check_is_refused_by_the_reads` appends a
+  byte after the worker has accepted a file of exactly the cap and dispatched
+  its first grant, which is the only way the read check and the one-byte
+  overflow probe can fire, and is the case they exist for. The job fails as
+  `limit` with `bytes_read` of exactly 17 MiB plus one, so the refusal is
+  demonstrably the probe rather than the metadata.
+
+One gap remains unfixed and is carried to the list below: the unreachable
+`Reply::Abandoned`.
 
 ### Behavioral observations
 
@@ -986,8 +1008,10 @@ cargo test --test player_capture -- --ignored
 cargo test --test plugins -- --ignored
 ```
 
-`tests/assets.rs` contains 31 tests, three of them Windows-only, and runs in
-about 3.5 seconds in debug and 1.3 seconds in release. The existing filesystem,
+`tests/assets.rs` contains 34 tests, three of them Windows-only, and runs in
+about 2.9 seconds in debug and 1.1 seconds in release. One of those tests spawns
+nine child-process decoder probes, which run beside the rest of the suite;
+`isolated_probe` returns immediately unless `PROTOGINE_ASSET_PROBE` names one. The existing filesystem,
 scripting, runtime, drawing, plugin and capture suites pass unchanged, including
 the ignored GPU captures, which confirms the traversal extraction and the
 feature reshuffle changed no existing behavior.
@@ -1013,16 +1037,6 @@ the same reason, since deadline enforcement did not change.
   wired up. The store's pass function is the one those will call.
 - Service faults are recorded and reported through `service_fault`, but no
   caller turns one into a session fault yet.
-- `tests/assets.rs` has no child-process watchdog. Its `WATCHDOG` is a `drain`
-  deadline, and `Drop` joins the worker unconditionally, so a decoder stuck in a
-  non-preemptible stage would hang the harness rather than fail in ten seconds.
-  The frozen contract asks for the child-process pattern already used by
-  `scripting_feasibility`; adopt it when adversarial decoder fixtures land.
-- The read-based encoded cap is unexercised. Every file above 17 MiB is refused
-  by the metadata check before the first read, so the overflow probe and the
-  post-read limit failure can only fire on a file that grows mid-load, which the
-  stable-bundle assumption excludes. The one-over test proves the metadata path
-  only. The check is retained as defense in depth, not as tested behavior.
 - `Reply::Abandoned` is unreachable. `Command::Abandon` is only sent for a job
   whose cancel flag is already set, and the worker checks that flag first, so
   the reply is always `Cancelled`. Harmless, and left for the phase that revisits
