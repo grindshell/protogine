@@ -30,12 +30,15 @@ the shared library also builds with `--no-default-features`.
 
 [README](README.md) documents running games and the implemented APIs/limits.
 [TODO](TODO.md) owns the remaining feature backlog; the root
-[tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) records accepted T1-T8 with
-implementation unstarted. Single-map collision is the first milestone;
+[tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) records accepted T1-T8 and
+its [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md) freezes the
+M1 API/schema, numerical and refusal contracts. Phases 1-4 are unstarted, so no
+engine tilemap behavior exists yet. Single-map collision is the first milestone;
 simultaneous maps, independent layers and streaming are required before full
 plan completion. Colliders are hecs components; T6's first-milestone lifecycle
-must be revised for later scope. Detailed proposals remain marked in the plan;
-accepted directions do not imply implemented behavior.
+must be revised for later scope. Read the Phase 0 record before touching kernel
+geometry: it owns the clamp, cell-indexing and work-accounting rules, and
+accepted directions still do not imply implemented behavior.
 [Development and verification](docs/DEVELOPMENT.md) owns the required check
 matrix and harness guidance. [Implementation records](docs/implementation/README.md)
 retain decisions, phase contracts, evidence and deferred scope. Both scripting/C

@@ -13,10 +13,14 @@ Completed work and historical evidence live in [implementation records](docs/imp
   authoring APIs and a migrated sprite sample. The overall feature stays open
   until all four required milestones below are delivered. See the
   [tilemap/collision plan](TILEMAP_COLLISION_PLAN.md); T1-T8 are accepted with
-  scope clarifications, and implementation is unstarted.
+  scope clarifications, and no engine behavior is implemented yet.
 
 - [ ] **M1: Single-map tilemaps and solid-tile collision.** The next delivery:
   one kernel map, optional hecs colliders, swept movement and sample migration.
+  Phase 0 is complete: the
+  [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md) freezes the
+  API/schema, numerical and refusal contracts with feasibility receipts. Phase 1
+  (kernel map ownership) is the next unmet gate.
 - [ ] **M2: Simultaneous maps.** Independent live maps, entity membership,
   transfers and map-local lifecycle, including the required T6 revision.
 - [ ] **M3: Independent layers.** Separate tile layers with explicit editing,

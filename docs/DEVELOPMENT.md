@@ -173,9 +173,12 @@ Inspect `cargo tree --no-default-features` and the `assets`, `scripting` and
 VM or graphics; assets needs no VM or graphics; scripting and graphics must not
 enable each other.
 
-## Phase 0 dependency probe
+## Phase 0 feasibility probes
 
-When changing the feasibility probe itself, run:
+These probe contracts before the production code exists. They are not the
+subsystems they precede, and they are rerun only when the probe itself changes.
+
+### PNG and sprites
 
 ```text
 cargo build --release --example png_sprite_probe --locked --offline
@@ -191,3 +194,26 @@ and a 10-second child watchdog; GPU modes use 30 seconds. Negative controls must
 fail at their named assertions. Generated files live under
 `target/png-sprite-probe/`; durable receipts are linked from the
 [Phase 0 record](implementation/PNG_SPRITE_PHASE0.md).
+
+### Tilemaps and collision
+
+```text
+cargo build --release --example tilemap_probe --no-default-features
+pwsh -NoProfile -File tools/run_tilemap_probe.ps1 -Mode numeric
+pwsh -NoProfile -File tools/run_tilemap_probe.ps1 -Mode work
+pwsh -NoProfile -File tools/run_tilemap_probe.ps1 -Mode control-endpoint
+pwsh -NoProfile -File tools/run_tilemap_probe.ps1 -Mode control-corners
+pwsh -NoProfile -File tools/run_tilemap_probe.ps1 -Mode control-truncate
+pwsh -NoProfile -File tools/run_tilemap_probe.ps1 -Mode control-yfirst
+pwsh -NoProfile -File tools/run_tilemap_probe.ps1 -Mode control-naive-clamp
+```
+
+It builds without default features because the geometry it prototypes needs no
+decoder, VM or window. `numeric` settles the adjacent-f64 clamp rule, cell
+indexing, sweep fixtures and the sample's expectations; `work` recounts the
+worst-case storage and tile work against the plan's ceilings and reports release
+p50/p95/max for the mandated stress loads. Each `control-*` mode replaces one
+frozen rule with the mistake it prevents and must fail at its named assertion,
+not merely exit nonzero. Watchdogs are 30 seconds per mode and 60 for `work`.
+Generated files live under `target/tilemap-probe/`; durable receipts are linked
+from the [Phase 0 record](implementation/TILEMAP_COLLISION_PHASE0.md).

@@ -1,0 +1,28 @@
+Tilemap/collision Phase 0 probe receipts.
+Windows MSVC x64, rustc 1.95.0, release build of examples/tilemap_probe.rs.
+
+=== mode numeric (stdout) ===
+fixed_dt=0x3f91111111111111 step_120=0x4000000000000000
+step_130=0x4001555555555555 drift_30=-2.842170943040401e-14
+quotient_scan_cases=26624 raw_floor_disagreements=0
+boundary_stop_units=10112
+max_footprint_cases=16 repairs=2 steps_max=1 fallbacks=0 index_corrections_max=0
+sample_fence_x=640 sample_replay=(508,316) sample_ids=5
+oracle_cases=16270 index_corrections_max=0
+clamp_cases=889145 repaired=35190 steps_max=2 fallbacks=0 gap_max=3.725290298461914e-9
+TILEMAP PASS mode=numeric
+
+=== mode work (stdout) ===
+entity_bytes=8
+candidate_bytes=24
+candidate_buffer_bytes=393216
+map_cell_bytes=524288
+map_solid_bytes=1024
+replacement_peak_bytes=1050624
+worst_body_units=11120 tile=1 extent_tiles=8 analytic_ceiling=11520
+load=long-sweep colliders=1024 entities=16384 units=11386880 p50_us=20593 p95_us=24330 max_us=25835
+load=sparse-short-motion colliders=1024 entities=16384 units=5057 p50_us=89 p95_us=172 max_us=226
+install_units=346112
+region_calls_per_callback=64 region_units=262144
+solid_edits_after_install=685
+TILEMAP PASS mode=work

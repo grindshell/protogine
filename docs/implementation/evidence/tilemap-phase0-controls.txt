@@ -1,0 +1,28 @@
+Tilemap/collision Phase 0 negative controls.
+Each mode replaces one frozen rule with the mistake it prevents and must
+fail at the named assertion under the runner watchdog.
+
+=== mode control-endpoint (stderr) ===
+thread 'main' (17612) panicked at examples\tilemap_probe.rs:970:5:
+high-speed wall stop: twelve tiles of travel ended at x=384.0, not 288.0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== mode control-corners (stderr) ===
+thread 'main' (36108) panicked at examples\tilemap_probe.rs:936:5:
+interior solid cell: a 3x3 box over a solid centre must be blocked
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== mode control-truncate (stderr) ===
+thread 'main' (33760) panicked at examples\tilemap_probe.rs:855:9:
+negative origin cell index: world -101.0 is column 0, not -1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== mode control-yfirst (stderr) ===
+thread 'main' (34344) panicked at examples\tilemap_probe.rs:1027:5:
+x-before-y corner: resolved to Point { x: 0.0, y: 32.0 }, not (32.0, 0.0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== mode control-naive-clamp (stderr) ===
+thread 'main' (22324) panicked at examples\tilemap_probe.rs:1149:17:
+clamped box on the free side: offset=-4096.0 extent=4095.6666666666665 edge=16777216.000000004 is past the boundary
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

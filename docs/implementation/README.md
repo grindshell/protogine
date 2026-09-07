@@ -10,9 +10,11 @@ describes current behavior; [AGENTS](../../AGENTS.md) owns contribution rules an
 
 | Plan | Status |
 | --- | --- |
-| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required, implementation unstarted |
+| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required. M1 Phase 0 complete, Phases 1-4 unstarted |
 
-Active plans live at the repository root and move here when complete.
+Active plans live at the repository root and move here when complete. A closed
+phase of an active plan is filed under Completed below, as the PNG/sprite Phase 0
+record already is, because later phases depend on the contracts it froze.
 
 ## Completed
 
@@ -21,6 +23,7 @@ Active plans live at the repository root and move here when complete.
 | [ADR-001: Scripting and C API](SCRIPTING_C_API_PLAN.md) | Luau host, data/I/O, kernel/input, scripted Player and trusted C batch plugins; Phases 0-5 including 1a, Windows MSVC x64 |
 | [ADR-002: PNG assets and sprites](PNG_SPRITE_PLAN.md) | Staged bundle PNG service, Luau handles/eviction, shared renderer and authoring sample; Phases 0-4 |
 | [PNG/sprite Phase 0](PNG_SPRITE_PHASE0.md) | Frozen initial contracts and dependency/worker/GPU feasibility receipts supporting ADR-002 |
+| [Tilemap/collision Phase 0](TILEMAP_COLLISION_PHASE0.md) | Frozen M1 contracts plus numerical and work/storage feasibility receipts; the rest of that plan is still active |
 
 Current contract summaries incorporate later corrections. Dated records retain
 historical versions, commands, test counts and measurements; later records close

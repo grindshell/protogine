@@ -1,9 +1,13 @@
 # Engine-owned tilemaps and solid-tile collision
 
-**Status:** T1-T8 accepted on 2026-09-07 with the scope clarifications below;
-implementation unstarted. Detailed API/schema, numerical limits and later
-milestone designs remain to be frozen. Acceptance is not execution evidence.
-**Date:** 2026-09-07. **Inspected baseline:** `e87a243`.
+**Status:** T1-T8 accepted on 2026-09-07 with the scope clarifications below.
+M1 Phase 0 completed 2026-09-07: its API/schema, numerical and refusal contracts
+are frozen with feasibility receipts in the
+[Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md), which is
+authoritative wherever this plan left a proposal open. Phases 1-4 are unstarted
+and no engine behavior has changed. Later milestone designs remain to be frozen.
+Acceptance is not execution evidence.
+**Date:** 2026-09-07. **Inspected baseline:** `e87a243`; Phase 0 ran against `508266c`.
 **Backlog:** [TODO.md](TODO.md). Completed predecessor contracts:
 [scripting/C API](docs/implementation/SCRIPTING_C_API_PLAN.md) and
 [PNG/sprites](docs/implementation/PNG_SPRITE_PLAN.md).
@@ -310,7 +314,7 @@ log anchor. Keep a separate headless assertion of post-step kernel position.
 
 | Phase | Work | Required exit evidence |
 | --- | --- | --- |
-| 0. Contract and feasibility | Apply accepted T1-T8; freeze M1 API/schema, rounding and refusal semantics. Capture current sprite expectations. Prototype the numerical cases and count worst-case work/storage without adding production APIs. | Detailed contracts reflect the accepted decisions; adjacent-f64, huge-velocity and maximum-footprint fixtures settle the numerical rule; free-flight integration exactness is verified for the sample's chosen speed rather than assumed; measured storage/work fit chosen caps, including the max-load long-sweep count recomputed against the fixed-pass ceiling. Stop if overlap, transition semantics or budget behavior remain undefined. |
+| 0. Contract and feasibility **(complete)** | Apply accepted T1-T8; freeze M1 API/schema, rounding and refusal semantics. Capture current sprite expectations. Prototype the numerical cases and count worst-case work/storage without adding production APIs. | Met on 2026-09-07; see the [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md). Contracts reflect the accepted decisions; the adjacent-f64 clamp rule holds over 889,145 domain-wide cases with at most two repair steps, no fallbacks and a 2^-28 pixel maximum gap; huge-velocity and maximum-footprint fixtures clamp exactly at the finite boundary; `120 * FIXED_DT` was verified to be exactly 2.0 rather than assumed; measured storage and work fit the caps, with the max-load long-sweep costing 11,386,880 of the 16,777,216 fixed-pass units. Overlap, transition and budget semantics are defined, so no stop gate remains. |
 | 1. Kernel map ownership | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Rectangular/negative-origin indexing, malformed size/ID input, copied ownership, bounds and atomic failed replacement proven. Test core with no default features. |
 | 2. Colliders and fixed systems | Optional hecs collider, placement guards, pure axis solver and bounded all-candidate commit. Extend all Phase 1 mutations to enforce collider invariants. | Sweeps/teleports/edits obey T3-T6; no-collider integration is unchanged; late failure moves no entity; max-load/watchdog and entity-order checks pass. |
 | 3. Luau integration | Scoped world extensions, raw validation/copying, shared attempts and new work/output budgets; real runtime fixtures. | Phase/expiry/foreign/reused handles, malformed calls, `pcall` latching, allocation rollback, callback ordering, restart/fault and zero-tick/catch-up behavior pass headlessly. |
@@ -411,7 +415,22 @@ Drafting evidence: read the current kernel/runtime/bindings, sprite sample,
 kernel/runtime/sample tests, live probe, Cargo manifest and predecessor
 contracts. This draft adds no engine behavior. No feasibility prototype,
 simulation test, benchmark, Player capture or live-input run was performed
-while drafting; all implementation phases remain unstarted.
+while drafting; all implementation phases were unstarted at that point.
+
+Phase 0 exit, 2026-09-07, against baseline `508266c`: the M1 contracts above are
+frozen in [docs/implementation/TILEMAP_COLLISION_PHASE0.md](docs/implementation/TILEMAP_COLLISION_PHASE0.md),
+which now owns every detailed rule this plan left proposed. Added paths:
+`examples/tilemap_probe.rs`, `tools/run_tilemap_probe.ps1`, that record and its
+receipts under `docs/implementation/evidence/`. No engine source changed and no
+production API was added; the probe is prototype geometry. Commands, measured
+values, negative-control assertion names, platform and the next unmet gate are in
+the record. The proposals the consistency review left open were confirmed rather
+than revised: the fixed-pass ceiling holds with the mandated long-sweep costing
+11,386,880 of 16,777,216 units, the eight-tile collider extent gives the nine-cell
+span that bound depends on, and `120 * FIXED_DT` is exactly 2.0. One open item
+travels forward: that long-sweep pass took about 20 ms in the probe's unoptimised
+release build against a 16.67 ms tick, so Phase 2 must re-measure the production
+solver before anyone treats the work ceiling as a frame-rate promise.
 
 Decision update, 2026-09-07: the owner accepted T2-T8, explicitly required the
 collider to be a hecs component, accepted T1's first milestone while making
@@ -434,5 +453,5 @@ than the usable ID space; layer order and visibility were recorded as rendering
 metadata that never reaches the solver, leaving M3 to define only how colliders
 select participating layers; and the no-collider allocation path, the sample's
 speed exactness, the placeholder palette and the probe log format were each
-stated explicitly. These remain proposals for Phase 0
-to validate, and no code, test or measurement was produced by this review.
+stated explicitly. No code, test or measurement was produced by that review; its
+proposals were subsequently validated at the Phase 0 exit recorded above.
