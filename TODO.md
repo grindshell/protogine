@@ -17,10 +17,12 @@ Completed work and historical evidence live in [implementation records](docs/imp
 
 - [ ] **M1: Single-map tilemaps and solid-tile collision.** The next delivery:
   one kernel map, optional hecs colliders, swept movement and sample migration.
-  Phase 0 is complete: the
+  Phases 0 and 1 are complete: the
   [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md) freezes the
-  API/schema, numerical and refusal contracts with feasibility receipts. Phase 1
-  (kernel map ownership) is the next unmet gate.
+  API/schema, numerical and refusal contracts with feasibility receipts, and the
+  kernel now owns a checked map with bounded reads and cell edits. Phase 2
+  (colliders and fixed systems) is the next unmet gate; no collision behavior
+  exists yet.
 - [ ] **M2: Simultaneous maps.** Independent live maps, entity membership,
   transfers and map-local lifecycle, including the required T6 revision.
 - [ ] **M3: Independent layers.** Separate tile layers with explicit editing,

@@ -22,7 +22,7 @@ the shared library also builds with `--no-default-features`.
 | Surface | Ownership / entry points |
 | --- | --- |
 | Startup | [Bundle discovery](src/bundle.rs) finds readable `game/main.luau` beside the executable, independent of cwd; [Player](src/bin/player.rs) owns window, input, startup/error screens and [capture](src/bin/player/capture.rs) |
-| Simulation | [Kernel](src/kernel.rs), [input](src/input.rs), [GameRuntime](src/runtime.rs): entities, fixed ticks, immediate script writes, then velocity integration |
+| Simulation | [Kernel](src/kernel.rs), [tile maps](src/tilemap.rs), [input](src/input.rs), [GameRuntime](src/runtime.rs): entities, one optional checked map, fixed ticks, immediate script writes, then velocity integration |
 | Luau | [ScriptHost](src/scripting.rs), [modules](src/scripting/modules.rs), [data](src/scripting/data.rs), [filesystem](src/scripting/filesystem.rs), [world](src/scripting/world.rs) and [draw bindings](src/scripting/drawing.rs) |
 | Assets | [Types](src/assets.rs) compile without a decoder; `assets` enables the [store](src/assets/store.rs)/[worker](src/assets/worker.rs); [rooted traversal](src/rooted_path.rs) is shared with filesystem utilities |
 | Drawing | [Owned commands](src/drawing.rs) contain clear/rectangle/sprite data; [asset bindings](src/scripting/assets.rs) work headlessly; `graphics` enables the [shared renderer](src/rendering.rs) without a VM |
@@ -32,8 +32,9 @@ the shared library also builds with `--no-default-features`.
 [TODO](TODO.md) owns the remaining feature backlog; the root
 [tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) records accepted T1-T8 and
 its [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md) freezes the
-M1 API/schema, numerical and refusal contracts. Phases 1-4 are unstarted, so no
-engine tilemap behavior exists yet. Single-map collision is the first milestone;
+M1 API/schema, numerical and refusal contracts. Phase 1 delivered the kernel's
+checked map; colliders, sweeps and the Luau bindings remain unstarted, so no
+collision behavior exists yet. Single-map collision is the first milestone;
 simultaneous maps, independent layers and streaming are required before full
 plan completion. Colliders are hecs components; T6's first-milestone lifecycle
 must be revised for later scope. Read the Phase 0 record before touching kernel

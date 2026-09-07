@@ -10,6 +10,7 @@ pub mod drawing;
 pub mod input;
 pub mod kernel;
 pub mod manifest;
+pub mod tilemap;
 
 #[cfg(feature = "native-plugins")]
 pub mod plugins;

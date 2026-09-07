@@ -4,9 +4,10 @@
 M1 Phase 0 completed 2026-09-07: its API/schema, numerical and refusal contracts
 are frozen with feasibility receipts in the
 [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md), which is
-authoritative wherever this plan left a proposal open. Phases 1-4 are unstarted
-and no engine behavior has changed. Later milestone designs remain to be frozen.
-Acceptance is not execution evidence.
+authoritative wherever this plan left a proposal open. M1 Phase 1 completed
+2026-09-07: the kernel owns a checked map with bounded reads and cell edits, and
+no collider, sweep or script binding exists yet. Phases 2-4 are unstarted. Later
+milestone designs remain to be frozen. Acceptance is not execution evidence.
 **Date:** 2026-09-07. **Inspected baseline:** `e87a243`; Phase 0 ran against `508266c`.
 **Backlog:** [TODO.md](TODO.md). Completed predecessor contracts:
 [scripting/C API](docs/implementation/SCRIPTING_C_API_PLAN.md) and
@@ -315,7 +316,7 @@ log anchor. Keep a separate headless assertion of post-step kernel position.
 | Phase | Work | Required exit evidence |
 | --- | --- | --- |
 | 0. Contract and feasibility **(complete)** | Apply accepted T1-T8; freeze M1 API/schema, rounding and refusal semantics. Capture current sprite expectations. Prototype the numerical cases and count worst-case work/storage without adding production APIs. | Met on 2026-09-07; see the [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md). Contracts reflect the accepted decisions; the adjacent-f64 clamp rule holds over 889,145 domain-wide cases with at most two repair steps, no fallbacks and a 2^-28 pixel maximum gap; huge-velocity and maximum-footprint fixtures clamp exactly at the finite boundary; `120 * FIXED_DT` was verified to be exactly 2.0 rather than assumed; measured storage and work fit the caps, with the max-load long-sweep costing 11,386,880 of the 16,777,216 fixed-pass units. Overlap, transition and budget semantics are defined, so no stop gate remains. |
-| 1. Kernel map ownership | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Rectangular/negative-origin indexing, malformed size/ID input, copied ownership, bounds and atomic failed replacement proven. Test core with no default features. |
+| 1. Kernel map ownership **(complete)** | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Met on 2026-09-07 by `src/tilemap.rs`, its kernel integration and `tests/tilemap.rs`. Rectangular maps and tiles, negative-origin conversion, malformed size/ID/array input by reason, owned reads and snapshots, region and edit bounds, and a refused replacement leaving the installed map whole are all proven; the suite runs in the core configuration. Twelve mutation controls in `tools/run_tilemap_controls.ps1` each remove one guard and fail at a named assertion. |
 | 2. Colliders and fixed systems | Optional hecs collider, placement guards, pure axis solver and bounded all-candidate commit. Extend all Phase 1 mutations to enforce collider invariants. | Sweeps/teleports/edits obey T3-T6; no-collider integration is unchanged; late failure moves no entity; max-load/watchdog and entity-order checks pass. |
 | 3. Luau integration | Scoped world extensions, raw validation/copying, shared attempts and new work/output budgets; real runtime fixtures. | Phase/expiry/foreign/reused handles, malformed calls, `pcall` latching, allocation rollback, callback ordering, restart/fault and zero-tick/catch-up behavior pass headlessly. |
 | 4. Sample and release proof | Replace sample collision, adapt its probe, add tile-edit/high-speed fixtures, update authoring docs and development checks. | Original room/art/control expectations preserved; collision during loading/unload, same-tick edits, 30/60/144 FPS replay, copied Player captures and injected-input probe pass. Record M1 completion and limits; leave the plan active for M2-M4. |
@@ -431,6 +432,47 @@ span that bound depends on, and `120 * FIXED_DT` is exactly 2.0. One open item
 travels forward: that long-sweep pass took about 20 ms in the probe's unoptimised
 release build against a 16.67 ms tick, so Phase 2 must re-measure the production
 solver before anyone treats the work ceiling as a frame-rate promise.
+
+Phase 1 exit, 2026-09-07, against baseline `b0e2672`: dependency-free
+`src/tilemap.rs` owns the checked map schema, dense row-major storage, bounded
+region and cell operations, and world-to-cell conversion; `src/kernel.rs` owns the
+single `Option<TileMap>` and its install/replace/clear/read/edit entry points.
+Added paths: `src/tilemap.rs`, `tests/tilemap.rs`,
+`tools/run_tilemap_controls.ps1`; modified: `src/kernel.rs`, `src/lib.rs`,
+`docs/DEVELOPMENT.md` and this plan. No scripting, asset, renderer or Player code
+changed, and `ctx.world` gains nothing until Phase 3.
+
+Commands and results: `cargo fmt --all -- --check`, `cargo check --workspace
+--all-targets`, and `cargo clippy --workspace --all-targets -- -D warnings` with
+and without default features all clean. `cargo test --workspace` reports 187
+passing and 5 ignored across 22 targets, up from 170 across 21; the core
+`--no-default-features` run reports 37 passing across 21 targets, up from 20,
+which is where the new suite's 14 integration and 3 unit tests live.
+`pwsh -NoProfile -File tools/run_tilemap_controls.ps1` reports twelve controls
+detected and one redundant guard confirmed, in both debug and `-Release`.
+
+Named negative-control assertions: `stop must release map storage`,
+`a far coordinate must saturate one cell out`, `cell_at did not converge` (debug)
+and `the cell left of a negative origin is -1, not 0` (release), the row-major
+and solidity cell comparisons, `must be solid`, the region bounds panic and cap
+assertion, `bad ID at`, the cell-product and geometry-limit refusals, and the
+`set_tile` bounds assertion. A thirteenth control replaces mathematical floor
+alone and is expected to keep passing, which records that floor and the
+exact-face correction are redundant by design rather than that either is dead.
+
+Two Phase 0 obligations are discharged: `TileMap::cell_at` saturates one cell
+outside the grid and debug-asserts convergence instead of relying on callers
+clipping first, and `Kernel::stop` releases map storage rather than only denying
+access, observed through `Kernel::tilemap_storage_bytes`. The canonical
+edge-reconstruction helper stays with Phase 2, which is where a body first exists
+to reconstruct; nothing in Phase 1 compares a box against the grid.
+
+Limits unchanged from the Phase 0 record. Deliberately not in this phase, and
+still Phase 2's: colliders, sweeps, the T6 collider guards on every mutation
+above, and the allocation-free no-map/no-collider integration control. Phase 1
+adds no per-tick work and leaves `fixed_update` untouched, which
+`a_map_changes_nothing_about_entities_without_colliders` pins. The next unmet
+gate is Phase 2.
 
 Decision update, 2026-09-07: the owner accepted T2-T8, explicitly required the
 collider to be a hecs component, accepted T1's first milestone while making

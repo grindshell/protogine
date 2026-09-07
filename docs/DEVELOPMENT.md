@@ -44,7 +44,7 @@ Exercise both the real headless runtime and the combined Player configuration:
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
+cargo test --release --no-default-features --features scripting --lib --test kernel --test tilemap --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
 cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
 cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/sprites
 cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/sprites
@@ -159,6 +159,7 @@ Keep subprocess watchdogs independent of the subsystem under test:
 | `scripting`, `scripting_feasibility` | Lifecycle, module policy, scoped calls, JIT, faults, allocation and protected cancellation; runaway probes have a 10-second child watchdog |
 | `scripting_utilities` | Value/export rules, rooted I/O, stale/retained values, limits, replacement failure, script-owned save/load |
 | `kernel`, `runtime` | Handles, immediate writes, systems, latched limits, fixed-input replay and catch-up edges |
+| `tilemap` | Checked map schema and storage, row-major IDs, rectangular tiles and negative origins, saturated world-to-cell conversion, region and edit bounds, refused replacement, and map release on stop; runs in the core configuration with no decoder, VM or window |
 | `drawing` | Owned publication/validation, expired bindings, faults and seeded sample state without graphics |
 | `assets` | Rooting, coalescing, staged grants, independent pixels, storage/admission bounds, eviction/cancellation at each stage and worker teardown; adversarial decoders have a 10-second child watchdog because non-preemptible decode plus join can outlast an in-process drain deadline |
 | `script_assets` | Canonical wrappers, publication boundaries, budgets/phases, failed jobs, retained terminal status, sprite options/refusals/order, stop/fault/drop; foreign handles and failed wrapper publication use unit harnesses in `src/scripting/assets.rs` |
@@ -194,6 +195,25 @@ and a 10-second child watchdog; GPU modes use 30 seconds. Negative controls must
 fail at their named assertions. Generated files live under
 `target/png-sprite-probe/`; durable receipts are linked from the
 [Phase 0 record](implementation/PNG_SPRITE_PHASE0.md).
+
+### Tilemap map guards
+
+Mutation controls for the kernel map. Each removes one guard from the engine
+source, runs the single `tilemap` test meant to catch it, and requires that test
+to fail at a named assertion; a passing suite alone cannot tell a live guard from
+a dead one. Sources are restored after every control and on any failure, and the
+run refuses to start on a dirty `src/tilemap.rs` or `src/kernel.rs`.
+
+```text
+pwsh -NoProfile -File tools/run_tilemap_controls.ps1
+pwsh -NoProfile -File tools/run_tilemap_controls.ps1 -Release
+```
+
+Run both profiles when changing `cell_at`: in debug its own convergence assertion
+fires first, and only in release does the test's assertion do the catching. One
+control is expected to *pass*, recording that mathematical floor and the
+exact-face correction are redundant by design. Rerun after editing either file;
+a stale anchor is reported as a stale control rather than a passing guard.
 
 ### Tilemaps and collision
 
