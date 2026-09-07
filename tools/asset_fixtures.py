@@ -56,6 +56,10 @@ def simple(name, width, height, depth, color, rows, rgba, extra=b"", interlace=0
 # Grayscale, 1 bit per sample. Two pixels: black then white, expanded to RGBA8.
 simple("gray", 2, 1, 1, 0, [b"\x40"], [0, 0, 0, 255, 255, 255, 255, 255])
 
+# An opaque 1x1 image has the dimensions of a retired GPU slot, but not its
+# contents. Retirement and unload must clear the red texel explicitly.
+simple("one_pixel", 1, 1, 8, 6, [bytes([255, 0, 0, 255])], [255, 0, 0, 255])
+
 # Grayscale with alpha, 8 bit. Opaque dark gray, then half-transparent light gray.
 simple(
     "gray_alpha",

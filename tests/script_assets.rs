@@ -87,6 +87,46 @@ fn ready_host(main: &str) -> (tempfile::TempDir, ScriptHost) {
 }
 
 #[test]
+fn retained_oversized_path_errors_are_bounded_and_recoverable() {
+    let (_root, mut host) = host_with(
+        r#"
+        local path, errors
+        return {
+            init = function(ctx)
+                path = string.rep("x", 1024 * 1024)
+                errors = {}
+            end,
+            update = function(ctx)
+                local ok, err = pcall(ctx.assets.request_png, path)
+                assert(not ok)
+                table.insert(errors, err)
+                -- Keep the external errors across callbacks, then format all
+                -- of them: none may carry the rejected megabyte of input.
+                for _, saved in ipairs(errors) do
+                    local message = tostring(saved)
+                    assert(#message < 8192)
+                    assert(string.find(message, "4096", 1, true))
+                end
+                local normal, missing = pcall(ctx.assets.request_png, "absent.png")
+                assert(not normal and string.find(tostring(missing), "absent.png", 1, true))
+            end,
+        }
+        "#,
+        &[],
+        ScriptLimits {
+            memory_bytes: 8 * 1024 * 1024,
+            ..ScriptLimits::default()
+        },
+    );
+    host.init().unwrap();
+    for _ in 0..24 {
+        host.update().unwrap();
+    }
+    assert_eq!(host.state(), ScriptState::Running);
+    assert_eq!(host.assets().counters().admitted, 0);
+}
+
+#[test]
 fn a_request_publishes_a_pending_handle_and_gameplay_continues_while_loading() {
     let (_root, mut host) = host(
         r#"

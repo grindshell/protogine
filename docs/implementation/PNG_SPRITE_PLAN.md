@@ -1866,6 +1866,46 @@ the renderer nor deadline enforcement changed in this phase.
 - No screenshot is committed. The captures are reproducible from the recorded
   commands, as in Phase 3.
 
+## Post-completion review corrections
+
+2026-09-07, reviewed from `bbc8c31`:
+
+- **Bound refused paths.** A caught `request_png` error retained its entire
+  rejected path in a Rust `AssetError`, outside the VM heap budget. The binding
+  now borrows the VM string through validation, and diagnostics omit paths over
+  the existing 4096-byte limit. Representable paths and the 1024-byte message
+  bound are preserved. Rust tests cover oversized ASCII/UTF-8 and the exact
+  boundary; Luau retains and formats errors across 24 callbacks under an 8 MiB
+  VM limit. An isolated allocator probe using one 1 MiB path measured retained
+  Rust growth falling from 25,401,168 to 235,344 bytes; its `ctx.fs.read` control
+  remained 233,544 bytes. These are probe allocations, not process-memory bounds.
+- **Retire after interactive faults.** `PlayerSession::after_present` retires
+  the faulted session after `next_frame`, releasing GPU content and staged CPU
+  pins while the error screen remains open. Normal sessions keep their mapping;
+  final capture retirement still follows readback. The Player unit test covers
+  the boundary decision and repeated notification. A copied Player source with
+  only observation/exit instrumentation showed a populated 2x3 slot on the first
+  fault frame, then a detached renderer, zero residents and a 1x1 slot on frames
+  two and three; previously the populated mapping remained on all three.
+- **Clear populated 1x1 slots.** Slots track cleared contents independently of
+  dimensions. The new opaque-red `one_pixel` fixture participates in the
+  100-cycle GPU test. The eviction harness verifies its queued red pixel survives
+  unload/readback, then clears, and proves retirement releases the renderer's
+  last CPU pin after a store disappears midway through a larger upload.
+
+Verification: the required baseline, assets-only, graphics-only and scripting
+check matrices in `AGENTS.md` passed, including the release Player build and
+release headless tests. The default workspace test initially failed because the
+sandbox could not execute clang; rerunning with compiler access passed. Both
+staged and preloaded sample drivers completed both images. The GPU harness
+passed `cycles`, `bands`, `eviction` and `pressure`; `recreate` failed at its
+expected negative-control assertion. The existing cross-GPU and driver-memory
+limitations remain. All three `player_capture` tests passed; the live
+`tests/player_input.ps1` close, Escape and shutdown-fault checks and
+`tools/run_sprites_probe.ps1` movement/animation/unload/reload probe passed.
+PowerShell runners used process-local `-ExecutionPolicy Bypass`; no persistent
+execution policy changed.
+
 ## Planning evidence
 
 The observations below preceded Phase 0; its linked record contains the later

@@ -196,6 +196,7 @@ impl AssetErrorCode {
 }
 
 /// An owned diagnostic. `path` is the logical request spelling, never a host path.
+/// It is empty when unavailable or longer than the supported path limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetError {
     pub code: AssetErrorCode,
@@ -207,8 +208,9 @@ impl AssetError {
     #[cfg(feature = "assets")]
     pub(crate) fn new(code: AssetErrorCode, path: &str, message: impl ToString) -> Self {
         let mut message = message.to_string();
-        // Diagnostics are copied into VM-owned values, so cap them here rather
-        // than letting a decoder or OS message set the retained size.
+        // Request refusals can survive in Luau as external errors, whose Rust
+        // allocations are outside the VM budget. Bound both fields before
+        // retaining them, including the input that a length refusal rejected.
         if message.len() > ERROR_MESSAGE_BYTES {
             let mut end = ERROR_MESSAGE_BYTES;
             while !message.is_char_boundary(end) {
@@ -218,7 +220,11 @@ impl AssetError {
         }
         Self {
             code,
-            path: path.to_string(),
+            path: if path.len() <= crate::rooted_path::PATH_BYTES {
+                path.to_string()
+            } else {
+                String::new()
+            },
             message,
         }
     }

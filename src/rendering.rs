@@ -131,6 +131,9 @@ struct Slot {
     identity: TextureId,
     width: u32,
     height: u32,
+    /// A valid image can itself be 1x1, so dimensions cannot prove that its
+    /// texel has been cleared. Set false whenever storage is repopulated.
+    cleared: bool,
 }
 
 /// An image being transferred. The `Arc` pins the store's immutable pixels for
@@ -548,6 +551,7 @@ impl MacroquadRenderer {
         allocate(&self.pool[slot].texture, width, height);
         self.pool[slot].width = width;
         self.pool[slot].height = height;
+        self.pool[slot].cleared = false;
         self.counters.allocations += 1;
         self.counters.admitted += 1;
         self.images.insert(
@@ -629,6 +633,7 @@ impl MacroquadRenderer {
             identity,
             width: 1,
             height: 1,
+            cleared: true,
         });
         Ok(self.pool.len() - 1)
     }
@@ -652,12 +657,13 @@ impl MacroquadRenderer {
 
     fn clear_slot(&mut self, index: usize) {
         let slot = &mut self.pool[index];
-        if (slot.width, slot.height) == (1, 1) {
+        if slot.cleared {
             return;
         }
         resize_cleared(&slot.texture);
         slot.width = 1;
         slot.height = 1;
+        slot.cleared = true;
     }
 
     // ---- validation and submission --------------------------------------

@@ -63,6 +63,25 @@ fn store(root: &Path) -> AssetStore {
     AssetStore::new(root).expect("asset store")
 }
 
+#[test]
+fn oversized_path_refusals_do_not_retain_the_rejected_input() {
+    let root = bundle();
+    let mut store = store(root.path());
+    for path in ["x".repeat(1024 * 1024), "é".repeat(2049)] {
+        let error = store.request_png(&path).unwrap_err();
+        assert_eq!(error.code, AssetErrorCode::Path);
+        assert!(error.path.is_empty(), "an oversized path must be omitted");
+        assert!(error.message.contains("4096"));
+        assert!(error.to_string().len() < 1024);
+    }
+    // Preserve useful diagnostics up to the exact byte boundary, even for a
+    // refused extension. This never needs to resolve an overlong OS filename.
+    let boundary = format!("{}.jpg", "x".repeat(4092));
+    assert_eq!(store.request_png(&boundary).unwrap_err().path, boundary);
+    assert_eq!(store.counters().admitted, 0);
+    assert_eq!(store.pending_jobs(), 0);
+}
+
 /// Load one image to completion and return its published pixels.
 fn load(store: &mut AssetStore, path: &str) -> Vec<u8> {
     let id = store.request_png(path).unwrap();
@@ -155,6 +174,7 @@ mod png {
 fn committed_fixtures_decode_to_independently_specified_pixels() {
     for (fixture, width, height) in [
         ("gray", 2, 1),
+        ("one_pixel", 1, 1),
         ("gray_alpha", 2, 1),
         ("rgb", 3, 1),
         ("rgba", 2, 3),

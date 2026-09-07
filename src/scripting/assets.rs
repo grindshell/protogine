@@ -376,7 +376,9 @@ impl Images {
                     ));
                 }
                 let path = LuaString::from_lua_multi(args, lua)?;
-                let path = path.to_str()?.to_string();
+                // Borrow the VM string through validation: a refused oversized
+                // path must not first allocate an equally large Rust copy.
+                let path = path.to_str()?;
                 // Resolution is synchronous on a miss so that coalescing and
                 // handle identity are decided before returning; it performs
                 // metadata I/O only, never content reads or decoding.

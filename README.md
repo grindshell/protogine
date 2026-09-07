@@ -489,6 +489,9 @@ paths, wrong phases and admission refusals are catchable errors that publish no
 handle; failures after admission are inspectable failed jobs with `io`,
 `format`, `unsupported`, `limit` or `capacity` codes and stop no gameplay.
 Terminal status stays readable on a handle the script kept.
+Asset diagnostics retain at most 4096 UTF-8 bytes of logical path and 1024 bytes
+of message. A path longer than 4096 bytes is omitted from its refusal diagnostic;
+catching the error does not retain a copy of that oversized input outside the VM.
 
 Accepted PNGs are static RGB/RGBA, grayscale or grayscale-alpha and indexed
 color, including palette transparency, 1/2/4-bit grayscale expansion and

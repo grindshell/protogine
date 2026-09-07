@@ -23,7 +23,7 @@ const WATCHDOG: Duration = Duration::from_secs(20);
 /// The committed fixtures, whose pixels `tools/asset_fixtures.py` specifies
 /// independently of this engine's decoder. Cycling through them varies both
 /// dimensions and content across sessions.
-const FIXTURES: [(&str, &[u8], u32, u32); 3] = [
+const FIXTURES: [(&str, &[u8], u32, u32); 4] = [
     (
         "rgba",
         include_bytes!("../tests/fixtures/assets/rgba.png"),
@@ -41,6 +41,12 @@ const FIXTURES: [(&str, &[u8], u32, u32); 3] = [
         include_bytes!("../tests/fixtures/assets/interlaced.png"),
         9,
         9,
+    ),
+    (
+        "one_pixel",
+        include_bytes!("../tests/fixtures/assets/one_pixel.png"),
+        1,
+        1,
     ),
 ];
 const SHEET: &[u8] = include_bytes!("../examples/kenney_1-bit-pack_transparent-packed.png");
@@ -481,6 +487,71 @@ async fn eviction(root: &Path) {
         "reused slot: source UVs still resolve against the old size"
     );
     next_frame().await;
+    renderer.retire();
+
+    // A 1x1 upload has the dimensions of an idle slot but contains an opaque
+    // pixel. Unload while its draw is queued: the texel must survive readback,
+    // then become transparent when the deferred slot is released.
+    store.shutdown();
+    let mut store = AssetStore::new(root).unwrap();
+    renderer.attach(store.session());
+    let pixel = store.request_png("image3.png").unwrap();
+    assert!(store.drain(WATCHDOG));
+    store.take_settled();
+    renderer.admit(pixel);
+    drain_uploads(&mut renderer, &store);
+    assert_eq!(renderer.measure_payload(), (4, false));
+    let command = DrawCommand::Sprite(Sprite {
+        image: pixel,
+        source: SourceRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        x: 0.0,
+        y: 0.0,
+        width: 16.0,
+        height: 16.0,
+        flip_x: false,
+        flip_y: false,
+        tint: [1.0; 4],
+    });
+    renderer.render(&store, &[command]).unwrap();
+    assert!(store.unload(pixel));
+    renderer.service_uploads(&store).unwrap();
+    assert_eq!(screen_pixel(&get_screen_data(), 8, 8), [255, 0, 0, 255]);
+    next_frame().await;
+    renderer.service_uploads(&store).unwrap();
+    assert_eq!(
+        renderer.measure_payload(),
+        (4, true),
+        "unloaded 1x1 texel was not cleared"
+    );
+    assert_eq!(renderer.counters().creations, 1);
+
+    // A fault can destroy a store midway through an upload. The renderer then
+    // owns the last service-side CPU pin as well as the GPU allocation; retire
+    // must release both, even though the upload never became resident.
+    store.take_settled();
+    let sheet = store.request_png("sheet.png").unwrap();
+    assert!(store.drain(WATCHDOG));
+    let pixels = store.image(sheet).unwrap();
+    renderer.admit(sheet);
+    renderer.service_uploads(&store).unwrap();
+    assert_eq!(renderer.pending_uploads(), 1);
+    drop(store);
+    assert_eq!(std::sync::Arc::strong_count(&pixels), 2);
+    renderer.retire();
+    assert_eq!(
+        std::sync::Arc::strong_count(&pixels),
+        1,
+        "retirement retained upload pixels"
+    );
+    assert_eq!(renderer.pending_uploads(), 0);
+    assert_eq!(renderer.resident_images(), 0);
+    assert_eq!(renderer.measure_payload(), (4, true));
+    assert!(renderer.identities_stable());
     println!(
         "PASS mode=eviction creations={} cancelled={} completed={} reused_size=2x3",
         renderer.counters().creations,

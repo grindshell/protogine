@@ -246,7 +246,10 @@ behavior that depends on them.
   queued frame draws from is pinned until that frame is presented; transient
   pressure yields with the admission intact rather than faulting. Attach retires
   the previous session first, and retirement shrinks every slot to a transparent
-  1x1 texel, so no session inherits another's mapping or content. Validation
+  1x1 texel, so no session inherits another's mapping or content. Track cleared
+  contents separately from dimensions: a loaded 1x1 image still needs clearing.
+  The Player retires a faulted session after presentation while its error screen
+  remains open; capture retirement still follows the final readback. Validation
   covers the whole list before anything is queued and refuses missing, foreign
   and unloaded images, which the runtime turns into a presentation fault through
   the existing primary-fault path. Keep `build_textures_atlas` and
@@ -491,9 +494,11 @@ option; scheduling and mutation timing are separate contracts.
 
   `cycles` runs 100 attach/load/retire cycles and asserts the pool's lifetime
   bounds and retirement; `bands` proves bounded per-pass progress and that
-  drawing advances no upload; `eviction` cancels a staged upload and reuses its
-  slot; `pressure` fills the pool, pins every slot with a queued frame, and
-  requires a yield rather than a fault. `recreate` is a negative control and
+  drawing advances no upload; `eviction` cancels a staged upload, reuses its
+  slot, checks deferred clearing of an opaque 1x1 image and releases a staged
+  upload's CPU pin after store teardown; `pressure` fills the pool, pins every
+  slot with a queued frame, and requires a yield rather than a fault.
+  `recreate` is a negative control and
   must fail at its named assertion. The runner enforces an independent
   60-second watchdog per mode and requires each mode's own `PASS mode=` marker,
   since exiting zero does not prove the assertions ran. The script works under

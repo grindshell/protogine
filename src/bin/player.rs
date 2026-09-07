@@ -294,6 +294,15 @@ impl PlayerSession {
             u8::from(capture_failed)
         }
     }
+
+    /// After presentation, no queued frame can still reference game textures.
+    /// The interactive error screen keeps running, so release the faulted
+    /// session here instead of retaining its uploads until the window closes.
+    fn after_present(&self, renderer: &mut MacroquadRenderer) {
+        if self.faulted && renderer.session().is_some() {
+            renderer.retire();
+        }
+    }
 }
 
 fn poll_input() -> InputSnapshot {
@@ -410,6 +419,7 @@ async fn run(options: PlayerOptions, status: Rc<Cell<u8>>) {
         }
         status.set(session.exit_code(capture_failed));
         next_frame().await;
+        session.after_present(&mut renderer);
     }
     if let Some(error) = drain_error {
         eprintln!("Player capture failed: {error}");
@@ -431,4 +441,44 @@ fn save_capture(options: &PlayerOptions, capture: &capture::Capture) -> Result<(
     capture::save_png(screenshot, &capture.path)?;
     eprintln!("Screenshot saved to {}", capture.path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fault_retirement_waits_for_presentation_and_preserves_running_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.luau"), "return {}").unwrap();
+        let runtime = GameRuntime::load(root.path(), ScriptLimits::default()).unwrap();
+        let mut session = PlayerSession {
+            runtime: Some(runtime),
+            screen: None,
+            faulted: false,
+        };
+        session.call(GameRuntime::init);
+        // An empty pool needs no graphics context. Pixel clearing and staged
+        // CPU ownership are exercised by the renderer's GPU harness.
+        let mut renderer = MacroquadRenderer::new();
+        session.attach(&mut renderer);
+        let attached = renderer.session();
+        assert!(attached.is_some());
+        session.after_present(&mut renderer);
+        assert_eq!(renderer.session(), attached);
+
+        session.presentation_fault("retirement regression".into());
+        assert!(session.runtime.is_none());
+        assert_eq!(session.exit_code(false), 3);
+        assert_eq!(
+            renderer.session(),
+            attached,
+            "queued work still owns its textures"
+        );
+        session.after_present(&mut renderer);
+        assert_eq!(renderer.session(), None);
+        session.after_present(&mut renderer);
+        assert_eq!(renderer.session(), None);
+        assert_eq!(renderer.counters().sessions, 1);
+    }
 }
