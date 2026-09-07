@@ -877,7 +877,55 @@ buffer outlives its identity.
 - **The early metadata check is retained and is not the authority.** A file
   whose metadata already exceeds 17 MiB is refused before any read. A file at
   exactly the cap is still read in full and accepted, which is what the test
-  asserts, so the accepted size is decided by bytes that actually arrived.
+  asserts, so the accepted size is decided by bytes that actually arrived. That
+  same length also sizes the encoded destination once, at job start; see the
+  review corrections below.
+
+### Review corrections
+
+The Phase 1 diff review found two defects, fixed in the same phase before any
+Phase 2 work. Both are covered above by the frozen contracts they violated.
+
+- **`shutdown` released everything except a cancelled job's output
+  reservation.** `AssetStore::shutdown` cleared the job queue after resetting
+  the encoded and scratch counters, but retained storage cannot be reset that
+  way, because published and pinned content share the counter. A job torn down
+  at or past its allocate grant therefore left up to 16 MiB counted for the life
+  of the store. Shutdown now releases each job's own reservations and lets all
+  three counters reach zero through that release, so a future leak stays
+  visible instead of hidden behind a blanket reset.
+  `shutdown_releases_the_reservations_of_a_cancelled_job` interrupts a load at
+  twelve pass counts and asserts every counter, and fails on the previous code
+  with exactly the 1,103,872 bytes the Kenney sheet reserves.
+- **Encoded reads grew the destination by one grant per pass.** Because a fully
+  used grant leaves capacity equal to length, `reserve_exact` reallocated and
+  copied the whole buffer every pass, at a cost proportional to the bytes
+  already read, and it ran before the pass timer started, so the soft cutoff
+  could not see it. The destination is now sized once at job start from the
+  metadata length the cap was just checked against, plus the overflow probe. A
+  file that grows past its metadata still cannot exceed the per-image cap,
+  because the store bounds every grant by the bytes already read.
+
+Measured on the 16,780,612-byte incompressible fixture, release build, same
+machine and probe, three runs each:
+
+| | Before | After |
+| --- | --- | --- |
+| Time in read passes | 112-123 ms | 11.4-12.1 ms |
+| Read passes over the 2 ms target | 26-29 of 66 | 1 of 66 |
+| Whole load | 122-134 ms | 21-24 ms |
+
+The remaining over-target pass is the one that opens the file and takes the
+single reservation, which is already a non-preemptible stage in the frozen
+model. Pass counts, grant sizes and decoded pixels are unchanged; this is a
+scheduling-accuracy correction, not a new latency guarantee.
+
+The whole command list below was rerun after both fixes, including the ignored
+GPU captures and plugin suites, with the same results.
+
+The review also recorded three gaps it did not fix, carried to the list of
+unresolved gaps below: the missing child-process watchdog, the unexercised
+read-based encoded cap, and the unreachable `Reply::Abandoned`.
 
 ### Behavioral observations
 
@@ -938,7 +986,7 @@ cargo test --test player_capture -- --ignored
 cargo test --test plugins -- --ignored
 ```
 
-`tests/assets.rs` contains 30 tests, three of them Windows-only, and runs in
+`tests/assets.rs` contains 31 tests, three of them Windows-only, and runs in
 about 3.5 seconds in debug and 1.3 seconds in release. The existing filesystem,
 scripting, runtime, drawing, plugin and capture suites pass unchanged, including
 the ignored GPU captures, which confirms the traversal extraction and the
@@ -965,6 +1013,20 @@ the same reason, since deadline enforcement did not change.
   wired up. The store's pass function is the one those will call.
 - Service faults are recorded and reported through `service_fault`, but no
   caller turns one into a session fault yet.
+- `tests/assets.rs` has no child-process watchdog. Its `WATCHDOG` is a `drain`
+  deadline, and `Drop` joins the worker unconditionally, so a decoder stuck in a
+  non-preemptible stage would hang the harness rather than fail in ten seconds.
+  The frozen contract asks for the child-process pattern already used by
+  `scripting_feasibility`; adopt it when adversarial decoder fixtures land.
+- The read-based encoded cap is unexercised. Every file above 17 MiB is refused
+  by the metadata check before the first read, so the overflow probe and the
+  post-read limit failure can only fire on a file that grows mid-load, which the
+  stable-bundle assumption excludes. The one-over test proves the metadata path
+  only. The check is retained as defense in depth, not as tested behavior.
+- `Reply::Abandoned` is unreachable. `Command::Abandon` is only sent for a job
+  whose cancel flag is already set, and the worker checks that flag first, so
+  the reply is always `Cancelled`. Harmless, and left for the phase that revisits
+  the worker protocol.
 
 ## Planning evidence
 

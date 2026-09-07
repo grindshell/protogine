@@ -947,6 +947,37 @@ fn shutdown_cancels_outstanding_work_and_joins_the_worker() {
     drop(pinned);
 }
 
+/// Tearing a store down mid-load must release what the cancelled job reserved.
+/// Retained storage is shared with published and pinned content, so no blanket
+/// reset can do this; only the job's own bytes may be dropped.
+#[test]
+fn shutdown_releases_the_reservations_of_a_cancelled_job() {
+    let root = bundle();
+    fs::copy(kenney(), root.path().join("sheet.png")).unwrap();
+    let mut interrupted_after_reserving = 0;
+    for passes in 0..12 {
+        let mut store = store(root.path());
+        let id = store.request_png("sheet.png").unwrap();
+        for _ in 0..passes {
+            store.advance(WATCHDOG);
+        }
+        if store.status(id).unwrap().state != ImageState::Ready && store.resident_bytes() > 0 {
+            interrupted_after_reserving += 1;
+        }
+        store.shutdown();
+        // Nothing published and nothing pinned, so every counter returns to zero.
+        assert_eq!(store.resident_bytes(), 0, "passes={passes}");
+        assert_eq!(store.staged_bytes(), 0, "passes={passes}");
+        assert_eq!(store.scratch_bytes(), 0, "passes={passes}");
+    }
+    // The output reservation is taken a pass before the image can be published,
+    // so a run that never observed it would prove nothing.
+    assert!(
+        interrupted_after_reserving > 0,
+        "no shutdown interrupted a job that had already reserved its output"
+    );
+}
+
 #[test]
 fn dropping_a_store_mid_load_terminates_its_worker() {
     let root = bundle();

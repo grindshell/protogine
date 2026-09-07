@@ -938,10 +938,16 @@ impl AssetStore {
     /// everything this store owns. Idempotent, and safe to call after a fault.
     pub fn shutdown(&mut self) {
         self.stopped = true;
-        for job in &self.jobs {
+        // Release what each job reserved rather than resetting the counters:
+        // retained storage is shared with published and pinned content, so only
+        // a job's own bytes may be dropped here. Encoded staging and scratch
+        // reach zero through the same release, which keeps a leak visible
+        // instead of hiding it behind a blanket reset.
+        for job in std::mem::take(&mut self.jobs) {
             job.cancel.store(true, Ordering::Relaxed);
+            self.release_work(&job);
+            self.release_output(&job);
         }
-        self.jobs.clear();
         for (_, entry) in self.entries.drain() {
             if let Entry::Ready(data) = entry {
                 self.retiring.push(data);
@@ -951,8 +957,6 @@ impl AssetStore {
         self.spellings.clear();
         self.spelling_order.clear();
         self.settled.clear();
-        self.accounting.encoded = 0;
-        self.accounting.scratch = 0;
         // Wake an idle worker, then close both channels before joining:
         // neither a worker waiting for a grant nor one returning a reply can
         // stay blocked. An in-progress non-preemptible stage may still delay

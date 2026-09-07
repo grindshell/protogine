@@ -148,16 +148,23 @@ impl Job {
         };
         // Metadata length is an early refusal only. The accepted size is still
         // decided by bytes actually read, plus the one-byte overflow probe.
-        match file.metadata() {
+        let length = match file.metadata() {
             Ok(meta) if meta.len() > ENCODED_IMAGE_LIMIT as u64 => {
                 return self.error(
                     AssetErrorCode::Limit,
                     format!("encoded PNG exceeds {ENCODED_IMAGE_LIMIT} bytes"),
                 );
             }
-            Ok(_) => {}
+            Ok(meta) => meta.len() as usize,
             Err(error) => return self.error(AssetErrorCode::Io, error),
-        }
+        };
+        // One exact allocation for the whole file, from the length just refused
+        // against, plus the probe. Growing by a grant per pass instead would
+        // reallocate and copy every pass at a cost proportional to the bytes
+        // already read, and that copy would sit outside the pass cutoff. A file
+        // that grows past its metadata still cannot pass the per-image cap,
+        // because the store bounds every grant by the bytes already read.
+        self.encoded.reserve_exact(length + 1);
         self.file = Some(file);
         Reply::Started
     }
@@ -172,8 +179,8 @@ impl Job {
     }
 
     fn read_into(&mut self, file: &mut File, allowance: usize) -> Reply {
-        // Grow to exactly the granted allowance; never rely on implicit doubling.
-        self.encoded.reserve_exact(allowance);
+        // The destination was sized once at `start`, so every operation this
+        // pass performs is inside the cutoff below.
         let start = Instant::now();
         let mut block = [0u8; WORK_QUANTUM];
         let (mut bytes, mut calls, mut eof) = (0usize, 0u64, false);
