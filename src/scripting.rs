@@ -351,6 +351,30 @@ impl ScriptHost {
         self.images.store()
     }
 
+    /// Take the images whose CPU content was published at the last boundary.
+    /// A renderer admits these; nothing else reports that content is ready.
+    pub fn take_ready_images(&mut self) -> Vec<crate::assets::ImageId> {
+        self.images.take_ready()
+    }
+
+    /// Queue renderer acknowledgements for the next publication boundary, and
+    /// record that a renderer is attached so status carries GPU residency.
+    pub fn acknowledge_uploads(&mut self, acks: Vec<crate::assets::UploadAck>) {
+        self.images.acknowledge(acks);
+    }
+
+    /// Report an attached renderer before it has acknowledged anything, so an
+    /// image reads as GPU `pending` rather than `unavailable` while it uploads.
+    pub fn attach_gpu(&mut self) {
+        self.images.attach_gpu();
+    }
+
+    /// Publish pending transitions without a service pass, a callback or a
+    /// simulation step. Capture and preload drivers commit before drawing.
+    pub fn publish_assets(&mut self) -> Result<(), ScriptError> {
+        self.commit_assets()
+    }
+
     /// One bounded CPU service pass. Public update entry points call this
     /// exactly once; a runtime's catch-up ticks do not grant again, so a busy
     /// worker accumulates no credits.

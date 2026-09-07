@@ -14,6 +14,9 @@ pub mod manifest;
 #[cfg(feature = "native-plugins")]
 pub mod plugins;
 
+#[cfg(feature = "graphics")]
+pub mod rendering;
+
 #[cfg(feature = "scripting")]
 pub mod scripting;
 

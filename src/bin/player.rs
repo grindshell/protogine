@@ -6,12 +6,22 @@
 use macroquad::prelude::*;
 use protogine::{
     bundle::discover_bundle,
-    drawing::DrawCommand,
     input::{Button, Buttons, InputSnapshot},
+    rendering::MacroquadRenderer,
     runtime::GameRuntime,
     scripting::{ScriptError, ScriptLimits},
 };
-use std::{cell::Cell, process::ExitCode, rc::Rc};
+use std::{
+    cell::Cell,
+    process::ExitCode,
+    rc::Rc,
+    time::{Duration, Instant},
+};
+
+/// Bounded wait for a capture's asset and upload drain, independent of any
+/// script deadline. A timed-out drain fails the capture rather than saving an
+/// incomplete image.
+const DRAIN_WATCHDOG: Duration = Duration::from_secs(10);
 
 #[path = "player/capture.rs"]
 mod capture;
@@ -164,11 +174,116 @@ impl PlayerSession {
         }
     }
 
-    fn draw(&self) {
+    /// Give the renderer this session's images. The renderer's pool outlives
+    /// every session and is never recreated, so attaching only rebinds it.
+    fn attach(&mut self, renderer: &mut MacroquadRenderer) {
+        let Some(runtime) = &mut self.runtime else {
+            return;
+        };
+        let Some(session) = runtime.assets().map(|store| store.session()) else {
+            return;
+        };
+        renderer.attach(session);
+        runtime.attach_gpu();
+    }
+
+    /// Admit newly ready images and run one bounded upload pass, then queue the
+    /// acknowledgements for the next update boundary. No script runs here.
+    fn service_uploads(&mut self, renderer: &mut MacroquadRenderer) {
+        let outcome = {
+            let Some(runtime) = &mut self.runtime else {
+                return;
+            };
+            let ready = runtime.take_ready_images();
+            let serviced = {
+                let Some(store) = runtime.assets() else {
+                    return;
+                };
+                for id in ready {
+                    renderer.admit(id);
+                }
+                renderer.service_uploads(&store)
+            };
+            match serviced {
+                Ok(acks) => {
+                    runtime.acknowledge_uploads(acks);
+                    Ok(())
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        if let Err(message) = outcome {
+            self.presentation_fault(message);
+        }
+    }
+
+    /// Settle every outstanding asset job and upload, then publish, so a
+    /// capture draws against a readiness schedule that repeats. It advances no
+    /// simulation and does not count as a rendered frame.
+    fn drain(&mut self, renderer: &mut MacroquadRenderer) -> Result<(), String> {
+        let deadline = Instant::now() + DRAIN_WATCHDOG;
+        {
+            let Some(runtime) = &mut self.runtime else {
+                return Ok(());
+            };
+            let settled = runtime
+                .drain_assets(DRAIN_WATCHDOG)
+                .map_err(|error| error.to_string())?;
+            if !settled {
+                return Err("asset loading did not settle within the drain watchdog".into());
+            }
+        }
+        // Service once unconditionally: the drain above settled every CPU job,
+        // so nothing is admitted yet and a leading `pending_uploads` test would
+        // skip the pass that admits them. Afterwards the ready queue is empty
+        // and no new job can settle inside this loop, so the pending count is
+        // the whole condition.
+        loop {
+            self.service_uploads(renderer);
+            if self.runtime.is_none() {
+                return Ok(()); // The fault path already reported it.
+            }
+            if renderer.pending_uploads() == 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("image uploads did not settle within the drain watchdog".into());
+            }
+        }
+        let Some(runtime) = &mut self.runtime else {
+            return Ok(());
+        };
+        // Commit the acknowledgements before the draw that will be captured.
+        runtime.publish_assets().map_err(|error| error.to_string())
+    }
+
+    fn presentation_fault(&mut self, message: String) {
+        let Some(runtime) = &mut self.runtime else {
+            return;
+        };
+        let error = runtime.presentation_fault(message);
+        self.fault(error);
+    }
+
+    fn draw(&mut self, renderer: &mut MacroquadRenderer) {
         if let Some(screen) = &self.screen {
             screen.draw();
-        } else if let Some(runtime) = &self.runtime {
-            render(runtime.draw_commands());
+            return;
+        }
+        let result = match &self.runtime {
+            Some(runtime) => match runtime.assets() {
+                Some(store) => renderer.render(&store, runtime.draw_commands()),
+                None => Ok(()),
+            },
+            None => return,
+        };
+        if let Err(error) = result {
+            // Validation precedes submission, so a refused list queued nothing;
+            // present the game error screen for this frame instead.
+            self.presentation_fault(error.to_string());
+            if let Some(screen) = &self.screen {
+                screen.draw();
+            }
         }
     }
 
@@ -177,29 +292,6 @@ impl PlayerSession {
             3
         } else {
             u8::from(capture_failed)
-        }
-    }
-}
-
-fn render(commands: &[DrawCommand]) {
-    clear_background(BLACK);
-    for command in commands {
-        match *command {
-            DrawCommand::Clear(color) => clear_background(Color::from(color)),
-            DrawCommand::Rect {
-                x,
-                y,
-                width,
-                height,
-                color,
-            } => {
-                draw_rectangle(x, y, width, height, Color::from(color));
-            }
-            // The shared renderer that uploads and draws images is Phase 3 of
-            // the PNG/sprite plan. Until it exists the Player has no texture
-            // for an image, and skipping keeps the ordered rectangle path and
-            // every other command unchanged.
-            DrawCommand::Sprite(_) => {}
         }
     }
 }
@@ -248,19 +340,40 @@ fn main() -> ExitCode {
 
 async fn run(options: PlayerOptions, status: Rc<Cell<u8>>) {
     prevent_quit(); // Intercept native close for orderly script shutdown too.
+    // The pool belongs to the graphics context, not to a game session, and is
+    // never recreated. It is dropped below, inside this future, with the
+    // context still alive and after the final readback.
+    let mut renderer = MacroquadRenderer::new();
     let mut session = PlayerSession::discover(options.capture.is_some());
+    session.attach(&mut renderer);
     let mut rendered_frames = 0;
+    let mut capture_failed = options.capture.is_some();
+    let mut drain_error = None;
     loop {
         if is_key_pressed(KeyCode::Escape) || is_quit_requested() {
             session.call(GameRuntime::shutdown);
             if options.capture.is_some() {
                 eprintln!("Player capture failed: window closed before the screenshot was saved");
             }
-            status.set(session.exit_code(options.capture.is_some()));
-            return;
+            break;
         }
+        // Service uploads from the last committed snapshot, then queue the
+        // acknowledgements, before the frame that may publish new commands.
+        session.service_uploads(&mut renderer);
         if options.capture.is_some() {
+            // Drain after init and after each measured step, so the captured
+            // draw always sees a settled readiness schedule.
+            if rendered_frames == 0
+                && let Err(error) = session.drain(&mut renderer)
+            {
+                drain_error = Some(error);
+                break;
+            }
             session.call(|runtime| runtime.step(InputSnapshot::default()));
+            if let Err(error) = session.drain(&mut renderer) {
+                drain_error = Some(error);
+                break;
+            }
             session.call(|runtime| runtime.draw(0.0));
         } else {
             session.call(|runtime| {
@@ -269,7 +382,7 @@ async fn run(options: PlayerOptions, status: Rc<Cell<u8>>) {
                     .map(|_| ())
             });
         }
-        session.draw();
+        session.draw(&mut renderer);
         if let Some(capture) = &options.capture {
             rendered_frames += 1;
             if rendered_frames == capture.frame {
@@ -281,19 +394,30 @@ async fn run(options: PlayerOptions, status: Rc<Cell<u8>>) {
                 }
                 session.call(GameRuntime::shutdown);
                 if session.faulted {
-                    session.draw();
+                    // A fault always sets the error screen, so this redraws
+                    // that screen and never re-renders from a released store.
+                    session.draw(&mut renderer);
                 }
+                // Textures stay populated through the readback: get_screen_data
+                // is what flushes and reads the queued frame.
                 let result = save_capture(&options, capture);
                 if let Err(error) = &result {
                     eprintln!("Player capture failed: {error}");
                 }
-                status.set(session.exit_code(result.is_err()));
-                return;
+                capture_failed = result.is_err();
+                break;
             }
         }
-        status.set(session.exit_code(options.capture.is_some()));
+        status.set(session.exit_code(capture_failed));
         next_frame().await;
     }
+    if let Some(error) = drain_error {
+        eprintln!("Player capture failed: {error}");
+    }
+    // Only now is queued work submitted and read back, so the session's slots
+    // can be cleared. The pool itself is dropped with the context still alive.
+    renderer.retire();
+    status.set(session.exit_code(capture_failed));
 }
 
 fn save_capture(options: &PlayerOptions, capture: &capture::Capture) -> Result<(), String> {

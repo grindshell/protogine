@@ -57,8 +57,12 @@ shared with `ctx.fs` and differs only in its final-node policy. The
 [asset bindings](src/scripting/assets.rs) expose that service as `ctx.assets`,
 and `ctx.draw.sprite` publishes owned `DrawCommand::Sprite` values. The
 [loading sample](examples/games/loading/main.luau) requests during update and
-draws a progress bar until its sheet is ready. No renderer consumes sprite
-commands yet, so the Player skips them.
+draws a progress bar until its sheet is ready.
+The optional `graphics` feature, which `player` enables, adds the
+[shared renderer](src/rendering.rs): a context-lifetime pool of GPU allocation
+slots, bounded staged uploads and ordered command submission, with no VM
+dependency. Its [GPU harness](examples/renderer_harness.rs) drives the
+production renderer and store under a live context.
 The optional [manifest](src/manifest.rs) and [native loader](src/plugins.rs) add
 trusted C plugin startup/cleanup before/after the VM. The [SDK](sdk/src/lib.rs)
 generates [the C header](include/protogine_plugin.h) with the separate
@@ -71,8 +75,9 @@ Accepted and completed plans are indexed in [docs/implementation/README.md](docs
 The [PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) records the accepted
 next milestone. [Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) completed its
 contracts and CPU/GPU feasibility probes. Phase 1 implemented the headless asset
-service and Phase 2 its Luau and runtime integration; the shared renderer, GPU
-residency and the authoring sample remain unimplemented.
+service, Phase 2 its Luau and runtime integration, and Phase 3 the shared
+renderer, GPU residency and Player integration; the authoring sample remains
+unimplemented.
 The [scripting and C API plan](docs/implementation/SCRIPTING_C_API_PLAN.md) records
 accepted decisions, completed phases, verification evidence, and deferred scope.
 
@@ -227,6 +232,22 @@ behavior that depends on them.
   the store and join its worker; a fault does so immediately and runs no Luau
   shutdown. Worker loss and broken invariants become session faults, while a
   failed job stays inspectable.
+- The renderer owns a pool of at most 128 GPU allocation slots for the graphics
+  context's lifetime, created lazily through the single `Texture2D::from_rgba8`
+  call site and reused by resizing in place. Recreating one would grow the
+  batcher's unbatched list and the backend's texture records, neither of which
+  ordinary collection removes, so `identities_stable` must hold. Uploads move at
+  most eight row bands and 256 KiB per pass with one destination allocation, and
+  an image publishes its mapping only after every band succeeds. A slot the
+  queued frame draws from is pinned until that frame is presented; transient
+  pressure yields with the admission intact rather than faulting. Attach retires
+  the previous session first, and retirement shrinks every slot to a transparent
+  1x1 texel, so no session inherits another's mapping or content. Validation
+  covers the whole list before anything is queued and refuses missing, foreign
+  and unloaded images, which the runtime turns into a presentation fault through
+  the existing primary-fault path. Keep `build_textures_atlas` and
+  `reset_textures_atlas` prohibited, keep the `get_internal_gl` adapter confined
+  to `src/rendering.rs`, and never let a `Texture2D` or a raw handle escape it.
 - Save handling belongs to game scripts: schema, file layout, timing, restoration,
   and migrations. The engine may expose general filesystem access, tot parsing
   and formatting, and tot-export utilities for JSON, YAML, and TOML. Do not add
@@ -331,6 +352,14 @@ option; scheduling and mutation timing are separate contracts.
   cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
   ```
 
+  Renderer changes also require the graphics-only configuration, which builds
+  and tests the renderer without a VM, and the GPU harness below:
+
+  ```text
+  cargo test --workspace --no-default-features --features graphics
+  cargo clippy --workspace --all-targets --no-default-features --features graphics -- -D warnings
+  ```
+
   Scripting changes also require the real headless feature configuration and
   the combined Player/scripting configuration:
 
@@ -396,6 +425,10 @@ option; scheduling and mutation timing are separate contracts.
   PNG fixtures and needs no graphics context. Foreign handles and rolled back
   publication need a harness the VM cannot reach and are unit tests in
   `src/scripting/assets.rs`, as the world bindings do.
+  `rendering` verifies the renderer's command validation and admission
+  bookkeeping with no graphics context: `MacroquadRenderer::new` allocates
+  nothing, `attach` on an empty pool touches no texture, and `validate` is
+  exactly the check `render` runs before it queues anything.
   `scripting_utilities` verifies conversions, rooted I/O, retained-value/stale-call
   behavior, limits, file replacement failure, and script-owned save/load.
   `kernel` and `runtime` cover handles, immediate writes, system ordering, scoped
@@ -415,6 +448,30 @@ option; scheduling and mutation timing are separate contracts.
   do not reintroduce a separate copy of the renderer as a capture harness. Run
   `cargo test --test player_capture -- --ignored` when a graphics context is
   available. Capture mode requires graphics even though it exits unattended.
+- The shared renderer's GPU evidence comes from
+  [`examples/renderer_harness.rs`](examples/renderer_harness.rs), which drives
+  the production `MacroquadRenderer` and `AssetStore` rather than a second copy
+  of either. A `cargo test` harness cannot own the main thread a graphics
+  context needs, so build it and run each mode through its watchdog:
+
+  ```text
+  cargo build --release --no-default-features --features graphics --example renderer_harness
+  powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode cycles
+  powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode bands
+  powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode eviction
+  powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode pressure
+  powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode recreate
+  ```
+
+  `cycles` runs 100 attach/load/retire cycles and asserts the pool's lifetime
+  bounds and retirement; `bands` proves bounded per-pass progress and that
+  drawing advances no upload; `eviction` cancels a staged upload and reuses its
+  slot; `pressure` fills the pool, pins every slot with a queued frame, and
+  requires a yield rather than a fault. `recreate` is a negative control and
+  must fail at its named assertion. The runner enforces an independent
+  60-second watchdog per mode and requires each mode's own `PASS mode=` marker,
+  since exiting zero does not prove the assertions ran. The script works under
+  Windows PowerShell 5.1 and PowerShell 7.
 - The PNG/sprite Phase 0 dependency probe has its own bounded runner. It probes
   backend APIs and reuses the Player PNG writer; it is not the production renderer.
   When changing that probe, run `cargo build --release --example png_sprite_probe

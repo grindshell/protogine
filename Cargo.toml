@@ -26,11 +26,17 @@ required-features = ["scripting", "native-plugins"]
 name = "png_sprite_probe"
 required-features = ["player"]
 
+[[example]]
+name = "renderer_harness"
+required-features = ["graphics"]
+
 [features]
 default = ["player"]
-player = ["dep:macroquad", "scripting", "native-plugins"]
+player = ["graphics", "scripting", "native-plugins"]
 # Bundle-local PNG decoding and the headless asset service, without a VM or window.
 assets = ["dep:image"]
+# The shared renderer. It needs images but no VM, so it cannot reference GameRuntime.
+graphics = ["assets", "dep:macroquad"]
 scripting = ["assets", "dep:mlua", "dep:tempfile", "tot/toml", "tot/yaml"]
 native-plugins = ["dep:libloading", "dep:protogine-plugin-api"]
 

@@ -10,7 +10,7 @@
 //! a harness the VM cannot reach and live in `src/scripting/assets.rs`.
 
 use protogine::{
-    assets::ImageState,
+    assets::{GpuResidency, ImageState, UploadAck},
     drawing::{DRAW_COMMAND_LIMIT, DrawCommand, SourceRect, Sprite},
     input::InputSnapshot,
     kernel::FIXED_DT,
@@ -996,6 +996,188 @@ fn preloading_drains_through_the_same_service_and_never_reloads() {
     let drawn = sprites(runtime.draw_commands());
     assert_eq!(drawn.len(), 1);
     assert_eq!((drawn[0].width, drawn[0].height), (16.0, 16.0));
+}
+
+#[test]
+fn ready_transitions_reach_a_renderer_exactly_once() {
+    let (_root, mut runtime) = runtime(
+        r#"
+        local a, b
+        return {
+            init = function(ctx)
+                a = ctx.assets.request_png("art/rgba.png")
+                b = ctx.assets.request_png("art/rgb.png")
+            end,
+            update = function(ctx) ctx.assets.status(a) end,
+        }
+    "#,
+        &[("art/rgba.png", "rgba"), ("art/rgb.png", "rgb")],
+    );
+    runtime.init().unwrap();
+    // Nothing is published before a boundary, so nothing is offered for upload.
+    assert!(runtime.take_ready_images().is_empty());
+
+    // The queue is a renderer's inbox: a host without one accumulates nothing.
+    assert!(runtime.drain_assets(WATCHDOG).unwrap());
+    assert!(
+        runtime.take_ready_images().is_empty(),
+        "a host with no renderer must not queue upload work"
+    );
+
+    // Attaching after the images are already ready still offers all of them,
+    // so the order a driver attaches in is not load-bearing.
+    runtime.attach_gpu();
+    let ready = runtime.take_ready_images();
+    assert_eq!(ready.len(), 2, "both images became available");
+    let session = runtime.assets().unwrap().session();
+    assert!(ready.iter().all(|id| id.session() == session));
+    // Taking them hands ownership to the renderer; they are never re-offered.
+    assert!(runtime.take_ready_images().is_empty());
+    runtime.step(InputSnapshot::default()).unwrap();
+    assert!(
+        runtime.take_ready_images().is_empty(),
+        "a later boundary must not re-offer an already uploaded image"
+    );
+}
+
+#[test]
+fn acknowledgements_publish_gpu_residency_at_the_boundary() {
+    let (_root, mut runtime) = runtime(
+        r#"
+        local image, seen = nil, {}
+        return {
+            init = function(ctx) image = ctx.assets.request_png("art/rgba.png") end,
+            update = function(ctx)
+                local status = ctx.assets.status(image)
+                local mark = status.state .. "/" .. status.gpu
+                if seen[#seen] ~= mark then seen[#seen + 1] = mark end
+            end,
+            shutdown = function(ctx) ctx.log(table.concat(seen, ",")) end,
+        }
+    "#,
+        &[("art/rgba.png", "rgba")],
+    );
+    runtime.init().unwrap();
+    assert!(runtime.drain_assets(WATCHDOG).unwrap());
+    // Without a renderer, residency is unavailable rather than pending.
+    runtime.step(InputSnapshot::default()).unwrap();
+
+    // An attached renderer that has acknowledged nothing yet reports pending.
+    runtime.attach_gpu();
+    runtime.step(InputSnapshot::default()).unwrap();
+
+    let id = runtime.take_ready_images()[0];
+    runtime.acknowledge_uploads(vec![UploadAck {
+        id,
+        residency: GpuResidency::Resident,
+    }]);
+    // The acknowledgement is queued, not applied: it lands with the worker
+    // results at the next boundary, so one callback sees one snapshot.
+    runtime.step(InputSnapshot::default()).unwrap();
+    runtime.shutdown().unwrap();
+    assert_eq!(
+        runtime.take_logs(),
+        ["ready/unavailable,ready/pending,ready/resident"]
+    );
+}
+
+#[test]
+fn a_late_acknowledgement_is_discarded_and_a_foreign_one_faults() {
+    let (_root, mut runtime) = runtime(
+        r#"
+        local image, ticks = nil, 0
+        return {
+            init = function(ctx) image = ctx.assets.request_png("art/rgba.png") end,
+            update = function(ctx)
+                ticks += 1
+                if ticks == 1 then assert(ctx.assets.unload(image) == true) end
+            end,
+            shutdown = function(ctx) ctx.log(ctx.assets.status(image).gpu) end,
+        }
+    "#,
+        &[("art/rgba.png", "rgba")],
+    );
+    runtime.init().unwrap();
+    assert!(runtime.drain_assets(WATCHDOG).unwrap());
+    runtime.attach_gpu();
+    let id = runtime.take_ready_images()[0];
+    // The first update unloads it, so this acknowledgement names an image the
+    // store has already forgotten by the time it is applied.
+    runtime.step(InputSnapshot::default()).unwrap();
+    runtime.step(InputSnapshot::default()).unwrap();
+    runtime.acknowledge_uploads(vec![UploadAck {
+        id,
+        residency: GpuResidency::Resident,
+    }]);
+    runtime.step(InputSnapshot::default()).unwrap();
+    assert_eq!(runtime.state(), ScriptState::Running);
+    runtime.shutdown().unwrap();
+    // The retained handle reports the release, not the late acknowledgement.
+    assert_eq!(runtime.take_logs(), ["released"]);
+
+    // An acknowledgement from another session means the renderer and the store
+    // disagree about which session is live, which is a service fault.
+    let (_other_root, mut other) = self::runtime(
+        r#"return {init = function(ctx) ctx.assets.request_png("art/rgba.png") end}"#,
+        &[("art/rgba.png", "rgba")],
+    );
+    other.attach_gpu();
+    other.init().unwrap();
+    assert!(other.drain_assets(WATCHDOG).unwrap());
+    let foreign = other.take_ready_images()[0];
+
+    let (_root, mut runtime) = self::runtime(
+        r#"return {init = function(ctx) ctx.assets.request_png("art/rgba.png") end}"#,
+        &[("art/rgba.png", "rgba")],
+    );
+    runtime.init().unwrap();
+    runtime.acknowledge_uploads(vec![UploadAck {
+        id: foreign,
+        residency: GpuResidency::Resident,
+    }]);
+    let error = runtime.step(InputSnapshot::default()).unwrap_err();
+    assert!(error.message.contains("another session"), "{error}");
+    assert_eq!(runtime.state(), ScriptState::Faulted);
+    assert!(runtime.assets().is_none());
+}
+
+#[test]
+fn a_presentation_fault_tears_the_session_down_once() {
+    let (_root, mut runtime) = runtime(
+        r#"
+        return {
+            init = function(ctx)
+                ctx.world.spawn(1, 2)
+                ctx.assets.request_png("art/sheet.png")
+            end,
+            draw = function(ctx) ctx.draw.clear(1, 0, 0, 1) end,
+            shutdown = function(ctx) ctx.log("shutdown ran") end,
+        }
+    "#,
+        &[("art/sheet.png", "kenney")],
+    );
+    runtime.init().unwrap();
+    runtime.draw(0.0).unwrap();
+    assert_eq!(runtime.draw_commands().len(), 1);
+    assert_eq!(runtime.assets().unwrap().pending_jobs(), 1);
+
+    let error = runtime.presentation_fault("image 7 has no drawable content");
+    assert_eq!(error.phase, "presentation");
+    assert!(error.message.contains("no drawable content"), "{error}");
+    assert_eq!(runtime.state(), ScriptState::Faulted);
+    // Commands, assets, the kernel and the host are all released, and no Luau
+    // shutdown ran.
+    assert!(runtime.draw_commands().is_empty());
+    assert!(runtime.assets().is_none());
+    assert!(runtime.kernel().snapshot().is_err());
+    assert!(!runtime.take_logs().iter().any(|log| log == "shutdown ran"));
+
+    // Repeated notification preserves the first failure and tears down nothing
+    // a second time.
+    let again = runtime.presentation_fault("a later failure");
+    assert_eq!(again.message, error.message);
+    assert_eq!(runtime.state(), ScriptState::Faulted);
+    assert!(runtime.take_logs().is_empty());
 }
 
 #[test]

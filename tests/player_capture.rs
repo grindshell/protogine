@@ -47,6 +47,188 @@ fn assert_success(output: Output) {
     );
 }
 
+/// The committed 2x3 fixture, whose pixels `tools/asset_fixtures.py` specifies
+/// independently of this engine's decoder:
+///
+/// ```text
+/// row 0: red opaque      | green at alpha 128
+/// row 1: blue at alpha 0 | yellow opaque
+/// row 2: (9,8,7) alpha 6 | white opaque
+/// ```
+const FIXTURE: &[u8] = include_bytes!("fixtures/assets/rgba.png");
+
+/// Draw the whole fixture at 16x, so every source texel becomes a 16x16 block
+/// whose interior can be sampled exactly under nearest filtering.
+fn texel(image: &image::RgbaImage, sprite: u32, column: u32, row: u32) -> [u8; 4] {
+    image
+        .get_pixel(sprite * 48 + column * 16 + 8, row * 16 + 8)
+        .0
+}
+
+/// Compare a blended sample's color with a small rounding tolerance.
+///
+/// Only the color channels are checked. Straight-alpha blending applies the
+/// source alpha to the destination alpha as well, so a half-transparent texel
+/// over an opaque clear leaves a framebuffer alpha of about 0.75 rather than
+/// 1.0; that is the backend's compositing, not the sprite's content. Opaque
+/// samples are asserted exactly, alpha included.
+fn blended(actual: [u8; 4], expected: [u8; 3], what: &str) {
+    for (index, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            i16::from(*a).abs_diff(i16::from(*e)) <= 1,
+            "{what} channel {index}: {actual:?} is not within 1 of {expected:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a working graphics context and desktop; launches Player windows"]
+fn captures_cropped_flipped_and_tinted_sprites_with_exact_pixels() {
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+    const WHITE: [u8; 4] = [255; 4];
+    const BLACK: [u8; 4] = [0, 0, 0, 255];
+    // Green at alpha 128 composited over the opaque black clear.
+    const HALF_GREEN: [u8; 3] = [0, 128, 0];
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let distribution = root.join("Exported Player");
+    fs::create_dir_all(distribution.join("game/art")).unwrap();
+    let executable = distribution.join(format!("protogine-player{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(env!("CARGO_BIN_EXE_protogine-player"), &executable).unwrap();
+    // A shipped game needs its PNGs copied, not just its Luau source.
+    fs::write(distribution.join("game/art/rgba.png"), FIXTURE).unwrap();
+    let entry_point = distribution.join("game/main.luau");
+    let cwd = root.join("unrelated-cwd");
+    fs::create_dir_all(&cwd).unwrap();
+
+    fs::write(
+        &entry_point,
+        r#"
+        local image
+        return {
+            init = function(ctx) image = ctx.assets.request_png("art/rgba.png") end,
+            draw = function(ctx)
+                ctx.draw.clear(0, 0, 0, 1)
+                if ctx.assets.status(image).state ~= "ready" then return end
+                local whole = {width = 32, height = 48}
+                ctx.draw.sprite(image, 0, 0, whole)
+                ctx.draw.sprite(image, 48, 0, {width = 32, height = 48, flip_x = true})
+                ctx.draw.sprite(image, 96, 0, {width = 32, height = 48, flip_y = true})
+                ctx.draw.sprite(image, 144, 0, {width = 32, height = 48, flip_x = true, flip_y = true})
+                -- An intervening rectangle, then one crop tinted over it.
+                ctx.draw.rect(192, 0, 32, 32, 0, 0, 1, 1)
+                ctx.draw.sprite(image, 192, 0, {
+                    source = {x = 1, y = 2, width = 1, height = 1},
+                    width = 32, height = 32,
+                    tint = {r = 1, g = 0, b = 0, a = 1},
+                })
+            end,
+        }
+    "#,
+    )
+    .unwrap();
+
+    let path = root.join("captures/sprites.png");
+    let size = [("PLAYER_WIDTH", "256"), ("PLAYER_HEIGHT", "64")];
+    let mut options = size.to_vec();
+    // Frame 1 is the strict case: its readiness comes entirely from the drain
+    // after init, with no earlier frame's upload service to fall back on.
+    options.push(("PLAYER_CAPTURE_FRAME", "1"));
+    assert_success(run_player(&executable, &cwd, &path, &options));
+    let pixels = image::open(&path).unwrap().into_rgba8();
+    assert_eq!(pixels.dimensions(), (256, 64));
+
+    // Sprite 0: the source as authored. Transparent texels leave the black
+    // background, and the half-alpha texel blends over it.
+    assert_eq!(texel(&pixels, 0, 0, 0), RED);
+    blended(texel(&pixels, 0, 1, 0), HALF_GREEN, "half-alpha green");
+    assert_eq!(texel(&pixels, 0, 0, 1), BLACK, "alpha 0 must not paint");
+    assert_eq!(texel(&pixels, 0, 1, 1), YELLOW);
+    blended(texel(&pixels, 0, 0, 2), [0, 0, 0], "alpha 6 over black");
+    assert_eq!(texel(&pixels, 0, 1, 2), WHITE);
+
+    // Each flip mirrors the source inside the same destination footprint.
+    assert_eq!(texel(&pixels, 1, 1, 0), RED, "flip_x swaps columns");
+    assert_eq!(texel(&pixels, 1, 0, 2), WHITE);
+    assert_eq!(texel(&pixels, 2, 0, 2), RED, "flip_y swaps rows");
+    assert_eq!(texel(&pixels, 2, 1, 0), WHITE);
+    assert_eq!(texel(&pixels, 3, 1, 2), RED, "both flips swap both axes");
+    assert_eq!(texel(&pixels, 3, 0, 0), WHITE);
+
+    // Nearest filtering at integer scale leaves no bleed across a texel edge.
+    assert_eq!(pixels.get_pixel(15, 8).0, RED);
+    blended(
+        pixels.get_pixel(17, 8).0,
+        HALF_GREEN,
+        "no bleed past the texel edge",
+    );
+
+    // The crop drew the white texel alone, tinted red, over the blue rectangle.
+    assert_eq!(
+        pixels.get_pixel(208, 16).0,
+        RED,
+        "tint multiplies the sample"
+    );
+    assert_eq!(
+        pixels.get_pixel(208, 48).0,
+        BLACK,
+        "the crop must not cover the whole image"
+    );
+
+    // The same readiness schedule reproduces the same encoded bytes.
+    let repeated = root.join("captures/sprites-repeat.png");
+    assert_success(run_player(&executable, &cwd, &repeated, &options));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        fs::read(&repeated).unwrap(),
+        "repeated sprite capture bytes differ"
+    );
+
+    // Explicit eviction and reload: the image is unloaded and requested again
+    // mid-run, and the later frame draws the freshly uploaded texture.
+    fs::write(
+        &entry_point,
+        r#"
+        local image, ticks = nil, 0
+        return {
+            init = function(ctx) image = ctx.assets.request_png("art/rgba.png") end,
+            update = function(ctx)
+                ticks += 1
+                if ticks == 2 then
+                    assert(ctx.assets.unload(image) == true)
+                    image = ctx.assets.request_png("art/rgba.png")
+                    ctx.log("reloaded at tick " .. ticks)
+                end
+            end,
+            draw = function(ctx)
+                ctx.draw.clear(0, 0, 0, 1)
+                local status = ctx.assets.status(image)
+                if status.state == "ready" and status.gpu == "resident" then
+                    ctx.draw.sprite(image, 0, 0, {width = 32, height = 48})
+                end
+            end,
+        }
+    "#,
+    )
+    .unwrap();
+    let reloaded = root.join("captures/reloaded.png");
+    let mut options = size.to_vec();
+    options.push(("PLAYER_CAPTURE_FRAME", "5"));
+    let output = run_player(&executable, &cwd, &reloaded, &options);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(stderr.contains("reloaded at tick 2"), "{stderr}");
+    assert_success(output);
+    let after = image::open(&reloaded).unwrap().into_rgba8();
+    assert_eq!(
+        texel(&after, 0, 0, 0),
+        RED,
+        "a reloaded image must upload and draw again"
+    );
+    assert_eq!(texel(&after, 0, 1, 2), WHITE);
+}
+
 #[test]
 #[ignore = "requires a working graphics context and desktop; launches Player windows"]
 fn captures_startup_states_with_repeatable_pixels_and_reliable_exit_codes() {

@@ -1,12 +1,12 @@
 # ADR-002: Bundle PNG assets and sprite drawing
 
-**Status:** Accepted design; Phases 0, 1 and 2 complete. Phases 3-4 not started.
+**Status:** Accepted design; Phases 0-3 complete. Phase 4 not started.
 P1-P8, including the P7 manual-eviction extension, accepted 2026-09-06.
 The [Phase 0 record](PNG_SPRITE_PHASE0.md) freezes the implementation contracts
 and records dependency/worker/GPU feasibility evidence. Phase 1 implemented the
-headless asset service and Phase 2 its Luau and runtime integration; their
-records are at the end of this document. The shared renderer, GPU residency and
-the authoring sample remain unimplemented.
+headless asset service, Phase 2 its Luau and runtime integration, and Phase 3
+the shared renderer, GPU residency and Player integration; their records are at
+the end of this document. The authoring sample remains unimplemented.
 **Date:** 2026-09-06.
 **Decider:** Project owner.
 **Baseline:** `61a72adb93c94c4a5dada0a7c0384f2f44490976`.
@@ -645,7 +645,7 @@ behavior or pixels. Keep changes as separate logical slices.
 | 0. Contract and feasibility — complete | `examples/png_sprite_probe.rs`, fixture/watchdog tools, and `PNG_SPRITE_PHASE0.md`. | Contracts frozen; exact CPU/GPU pixels, metadata/interlace worker behavior, bounded upload passes, 100 pool cycles, capture lifetime and negative controls passed on the recorded Windows stack. Production integration remains later work. |
 | 1. Headless asset service — complete | `src/assets.rs` and supporting modules; rooted-read extraction; `Cargo.toml`, `src/lib.rs`; `tests/assets.rs`. Implement admitted jobs, stage advancement, bounds, cache/identity, decode and teardown. | Identical decoded pixels through bounded service passes without VM/GPU. Rooting, coalescing, rollback, cancellation-safe teardown, queue fairness, storage pressure and stale/foreign IDs pass. Existing filesystem regressions remain intact. |
 | 2. Luau and runtime integration — complete | `src/scripting/assets.rs`, `src/scripting/drawing.rs`, `src/scripting.rs`, `src/runtime.rs`, `src/drawing.rs`; runtime/test drivers. | Init/update requests work in ScriptHost and GameRuntime; callbacks continue while loading. Status/error/readiness, eviction utilities, canonical wrappers, publication, budgets and cleanup obey frozen contracts. Preload/completion-trace tests use the same service path. No GPU dependency enters scripting-only builds. |
-| 3. Shared renderer and Player | `src/rendering.rs`, `src/bin/player.rs`, readiness acknowledgements and fault integration; actual Player captures/input probes. | Bounded upload passes publish only complete images; rendering never forces loading. One admission/upload sequence per uncached image, explicit eviction/reload, queued-frame pinning, mixed ordering, shutdown captures and repeated-session pool bounds pass. Pending work is cleaned on faults/exit. Existing rectangle/startup/native captures pass. |
+| 3. Shared renderer and Player — complete | `src/rendering.rs`, `src/bin/player.rs`, readiness acknowledgements and fault integration; actual Player captures/input probes. | Bounded upload passes publish only complete images; rendering never forces loading. One admission/upload sequence per uncached image, explicit eviction/reload, queued-frame pinning, mixed ordering, shutdown captures and repeated-session pool bounds pass. Pending work is cleaned on faults/exit. Existing rectangle/startup/native captures pass. |
 | 4. Authoring sample and delivery | `examples/games/sprites/` using the supplied Kenney sheet and provenance; README/AGENTS/index updates; complete verification matrix. | Copied Player shows a responsive loading state, then the room and animated controllable character. Requests during update and PNG replacement without rebuilding are demonstrated. Deterministic preload replay, live loading interaction, and limitations are recorded. |
 
 Player subprocess evidence must identify per-image admissions/completions and
@@ -1368,6 +1368,247 @@ Two review observations were checked and deliberately left as they are.
 - A script that unloads and re-requests more than the registry allows inside a
   single callback is refused rather than served. That follows the frozen slot
   rule and is recorded above as accepted behavior, not a defect to fix in Phase 3.
+
+## Phase 3 completion record
+
+Completed 2026-09-07 on Windows 10 x64, MSVC, stable rustc, OpenGL
+`3.1.0 NVIDIA 610.62`. Every GPU claim below comes from a run on that stack.
+
+### Changed files
+
+- `src/rendering.rs`: `MacroquadRenderer` with `attach`, `admit`,
+  `service_uploads`, `validate`, `render` and `retire`, plus `RenderError`,
+  `RenderCounters` and the frozen pool and pass constants. One `with_backend`
+  function holds the whole `get_internal_gl` surface and carries the four
+  invariants; `Texture2D::from_rgba8` has exactly one call site, beside the
+  `creations` counter.
+- `Cargo.toml`, `src/lib.rs`: the `graphics` feature enabling `assets` and
+  Macroquad. `player` is now `graphics + scripting + native-plugins` and no
+  longer names Macroquad directly.
+- `src/scripting/assets.rs`: `commit` keeps the CPU-ready transitions instead of
+  discarding them, applies queued acknowledgements in the same step, and carries
+  GPU residency into the published view.
+- `src/scripting.rs`, `src/runtime.rs`: `take_ready_images`,
+  `acknowledge_uploads`, `attach_gpu`, `publish_assets` and
+  `GameRuntime::presentation_fault`.
+- `src/bin/player.rs`: owns the renderer for the graphics context's lifetime,
+  services uploads before each frame, drains CPU and GPU work after init and
+  after each measured step in capture mode, and retires after the final readback.
+- `examples/renderer_harness.rs`, `tools/run_renderer_harness.ps1`,
+  `tests/rendering.rs`, `tests/player_capture.rs`, `tests/script_assets.rs`,
+  `README.md`, `AGENTS.md`.
+
+### Implemented contracts
+
+Attaching a session retires the previous one, so no session inherits another's
+mapping or content. Admission is once per image; `service_uploads` allocates one
+destination and moves at most eight row bands and 256 KiB per pass, with a soft
+2 ms cutoff between operations. An image publishes its full-ID mapping only
+after every band succeeds. `render` validates the complete list, including
+Rust-supplied commands, before queueing anything: missing, foreign and
+undrawable images are refused, while a CPU-ready image whose upload is
+incomplete is skipped without disturbing the order of the rest or forcing the
+transfer. Retirement shrinks every used slot to a transparent 1x1 texel and is
+idempotent.
+
+The pool is created lazily through one `from_rgba8` call site, capped at 128
+slots for the graphics context's lifetime, and reused by resizing in place.
+Slots the queued frame draws from are pinned until it is presented.
+
+The Player's per-frame order is the frozen one: service uploads from the last
+committed snapshot, queue the acknowledgements, run the runtime frame, then
+submit. Renderer errors enter `GameRuntime::presentation_fault`, which reuses
+the primary fault path and exit code 3, runs no Luau shutdown, and preserves the
+first failure on repeat notification.
+
+`released` means an image is not on the GPU and never will be. That covers an
+image whose upload was cancelled, and also one that was never admitted at all: a
+failed job never had CPU content, and an image unloaded while still loading was
+never offered to the renderer.
+
+### Contract refinements made during implementation
+
+- **`validate` is public and `render` is defined as validate-then-submit.** This
+  is what lets every refusal be tested without a graphics context, and it is the
+  pre-flight hook a future editor viewport needs. It returns only
+  `Result<(), RenderError>` and leaks no slot indices.
+- **Transient slot pressure yields instead of faulting.** A slot freed while the
+  queued frame still draws from it is deferred for exactly one pass. With the
+  pool full, a new admission would otherwise turn a condition with a guaranteed
+  one-pass resolution into an unrecoverable fault. Genuine exhaustion stays
+  fatal, and the 128-entry registry makes it unreachable, so the invariant is
+  sharper rather than weaker.
+- **The ready queue is the inbox of a renderer that exists.** Only an attached
+  renderer takes it, so a scripting-only host would grow it for the session's
+  life. `attach_gpu` therefore seeds the queue with every already-ready image on
+  first attach, which bounds the queue without making attach order load-bearing.
+- **The renderer reads the live store while scripts read the published view.**
+  That is correct because the store changes only during a CPU service pass and
+  during a script's own request or unload, all strictly before `render`. The
+  invariant is recorded on `plan`, which also names `cancel_undrawable` as its
+  second dependent.
+- **Upload failure is cancellation.** Macroquad's texture creation returns no
+  recoverable error, so the only real failure of a staged upload is its CPU
+  content disappearing. The harness exercises that rather than inventing a fake
+  failure path.
+- **Slot identity is exposed as a predicate, not a handle.** `identities_stable`
+  answers the pool-reuse question the plan asks about while keeping the frozen
+  rule that no raw handle or `Texture2D` clone escapes the renderer.
+
+### Behavioral observations
+
+From `tools/run_renderer_harness.ps1`, which drives the production renderer and
+store under one live graphics context:
+
+- **`cycles`**: 100 attach/load/retire cycles alternating empty, one-image and
+  128-image sessions, with staggered admissions and varying dimensions and
+  content. 166 attaches, 4,257 images uploaded in 4,257 bands, a pool of exactly
+  128 slots and exactly 128 lifetime creations, with no creation after the pool
+  reached that size. Every slot kept its backend identity, every retired slot
+  measured 1x1, and the aggregate retired payload was 512 bytes, which is four
+  bytes per slot. A retired session's identity is refused by the next session.
+- **`bands`**: the 784x352 sheet uploads in 36 bands over 5 to 6 bounded passes,
+  1,103,872 bytes, matching Phase 1's conversion band count and RGBA size for
+  the same file. No pass exceeded eight bands or 256 KiB or made a second
+  allocation. Validating a partially transferred image advanced no band and left
+  it undrawable; drawing the finished image moved no upload work at all; and
+  re-admitting a resident image transferred nothing.
+- **`eviction`**: unloading mid-transfer releases the slot, clears it to 1x1 and
+  emits `released`. The freed 784x352 slot is then reused for the 2x3 fixture, a
+  different size, which is where a stale allocation or stale source UVs would
+  show, because Macroquad reads the backend record's dimensions for both the
+  texture size and the UVs. Creations stayed at one, the slot resized to 2x3 and
+  kept its identity, and the framebuffer read back through the production
+  renderer gives the fixture's exact opaque texels: red at the top left, yellow
+  and white on the right. A separate 1x1 crop of the bottom-right texel drew
+  white, so the source rectangle resolved against the new allocation rather than
+  the old one.
+- **`pressure`**: 128 resident images with every slot pinned by a queued frame.
+  Evicting one and admitting another yields with the admission intact and no
+  fault, then completes on the next pass. Creations stayed at 128 with 129
+  allocations.
+- **`recreate`**: the control fails at
+  `negative control: 256 lifetime texture creations exceed 128`. It creates
+  textures outside the renderer, whose pool is private, so it proves the
+  counting assertion rejects an over-creating implementation rather than proving
+  anything about this renderer.
+
+What actually proves that reuse never recreates is `identities_stable` across
+100 cycles, tied to the pool by
+`assert_eq!(counters.creations as usize, renderer.pool_size())`, plus a source
+review confirming one texture-creating call in the crate, in `acquire_slot`,
+immediately followed by its counter; `allocate` and `resize_cleared` both go
+through `texture_resize`. That was verified by deliberately breaking
+`clear_slot` to assign a fresh `Texture2D::from_rgba8` instead of resizing in
+place: `cycles` then failed at `cycle 1: a slot changed backend identity`. The
+source was restored immediately afterwards and the full matrix rerun.
+
+From `cargo test --test player_capture -- --ignored`, against a copied Player in
+an unrelated working directory:
+
+- The committed 2x3 fixture drawn at 16x gives exact opaque texels for red,
+  yellow and white, leaves the fully transparent texel unpainted, blends the
+  half-alpha texel to within one channel step of the expected value, and mirrors
+  correctly for `flip_x`, `flip_y` and both together. Nearest filtering at
+  integer scale showed no bleed across a texel edge. A 1x1 crop tinted red over
+  an intervening blue rectangle proved crop, tint and ordering together.
+- Repeat captures with the same readiness schedule produced identical PNG bytes.
+- An explicit unload and re-request mid-run uploaded and drew again.
+- Framebuffer alpha is not the sprite's alpha. Straight-alpha blending applies
+  the source alpha to the destination alpha too, so a half-transparent texel
+  over an opaque clear leaves about 0.75 rather than 1.0. Blended samples are
+  therefore compared on color only, as the existing rectangle test already did.
+
+`tests/player_input.ps1` passed all three cases against the release Player:
+`close` and `escape` exited 0 and `shutdown-fault` exited 3 with its shutdown
+callback running exactly once. The `close` case also posted every physical key
+and matched the six button mappings across pressed and released edges in order.
+That covers the interactive Escape and window-close sequence this phase changed:
+the branch used to set the exit status and return, and now breaks into a tail
+that retires the renderer first. Retiring after the loop, with the context still
+alive, did not disturb either exit path.
+
+### Review corrections
+
+The slice review found one blocking defect and two should-fix items, all fixed
+before any commit.
+
+- **The capture drain admitted nothing.** `PlayerSession::drain` looped while
+  `renderer.pending_uploads() > 0 || self.has_ready_images()`, but
+  `has_ready_images` asked whether CPU jobs were outstanding, which the
+  `drain_assets` on the line above had just guaranteed to be zero. Both terms
+  were false, the body never ran, and the drain settled no upload. The pixel
+  capture passed only because it used `PLAYER_CAPTURE_FRAME=2`, where the next
+  iteration's own upload service covered for it; at frame 1 it drew nothing.
+  The loop is now a do-while, `has_ready_images` is deleted rather than
+  corrected, and the capture test uses frame 1 permanently because that is the
+  configuration whose readiness comes entirely from the drain.
+- **Transient slot pressure was fatal**, as described under the refinements
+  above. `pressure` is the mode that covers it.
+- **`update_region` validated less than it appeared to.**
+  `(texture.width() as u32, texture.height() as u32).0` is the width alone, so
+  the height was computed and discarded, and there was no `y + rows` bound at
+  all. All four checks the plan names are now present, and `transfer_band`
+  returns early on a zero-row band so the degenerate call is unreachable rather
+  than merely harmless.
+
+The review also confirmed the fixes independently, including a frame sweep on
+the Kenney sheet showing `ready/resident` at frame 1 for a 36-band upload, which
+the old code could not have reached in fewer than about five frames.
+
+Two smaller items came from the same review: `plan` now deduplicates its pin set
+so it holds at most 128 entries instead of one per sprite command, and the
+`session.faulted` redraw in the Player carries a comment saying a fault always
+sets the error screen, so it never re-renders from a released store.
+
+### Commands and results
+
+All passed on this machine:
+
+```text
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo test --workspace --no-default-features
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release --bin protogine-player
+cargo test --workspace --no-default-features --features assets
+cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
+cargo test --workspace --no-default-features --features graphics
+cargo clippy --workspace --all-targets --no-default-features --features graphics -- -D warnings
+cargo test --workspace --no-default-features --features scripting
+cargo check --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets
+cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
+cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo build --release --no-default-features --features graphics --example renderer_harness
+powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode cycles
+powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode bands
+powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode eviction
+powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode pressure
+powershell -NoProfile -File tools/run_renderer_harness.ps1 -Mode recreate
+cargo test --test player_capture -- --ignored
+cargo test --test plugins -- --ignored
+pwsh -NoProfile -File tests/player_input.ps1
+```
+
+`tests/rendering.rs` adds 6 tests and needs no graphics context.
+`tests/script_assets.rs` is now 24 tests and `tests/player_capture.rs` 2, both
+ignored. `cargo tree` confirms the boundaries: `--features graphics` resolves
+Macroquad, Miniquad and image with no mlua, and `--features scripting` still
+resolves no Macroquad, so neither feature implies the other. `Cargo.lock` is
+unchanged.
+
+### Unresolved gaps
+
+- The distance benchmark was not rerun: deadline enforcement is unchanged.
+- Cross-GPU pixel equality is not established. Every pixel and pool observation
+  here is from one Windows NVIDIA OpenGL stack, as in Phase 0.
+- Driver memory reclamation is still outside these counters. The payload bounds
+  describe what the engine holds, not what the driver frees.
+- Phase 4's authoring sample remains unimplemented; `examples/games/loading/` is
+  a driver bundle, not that deliverable.
 
 ## Planning evidence
 

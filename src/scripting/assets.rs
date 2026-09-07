@@ -7,13 +7,13 @@
 //! of leaving an admitted image no script can name or unload.
 
 use super::utilities::UtilityBudget;
-use crate::assets::{AssetStore, ImageId, ImageState, ImageStatus};
+use crate::assets::{AssetStore, GpuResidency, ImageId, ImageState, ImageStatus, UploadAck};
 use mlua::{
     AnyUserData, FromLuaMulti, Lua, LuaString, MetaMethod, MultiValue, Scope, Table, UserData,
     UserDataMethods, Value,
 };
 use std::{
-    cell::{Ref, RefCell},
+    cell::{Cell, Ref, RefCell},
     collections::HashMap,
     path::Path,
     time::Duration,
@@ -61,6 +61,16 @@ pub(super) struct Images {
     /// added at admission and removed when a terminal transition is committed,
     /// so this is bounded by the registry exactly as the wrapper cache is.
     committed: RefCell<HashMap<u32, ImageStatus>>,
+    /// Images whose CPU content became available at the last publication. The
+    /// renderer admits these; nothing else reports that an image's content is
+    /// ready, so a host that never takes them uploads nothing.
+    ready: RefCell<Vec<ImageId>>,
+    /// GPU residency per image number, from renderer acknowledgements. Unread
+    /// until a renderer attaches, so a headless host reports `unavailable`.
+    gpu: RefCell<HashMap<u32, GpuResidency>>,
+    /// Acknowledgements waiting for the next publication boundary.
+    acks: RefCell<Vec<UploadAck>>,
+    attached: Cell<bool>,
     /// One canonical wrapper per live registry entry, keyed by image number, so
     /// coalesced requests and ready cache hits return the same userdata for
     /// `rawequal` and table-key identity. The table holds strong references and
@@ -75,8 +85,73 @@ impl Images {
         Ok(Self {
             store: RefCell::new(AssetStore::new(root).map_err(mlua::Error::external)?),
             committed: RefCell::new(HashMap::new()),
+            ready: RefCell::new(Vec::new()),
+            gpu: RefCell::new(HashMap::new()),
+            acks: RefCell::new(Vec::new()),
+            attached: Cell::new(false),
             wrappers: lua.create_table()?,
         })
+    }
+
+    /// Report that a renderer is attached to this session, so status carries
+    /// real GPU residency instead of `unavailable`.
+    ///
+    /// A renderer may attach after images are already ready. Offer it every one
+    /// of them, so attach order is not load-bearing while the ready queue still
+    /// exists only for as long as a renderer does.
+    pub(super) fn attach_gpu(&self) {
+        if self.attached.replace(true) {
+            return;
+        }
+        let committed = self.committed.borrow();
+        let mut ready = self.ready.borrow_mut();
+        for status in committed.values() {
+            if status.state == ImageState::Ready && !ready.contains(&status.id) {
+                ready.push(status.id);
+            }
+        }
+    }
+
+    /// Take the images whose CPU content was published since the last take.
+    pub(super) fn take_ready(&self) -> Vec<ImageId> {
+        std::mem::take(&mut *self.ready.borrow_mut())
+    }
+
+    /// Queue renderer acknowledgements. They apply at the next boundary, in the
+    /// same step that publishes worker results, so a script sees one consistent
+    /// snapshot of CPU state and GPU residency.
+    pub(super) fn acknowledge(&self, acks: Vec<UploadAck>) {
+        if acks.is_empty() {
+            return;
+        }
+        self.attach_gpu();
+        self.acks.borrow_mut().extend(acks);
+    }
+
+    /// Residency to report for a live image. An attached renderer has not
+    /// necessarily acknowledged an image yet, and until it does the image is
+    /// legitimately not resident.
+    fn gpu_for(&self, number: u32) -> GpuResidency {
+        if !self.attached.get() {
+            return GpuResidency::Unavailable;
+        }
+        self.gpu
+            .borrow()
+            .get(&number)
+            .copied()
+            .unwrap_or(GpuResidency::Pending)
+    }
+
+    /// Residency to freeze onto a terminal snapshot. An unloaded or failed
+    /// image is gone from the renderer's view the moment it settles; its
+    /// `Released` acknowledgement only confirms that later, and arrives after
+    /// the entry is already gone.
+    fn gpu_terminal(&self) -> GpuResidency {
+        if self.attached.get() {
+            GpuResidency::Released
+        } else {
+            GpuResidency::Unavailable
+        }
     }
 
     /// Read-only access for Rust tools. Holding it across a callback would
@@ -117,6 +192,7 @@ impl Images {
         // refresh the surviving entries from the store afterwards and let the
         // terminal pass below carry the entries the store just dropped.
         let settled = self.store.borrow_mut().take_settled();
+        self.apply_acks()?;
         {
             let store = self.store.borrow();
             let mut committed = self.committed.borrow_mut();
@@ -124,13 +200,32 @@ impl Images {
                 if let Some(fresh) = store.status(status.id) {
                     *status = fresh;
                 }
+                status.gpu = self.gpu_for(status.id.number());
             }
         }
         for status in settled {
+            // A CPU-ready transition is the only signal that an image's content
+            // became available, so hand it to the renderer rather than dropping
+            // it: nothing else would ever admit the image for upload. Only an
+            // attached renderer takes them, and a host without one would grow
+            // this queue for the session's life, so it is the inbox of a
+            // renderer that exists. Attaching later is still safe: `attach_gpu`
+            // seeds the queue with everything already ready.
+            if status.state == ImageState::Ready {
+                if self.attached.get() {
+                    self.ready.borrow_mut().push(status.id);
+                }
+                continue;
+            }
             if !status.state.is_terminal() {
                 continue;
             }
+            let status = ImageStatus {
+                gpu: self.gpu_terminal(),
+                ..status
+            };
             self.committed.borrow_mut().remove(&status.id.number());
+            self.gpu.borrow_mut().remove(&status.id.number());
             let key = f64::from(status.id.number());
             let Some(value) = self.wrappers.raw_get::<Option<AnyUserData>>(key)? else {
                 continue;
@@ -143,11 +238,37 @@ impl Images {
         Ok(())
     }
 
+    /// Apply queued acknowledgements. One naming another session means the
+    /// renderer and the store disagree about which session is live, which is a
+    /// service fault; one naming an image this store no longer knows is an
+    /// ordinary late result and is discarded.
+    fn apply_acks(&self) -> mlua::Result<()> {
+        let session = self.store.borrow().session();
+        // Release the queue before touching the other cells below.
+        let acks = std::mem::take(&mut *self.acks.borrow_mut());
+        for ack in acks {
+            if ack.id.session() != session {
+                return Err(mlua::Error::runtime(format!(
+                    "renderer acknowledged image {}/{} from another session",
+                    ack.id.session(),
+                    ack.id.number()
+                )));
+            }
+            if self.committed.borrow().contains_key(&ack.id.number()) {
+                self.gpu.borrow_mut().insert(ack.id.number(), ack.residency);
+            }
+        }
+        Ok(())
+    }
+
     /// Stop admitting, cancel outstanding work, join the worker and release the
     /// published view and wrapper cache. Idempotent, and invokes no script code.
     pub(super) fn shutdown(&self) {
         self.store.borrow_mut().shutdown();
         self.committed.borrow_mut().clear();
+        self.ready.borrow_mut().clear();
+        self.gpu.borrow_mut().clear();
+        self.acks.borrow_mut().clear();
         let keys: Vec<Value> = self
             .wrappers
             .clone()
@@ -173,9 +294,15 @@ impl Images {
     /// A later phase that services the CPU store elsewhere in a frame would let
     /// an unload publish progress the boundary had withheld.
     fn publish_now(&self, id: ImageId) {
-        if let Some(status) = self.store.borrow().status(id) {
-            self.committed.borrow_mut().insert(id.number(), status);
-        }
+        let Some(mut status) = self.store.borrow().status(id) else {
+            return;
+        };
+        status.gpu = if status.state.is_terminal() {
+            self.gpu_terminal()
+        } else {
+            self.gpu_for(id.number())
+        };
+        self.committed.borrow_mut().insert(id.number(), status);
     }
 
     /// The published view of a live entry, or the terminal snapshot the handle

@@ -1,7 +1,7 @@
 //! One headless game session: Luau, kernel systems, fixed clock, and input.
 
 use crate::{
-    assets::AssetStore,
+    assets::{AssetStore, ImageId, UploadAck},
     drawing::DrawCommand,
     input::{InputQueue, InputSnapshot},
     kernel::{FIXED_DT, Kernel},
@@ -159,6 +159,57 @@ impl GameRuntime {
     /// has been released on stop or fault. Take it between lifecycle calls.
     pub fn assets(&self) -> Option<Ref<'_, AssetStore>> {
         self.scripts.as_ref().map(ScriptHost::assets)
+    }
+
+    /// Take the images whose CPU content was published at the last boundary,
+    /// for a renderer to admit. Empty once the host has been released.
+    pub fn take_ready_images(&mut self) -> Vec<ImageId> {
+        self.scripts
+            .as_mut()
+            .map(ScriptHost::take_ready_images)
+            .unwrap_or_default()
+    }
+
+    /// Queue renderer acknowledgements for the next update boundary.
+    pub fn acknowledge_uploads(&mut self, acks: Vec<UploadAck>) {
+        if let Some(scripts) = self.scripts.as_mut() {
+            scripts.acknowledge_uploads(acks);
+        }
+    }
+
+    /// Report that a renderer is attached to this session.
+    pub fn attach_gpu(&mut self) {
+        if let Some(scripts) = self.scripts.as_mut() {
+            scripts.attach_gpu();
+        }
+    }
+
+    /// Publish pending transitions and acknowledgements without a service pass
+    /// or a simulation step. Capture drivers commit their snapshot before draw.
+    pub fn publish_assets(&mut self) -> Result<(), ScriptError> {
+        self.commit_assets()
+    }
+
+    /// Fail the session because presentation could not proceed.
+    ///
+    /// This is the renderer's invariant-violation path, distinct from an
+    /// inspectable failed asset job. It reuses the primary fault handling:
+    /// commands and assets are cleared, the kernel is invalidated, VM
+    /// references are released before reverse native teardown, and no Luau
+    /// shutdown runs. Repeated notification after a terminal state preserves
+    /// the first failure and performs no second teardown.
+    pub fn presentation_fault(&mut self, message: impl Into<String>) -> ScriptError {
+        let message = message.into();
+        if let Some(scripts) = self.scripts.as_mut() {
+            let error = scripts.fault("presentation", message.clone());
+            if let Err(error) = self.finish_call(Err(error)) {
+                return error;
+            }
+        }
+        self.last_error.clone().unwrap_or(ScriptError {
+            phase: "presentation",
+            message,
+        })
     }
 
     /// One bounded service pass that waits up to `wait` for the outstanding

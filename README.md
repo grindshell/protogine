@@ -416,10 +416,22 @@ Drawing tables are read-only and
 their functions expire with the callback. World writes remain prohibited in draw;
 keep gameplay changes in update, including changes to script upvalues.
 
-The Player renders clears and rectangles today. Uploading images and drawing
-sprites needs the shared renderer, which is the next phase of the
-[PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md); until then the
-Player skips sprite commands and the headless tools carry the coverage.
+The Player draws clears, rectangles and sprites through one shared renderer in
+`protogine::rendering`, available on its own with the `graphics` feature and
+without a VM. The renderer owns a pool of at most 128 GPU allocation slots for
+the lifetime of the graphics context, reused across sessions and never
+recreated. Images upload in bounded passes of at most eight row bands and
+256 KiB; an image becomes drawable only after every band has transferred, and a
+sprite whose upload is still incomplete is skipped without holding up the rest
+of the frame or forcing the upload. The draw traversal reads no file, decodes
+nothing and allocates no texture.
+
+Command validation runs over the whole list before anything is queued, so a
+refused frame draws nothing. Missing, foreign and unloaded images are refused
+rather than skipped, and a refusal is a presentation fault: the session stops
+with exit code 3 through the same path a script fault uses, without running
+Luau shutdown. An inspectable failed asset job is not a renderer fault and
+stops nothing.
 
 ## Bundle images
 
@@ -444,8 +456,12 @@ identity instead.
 
 `status` returns `state` (`queued`, `loading`, `ready`, `failed`, `unloaded`),
 `stage` (`waiting`, `read`, `header`, `allocate`, `decode`, `complete`),
-`bytes_read`, `gpu` (`unavailable` without a renderer), `width`/`height` once
-known, and `error` with `code`, `path` and `message` when a job failed. Malformed
+`bytes_read`, `gpu`, `width`/`height` once known, and `error` with `code`,
+`path` and `message` when a job failed. CPU readiness and GPU residency are
+separate: `gpu` is `unavailable` in a headless host, and otherwise `pending`
+until the upload completes, `resident` once it has, or `released` for an image
+that is not on the GPU and never will be. A game can draw a loading screen
+until `gpu` reads `resident`. Malformed
 paths, wrong phases and admission refusals are catchable errors that publish no
 handle; failures after admission are inspectable failed jobs with `io`,
 `format`, `unsupported`, `limit` or `capacity` codes and stop no gameplay.
