@@ -287,6 +287,63 @@ fn module_guard_ignores_replaced_globals_and_keeps_source_context() {
     );
 }
 
+/// A UTF-8 byte order mark is what a Windows editor or PowerShell 5.1's
+/// `Out-File -Encoding utf8` writes, and Luau reads it as a stray U+FEFF
+/// identifier. Skipping exactly one leading mark decides nothing on the
+/// author's behalf; a mark anywhere else is content and still fails.
+#[test]
+fn a_leading_byte_order_mark_loads_while_one_elsewhere_still_fails() {
+    const BOM: &[u8] = b"\xef\xbb\xbf";
+    let root = tempfile::tempdir().unwrap();
+    let write = |name: &str, prefix: &[u8], source: &str| {
+        let mut bytes = prefix.to_vec();
+        bytes.extend_from_slice(source.as_bytes());
+        fs::write(root.path().join(name), bytes).unwrap();
+    };
+
+    // The entry module and a required submodule both carry a mark.
+    write(
+        "main.luau",
+        BOM,
+        "local room = require('./room'); return {update = function(ctx) ctx.log(room.name) end}",
+    );
+    write("room.luau", BOM, "return {name = 'kitchen'}");
+    let mut host = load(root.path());
+    host.init().unwrap();
+    host.update().unwrap();
+    assert_eq!(host.take_logs(), ["kitchen"]);
+
+    // Only the first mark is a signature. One after any source is content.
+    write("room.luau", b"", "return {name = 'x'}\u{feff}");
+    let error = ScriptHost::load(root.path(), ScriptLimits::default())
+        .err()
+        .expect("a mark that is not the encoding signature must still fail");
+    assert!(error.message.contains("U+feff"), "{error}");
+
+    // Two marks leave one behind, which is the same stray identifier.
+    write("room.luau", BOM, "\u{feff}return {name = 'x'}");
+    assert!(ScriptHost::load(root.path(), ScriptLimits::default()).is_err());
+}
+
+/// The loader skipping a signature must not change what a game reads from its
+/// own files: those bytes belong to the game, mark included.
+#[test]
+fn a_byte_order_mark_survives_a_script_reading_its_own_file() {
+    let root = game(
+        r#"
+        return {update = function(ctx)
+            local bytes = ctx.fs.read("bundle", "data.txt")
+            ctx.log(tostring(#bytes) .. ":" .. tostring(string.byte(bytes, 1)))
+        end}
+    "#,
+    );
+    fs::write(root.path().join("data.txt"), b"\xef\xbb\xbfhi").unwrap();
+    let mut host = load(root.path());
+    host.init().unwrap();
+    host.update().unwrap();
+    assert_eq!(host.take_logs(), ["5:239"]);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_module_case_alias_uses_one_cache_entry() {

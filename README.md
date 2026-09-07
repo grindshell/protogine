@@ -282,7 +282,9 @@ callback without kernel systems; it supplies log/data/filesystem/asset/draw
 bindings, with no world, input, native calls, or clock.
 
 Modules use extensionless relative paths, such as `require("./counter")` or
-`require("../shared")` within the bundle. Files must be UTF-8 `.luau` source.
+`require("../shared")` within the bundle. Files must be UTF-8 `.luau` source. A
+leading byte order mark is accepted and skipped, since Windows editors write
+one; a `U+FEFF` anywhere else is source text and fails to compile.
 Aliases, dotted path segments, directory init modules, and paths escaping the
 canonical bundle root are rejected. Successfully loaded module values are cached
 once per VM; loaded source changes require a new host. Cycles and failed imports

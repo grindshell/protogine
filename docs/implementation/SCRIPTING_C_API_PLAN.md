@@ -1,6 +1,8 @@
 # ADR-001: Luau scripting and the native plugin API
 
 **Status:** D1-D8 accepted; Phases 0, 1, 1a, 2, 3, 4, and 5 complete on Windows MSVC.
+One post-completion amendment to the source-loading contract is recorded at the
+end of this document.
 **Date:** 2026-09-05.
 **Decider:** Project owner.
 **Baseline:** `539659e` (Player, bundle discovery, built-in capture).
@@ -1486,3 +1488,46 @@ the rejected optimization, not current deadline behavior.
   check, headless native debug/release tests, release SDK tests, header drift,
   release Player build, headless lifecycle example and both GPU capture suites
   passed. The new regressions also passed within the release scripting suite.
+
+## Post-completion amendments
+
+### Leading byte order marks in module source, 2026-09-07
+
+The source-loading contract above requires UTF-8 `.luau` files and said nothing
+about a byte order mark, so one reached the compiler as content and Luau
+rejected it: `syntax error: main.luau:1: Expected identifier when parsing
+expression, got Unicode character U+feff`. Windows editors and PowerShell 5.1's
+`Out-File -Encoding utf8` both write UTF-8 with a mark, so an author who edits a
+shipped game on Windows can produce a file that will not load and an error that
+names a codepoint rather than the cause. The PNG/sprite Phase 3 review found
+this while establishing why `tests/player_input.ps1` needs PowerShell 7, whose
+`utf8NoBOM` encoding exists precisely because 5.1 has no BOM-free UTF-8 option.
+
+`BundleModules::compile` now skips exactly one leading `U+FEFF` after UTF-8
+validation and before compiling.
+
+This is a widening: every file that loaded before still loads, because a file
+with a mark could not load at all. It is also not a departure from the engine's
+habit of refusing ambiguous input. APNG frames, 16-bit channels, numeric
+coercions and option-table metatables are refused because choosing among their
+possible meanings on the author's behalf is the harm. A leading mark has one
+meaning, an encoding signature, so skipping it decides nothing. rustc, Python,
+Go, MSVC and Node skip one for the same reason; Lua and Luau are the outliers.
+
+Three boundaries keep the change contained, each with a test in
+`tests/scripting.rs`:
+
+- Exactly one mark, exactly at the start. A `U+FEFF` after any source is content
+  and still fails to compile, and a doubled mark leaves the second one to fail.
+- Module source only. `ctx.fs.read` is untouched: the bytes it returns belong to
+  the game, and stripping there would silently corrupt a save file whose first
+  bytes happen to match.
+- After the 256 KiB source check, so that limit still describes bytes on disk.
+
+Verified by disabling the skip and confirming
+`a_leading_byte_order_mark_loads_while_one_elsewhere_still_fails` fails with the
+original `U+feff` diagnostic, then restoring it.
+
+UTF-16 files remain refused by UTF-8 validation with its own error. A friendlier
+diagnostic for that case was considered and left out: Windows tools write
+UTF-8-with-BOM, which is the case worth handling.

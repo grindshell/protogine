@@ -117,7 +117,18 @@ impl BundleModules {
             self.budget.fail("module source limit exceeded");
             return Err(mlua::Error::runtime("module source limit exceeded"));
         }
-        let source = String::from_utf8(source).map_err(mlua::Error::external)?;
+        let mut source = String::from_utf8(source).map_err(mlua::Error::external)?;
+        // Windows editors and PowerShell 5.1's `Out-File -Encoding utf8` write
+        // UTF-8 with a byte order mark, and Luau would reject it as a stray
+        // U+FEFF identifier on line 1. Skip exactly one leading mark: it is an
+        // encoding signature with a single meaning, so dropping it decides
+        // nothing on the author's behalf, unlike the format and type choices
+        // this engine deliberately refuses to make. A U+FEFF anywhere else is
+        // content and still fails to compile, and `ctx.fs.read` is untouched
+        // because the bytes it returns belong to the game.
+        if source.starts_with('\u{feff}') {
+            source.remove(0);
+        }
         let relative = path
             .strip_prefix(&self.root)
             .map_err(mlua::Error::external)?;
