@@ -712,9 +712,11 @@ Live storage is 598,017 bytes: 524,288 cells, one solid flag and 73,728 bytes of
 sweep scratch. The sparse short-motion arrangement charges 18,432 units, also
 pinned, at p50 0.14 ms. Timing is reported as a range across five separate
 release runs of fifteen repetitions each, because a single run's p50 is not far
-enough from the tick period to read as a verdict: p50 16.5 to 17.4 ms, p95 16.7
+enough from the tick period to read as a verdict: p50 16.5 to 17.8 ms, p95 16.7
 to 20.2 ms, max 16.9 to 23.1 ms, against the probe's p50 of 20.6 ms and a
-16.67 ms tick period. An independent run by the review session reproduced the
+16.67 ms tick period. The saved
+[receipt](docs/implementation/evidence/collision-phase2-controls.txt) carries
+one run of each harness verbatim. An independent run by the review session reproduced the
 unit counts and storage bit-exactly and the timings within that range, which is
 the right shape: the deterministic half reproduces exactly and the
 machine-dependent half does not.

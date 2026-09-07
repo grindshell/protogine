@@ -1,0 +1,77 @@
+Phase 2 collision guards and max-load stress
+Windows MSVC x64, rustc 1.95.0 (59807616e), commit 88455fe
+
+pwsh -NoProfile -File tools/run_collision_controls.ps1
+CONTROL DETECTED: endpoint-only
+CONTROL DETECTED: corner-only-sweep
+CONTROL DETECTED: corner-only-placement
+CONTROL DETECTED: y-before-x
+CONTROL DETECTED: partial-integration-commit
+CONTROL DETECTED: cells-visited-uncharged
+CONTROL DETECTED: charge-after-the-refusal
+CONTROL DETECTED: naive-clamp
+CONTROL DETECTED: naive-clamp-mirror
+CONTROL DETECTED: closed-interval-overlap
+CONTROL DETECTED: span-past-the-far-face
+CONTROL DETECTED: skip-the-touching-face
+CONTROL DETECTED: embedded-start-retreats
+CONTROL DETECTED: placement-skips-the-extent-check
+CONTROL DETECTED: placement-accepts-an-inverted-box
+CONTROL DETECTED: nonfinite-travel-accepted
+CRASH CONTROL DETECTED: cell-overlap-skips-bounds -> thread 'public_geometry_entry_points_answer_rather_than_diverging_by_profile' (19696) panicked at src\collision.rs:321:46:
+CONTROL DETECTED: teleport-unchecked
+CONTROL DETECTED: install-unrevalidated
+CONTROL DETECTED: clear-ignores-colliders
+CONTROL DETECTED: edit-ignores-bodies
+CONTROL DETECTED: edit-scans-every-change
+CONTROL DETECTED: attach-unchecked-extent
+CONTROL DETECTED: attach-unchecked-placement
+CONTROL DETECTED: collider-limit-ignored
+CONTROL DETECTED: stop-keeps-collider-count
+CONTROL DETECTED: despawn-leaks-capacity
+REDUNDANT RULE CONFIRMED: unsorted-bodies
+
+restored: test result: ok. 35 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+All 28 collision guards behaved as specified.
+
+pwsh -NoProfile -File tools/run_collision_controls.ps1 -Release
+CONTROL DETECTED: endpoint-only
+CONTROL DETECTED: corner-only-sweep
+CONTROL DETECTED: corner-only-placement
+CONTROL DETECTED: y-before-x
+CONTROL DETECTED: partial-integration-commit
+CONTROL DETECTED: cells-visited-uncharged
+CONTROL DETECTED: charge-after-the-refusal
+CONTROL DETECTED: naive-clamp
+CONTROL DETECTED: naive-clamp-mirror
+CONTROL DETECTED: closed-interval-overlap
+CONTROL DETECTED: span-past-the-far-face
+CONTROL DETECTED: skip-the-touching-face
+CONTROL DETECTED: embedded-start-retreats
+CONTROL DETECTED: placement-skips-the-extent-check
+CONTROL DETECTED: placement-accepts-an-inverted-box
+CONTROL DETECTED: nonfinite-travel-accepted
+REDUNDANT RULE CONFIRMED: cell-overlap-skips-bounds
+CONTROL DETECTED: teleport-unchecked
+CONTROL DETECTED: install-unrevalidated
+CONTROL DETECTED: clear-ignores-colliders
+CONTROL DETECTED: edit-ignores-bodies
+CONTROL DETECTED: edit-scans-every-change
+CONTROL DETECTED: attach-unchecked-extent
+CONTROL DETECTED: attach-unchecked-placement
+CONTROL DETECTED: collider-limit-ignored
+CONTROL DETECTED: stop-keeps-collider-count
+CONTROL DETECTED: despawn-leaks-capacity
+REDUNDANT RULE CONFIRMED: unsorted-bodies
+
+restored: test result: ok. 35 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+All 28 collision guards behaved as specified.
+
+pwsh -NoProfile -File tools/run_collision_stress.ps1
+test max_load_stress_completes_inside_the_fixed_pass_ceiling ... long-sweep: 11386880 units (67.9% of 16777216), p50 17.76 ms, p95 19.71 ms, max 21.24 ms, storage 598017 bytes
+sparse-short-motion: 18432 units (0.1% of 16777216), p50 0.16 ms, p95 0.18 ms, max 0.18 ms, storage 598017 bytes
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.28s
+
+Both mandated arrangements completed inside the fixed-pass ceiling.
