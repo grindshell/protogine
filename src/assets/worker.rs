@@ -73,8 +73,9 @@ pub(super) enum Reply {
         rgba: Vec<u8>,
     },
     Failed(AssetError),
+    /// The job released everything and published nothing, whether it observed
+    /// the cancel flag or was abandoned outright.
     Cancelled,
-    Abandoned,
     /// The store sent a command with no active job, or a stage arrived out of
     /// order. That is an invariant violation on the runtime thread rather than
     /// a recoverable asset failure.
@@ -87,11 +88,7 @@ impl Reply {
     pub(super) fn terminal(&self) -> bool {
         matches!(
             self,
-            Self::Done { .. }
-                | Self::Failed(_)
-                | Self::Cancelled
-                | Self::Abandoned
-                | Self::Protocol
+            Self::Done { .. } | Self::Failed(_) | Self::Cancelled | Self::Protocol
         )
     }
 }
@@ -344,7 +341,11 @@ impl Job {
                 channels,
             } => self.allocate(width, height, channels),
             Command::Decode { bands } => self.decode(bands),
-            Command::Abandon => Reply::Abandoned,
+            // The store cancels a job before it abandons one, so the check
+            // above normally answers first. Releasing on the command as well
+            // keeps that ordering from being load-bearing: either way the job
+            // publishes nothing and the store may reclaim its reservations.
+            Command::Abandon => Reply::Cancelled,
             Command::Start { .. } | Command::Stop => Reply::Protocol,
         }
     }

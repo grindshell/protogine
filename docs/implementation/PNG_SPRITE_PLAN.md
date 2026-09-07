@@ -946,8 +946,32 @@ Two evidence gaps the same review found are also closed, in a second pass.
   `limit` with `bytes_read` of exactly 17 MiB plus one, so the refusal is
   demonstrably the probe rather than the metadata.
 
-One gap remains unfixed and is carried to the list below: the unreachable
-`Reply::Abandoned`.
+A third pass closed the review's two remaining code observations.
+
+- **`Reply::Abandoned` is removed.** The store cancelled a job by setting a
+  private flag and a shared atomic at three call sites, and only then abandoned
+  it, so the worker's own cancellation check always answered first and the
+  `Abandoned` reply could never be produced. Cancelling both halves is now one
+  `Job::cancel` method, so the two cannot drift, and `Command::Abandon` reports
+  `Cancelled`: releasing on the command as well as on the flag keeps that
+  ordering from being load-bearing. One outcome, one reply, no unreachable arm.
+- **The decoder workspace reservation names its ceilings.** The frozen 16 MiB
+  native frame and 32 KiB conversion band have no budget to be refused against,
+  unlike retained storage beside them: both fall out of the validated
+  dimensions, and only the active job holds workspace. `grant_allocate` now
+  checks all three of those before reserving and treats a violation as a service
+  fault, which is the class it belongs to, since it would mean the store's own
+  validation was wrong rather than the image being at fault.
+  `band_and_frame_reservations_stay_inside_their_frozen_ceilings` proves the
+  bounds hold across the legal dimension range, sweeping every width against
+  both the tall worst case and the clamped small-height branch.
+  `evicting_the_active_job_releases_its_workspace_to_the_queue` covers the
+  handoff the aggregate clause guards: evicting the job that holds the worker at
+  eight interruption points, with four queued behind it.
+
+Both were verified against a deliberately broken `band_rows` that reserves one
+row too many: the unit test fails at the first 1x1 case, and a maximum image
+raises a service fault and never settles instead of over-reserving.
 
 ### Behavioral observations
 
@@ -1008,10 +1032,11 @@ cargo test --test player_capture -- --ignored
 cargo test --test plugins -- --ignored
 ```
 
-`tests/assets.rs` contains 34 tests, three of them Windows-only, and runs in
+`tests/assets.rs` contains 35 tests, three of them Windows-only, and runs in
 about 2.9 seconds in debug and 1.1 seconds in release. One of those tests spawns
 nine child-process decoder probes, which run beside the rest of the suite;
-`isolated_probe` returns immediately unless `PROTOGINE_ASSET_PROBE` names one. The existing filesystem,
+`isolated_probe` returns immediately unless `PROTOGINE_ASSET_PROBE` names one.
+The one library unit test proves the decoder workspace ceilings. The existing filesystem,
 scripting, runtime, drawing, plugin and capture suites pass unchanged, including
 the ignored GPU captures, which confirms the traversal extraction and the
 feature reshuffle changed no existing behavior.
@@ -1037,10 +1062,11 @@ the same reason, since deadline enforcement did not change.
   wired up. The store's pass function is the one those will call.
 - Service faults are recorded and reported through `service_fault`, but no
   caller turns one into a session fault yet.
-- `Reply::Abandoned` is unreachable. `Command::Abandon` is only sent for a job
-  whose cancel flag is already set, and the worker checks that flag first, so
-  the reply is always `Cancelled`. Harmless, and left for the phase that revisits
-  the worker protocol.
+- Decoder scratch is reserved per job and bounded by the dimension check rather
+  than by an aggregate budget, because only one job holds workspace at a time.
+  Phase 3 adds GPU reservations beside it; if a second holder ever becomes
+  concurrent, the aggregate clause in `grant_allocate` is where that has to be
+  revisited, and it will fault rather than silently over-reserve.
 
 ## Planning evidence
 

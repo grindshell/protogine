@@ -172,6 +172,15 @@ impl Job {
             gpu: GpuResidency::Unavailable,
         }
     }
+
+    /// Cancel both halves together. The store's flag settles the entry and the
+    /// shared flag stops the worker, and a job that carried only one of them
+    /// would either publish after settling or never be released, so the two are
+    /// never set apart.
+    fn cancel(&mut self) {
+        self.cancelled = true;
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// One bounded image service for one session, rooted at a canonical bundle.
@@ -655,7 +664,20 @@ impl AssetStore {
         // the whole native frame it would decode eagerly for an Adam7 image,
         // plus one conversion band. Both are decoder scratch and are released
         // when the job ends; they are not retained image storage.
-        let scratch = width * height * channels + rows * width * channels;
+        let frame = width * height * channels;
+        let band = rows * width * channels;
+        // Neither has a budget to be refused against: the frozen 16 MiB frame
+        // and 32 KiB band both fall out of the validated dimensions, and only
+        // the active job holds workspace, so nothing may already be
+        // outstanding. Name those ceilings where the reservation is taken
+        // rather than leaving them to be re-derived from `applied_header` and
+        // `band_rows`; a unit test in `src/assets.rs` proves they hold across
+        // the legal range, so a failure here is a broken invariant rather than
+        // a property of the image.
+        if frame > IMAGE_RGBA_LIMIT || band > WORK_QUANTUM || self.accounting.scratch != 0 {
+            self.fail_service("asset decoder workspace exceeded its frozen reservation");
+            return None;
+        }
         if self.accounting.rgba + rgba > STORE_RGBA_LIMIT {
             self.fail_active(
                 AssetErrorCode::Capacity,
@@ -664,10 +686,10 @@ impl AssetStore {
             return None;
         }
         self.accounting.rgba += rgba;
-        self.accounting.scratch += scratch;
+        self.accounting.scratch += frame + band;
         let job = self.jobs.front_mut().expect("active job");
         job.rgba = rgba;
-        job.scratch = scratch;
+        job.scratch = frame + band;
         Some(Command::Allocate {
             width,
             height,
@@ -714,8 +736,8 @@ impl AssetStore {
                 self.publish(rgba);
             }
             Reply::Failed(error) => self.fail_job(error),
-            Reply::Cancelled | Reply::Abandoned => {
-                // Only a cancelled job can produce these, and that is handled
+            Reply::Cancelled => {
+                // Only a cancelled job can produce this, and that is handled
                 // above, so reaching here means the store lost track of it.
                 self.fail_service("asset worker cancelled a job the store still owns");
             }
@@ -821,8 +843,7 @@ impl AssetStore {
     /// cancelled and let the next dispatch abandon it.
     fn fail_active(&mut self, code: AssetErrorCode, message: impl ToString) {
         let job = self.jobs.front_mut().expect("active job");
-        job.cancelled = true;
-        job.cancel.store(true, Ordering::Relaxed);
+        job.cancel();
         let error = AssetError::new(code, &job.logical, message);
         let status = job.status();
         self.settle_failure(status, error);
@@ -875,9 +896,7 @@ impl AssetStore {
             return;
         };
         if self.jobs[index].started {
-            let job = &mut self.jobs[index];
-            job.cancelled = true;
-            job.cancel.store(true, Ordering::Relaxed);
+            self.jobs[index].cancel();
             return;
         }
         // A queued job owns no worker resources, so drop it immediately.
@@ -943,8 +962,8 @@ impl AssetStore {
         // a job's own bytes may be dropped here. Encoded staging and scratch
         // reach zero through the same release, which keeps a leak visible
         // instead of hiding it behind a blanket reset.
-        for job in std::mem::take(&mut self.jobs) {
-            job.cancel.store(true, Ordering::Relaxed);
+        for mut job in std::mem::take(&mut self.jobs) {
+            job.cancel();
             self.release_work(&job);
             self.release_output(&job);
         }

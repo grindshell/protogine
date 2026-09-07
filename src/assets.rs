@@ -258,3 +258,39 @@ pub struct UploadAck {
     pub id: ImageId,
     pub residency: GpuResidency,
 }
+
+#[cfg(all(test, feature = "assets"))]
+mod tests {
+    use super::{DIMENSION_LIMIT, IMAGE_RGBA_LIMIT, WORK_QUANTUM, band_rows};
+
+    /// The store reserves one native frame and one conversion band per job, and
+    /// the frozen contract caps them at 16 MiB and 32 KiB. Neither is refused
+    /// against a budget at runtime: both fall out of the dimension bound, so
+    /// prove them here rather than leaving the arithmetic to inspection.
+    ///
+    /// The sweep is exhaustive for the worst case. `band_rows` clamps with
+    /// `min(height)`, which only lowers the row count, so the largest band for
+    /// any width is the one a tall image produces; the small heights cover the
+    /// clamped branch, and both products grow with the channel count.
+    #[test]
+    fn band_and_frame_reservations_stay_inside_their_frozen_ceilings() {
+        let limit = DIMENSION_LIMIT as usize;
+        for width in 1..=limit {
+            for height in [1, 2, 3, 7, 8, limit - 1, limit] {
+                let rows = band_rows(width, height);
+                assert!(rows >= 1, "{width}x{height}: empty band");
+                assert!(rows <= height, "{width}x{height}: band exceeds the image");
+                for channels in 1..=4 {
+                    assert!(
+                        width * height * channels <= IMAGE_RGBA_LIMIT,
+                        "{width}x{height}x{channels}: native frame over its ceiling"
+                    );
+                    assert!(
+                        rows * width * channels <= WORK_QUANTUM,
+                        "{width}x{height}x{channels}: conversion band over its ceiling"
+                    );
+                }
+            }
+        }
+    }
+}

@@ -893,6 +893,49 @@ fn cancelling_at_any_stage_releases_work_without_publishing() {
     );
 }
 
+/// Evicting the job that holds the worker must hand the queue over cleanly: its
+/// encoded staging and decoder workspace are released when the worker gives the
+/// job back, and only then may the next job reserve its own. Nothing here is
+/// allowed to reach the runtime through the service-fault path.
+#[test]
+fn evicting_the_active_job_releases_its_workspace_to_the_queue() {
+    let root = bundle();
+    fs::copy(kenney(), root.path().join("sheet.png")).unwrap();
+    for index in 0..4 {
+        install(root.path(), "interlaced", &format!("art/{index}.png"));
+    }
+    // Every point the active job can be interrupted at, including while it
+    // holds a reserved output and conversion band.
+    for passes in 0..8 {
+        let mut store = store(root.path());
+        let active = store.request_png("sheet.png").unwrap();
+        let queued: Vec<_> = (0..4)
+            .map(|index| store.request_png(&format!("art/{index}.png")).unwrap())
+            .collect();
+        for _ in 0..passes {
+            store.advance(WATCHDOG);
+        }
+        assert!(store.unload(active), "passes={passes}");
+        assert!(store.drain(WATCHDOG), "passes={passes}");
+
+        for id in &queued {
+            let status = store.status(*id).unwrap();
+            assert_eq!(
+                status.state,
+                ImageState::Ready,
+                "passes={passes} {status:?}"
+            );
+        }
+        assert_eq!(store.status(active).unwrap().state, ImageState::Unloaded);
+        assert!(store.image(active).is_none(), "passes={passes}");
+        assert_eq!(store.pending_jobs(), 0, "passes={passes}");
+        assert_eq!(store.staged_bytes(), 0, "passes={passes}");
+        assert_eq!(store.scratch_bytes(), 0, "passes={passes}");
+        assert_eq!(store.resident_bytes(), 4 * 9 * 9 * 4, "passes={passes}");
+        assert!(store.service_fault().is_none(), "passes={passes}");
+    }
+}
+
 #[test]
 fn a_cancelled_queued_job_never_reaches_the_worker() {
     let root = bundle();
