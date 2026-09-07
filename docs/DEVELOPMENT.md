@@ -203,12 +203,23 @@ reporting failure. Each control's full cargo output is saved under
 `target/<harness>/failures/`. The copy also stamps every file it writes, because
 `Copy-Item` preserves source timestamps and the copy reuses its own `target/`.
 
+Each harness carries two self-tests it must *refuse*: a control naming a test
+that does not exist, and one whose edit compiles and changes nothing the test
+observes. Both used to be accepted as ordinary results, and either would have
+reported every guard as covered while proving nothing. They fail loudly and name
+the gate if one is ever removed, so the gates above are themselves controlled.
+
 **Re-run serially before believing a red result.** Isolation from the working
 tree is proven by the fingerprint; isolation from concurrent `cargo` is not.
 Under heavy parallel cargo load a control has been seen reporting uncovered where
 a serial run on the same tree passes all of them. The mechanism is unidentified,
 every observed instance has been in the safe direction, and the gates above exist
 so that a wrong answer is loud rather than silent.
+
+**To verify a commit rather than a working tree, extract it first** - `git
+archive HEAD` into a scratch directory and run there. The harness script is a
+live file like any other, so two invocations of it taken while tooling is being
+edited can run different control lists; the committed state cannot move.
 
 Markers must never be a bare `assertion` or `panicked` substring: those match any
 failure at all, which would reduce a harness to "something broke" and silently

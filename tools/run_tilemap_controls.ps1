@@ -32,6 +32,22 @@ $controlSources = @('src/tilemap.rs', 'src/kernel.rs')
 $controlFingerprint = Get-SourceFingerprint -Repo $controlRepo -Files $controlSources
 
 $controls = @(
+    # --- Self-tests: controls the harness must refuse ------------------------
+    #
+    # There is otherwise no control on the controls. Both of these used to be
+    # accepted as ordinary results, and either would have reported every guard
+    # as covered while proving nothing.
+
+    @{ Name = 'self-test-missing-test'; File = 'src/tilemap.rs'
+       Test = 'a_test_name_that_does_not_exist'; Marker = 'unused'
+       Expect = 'did not execute exactly one test'
+       Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
+
+    @{ Name = 'self-test-inert-edit'; File = 'src/tilemap.rs'
+       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
+       Expect = 'did not fail with the guard removed'
+       Edits = @(@{ F = 'pub const MAX_REGION_CELLS: u32 = 4_096;'; R = 'pub const MAX_REGION_CELLS: u32 = 4_097;' }) }
+
     @{ Name = 'stop-keeps-map'; File = 'src/kernel.rs'; Test = 'stopping_releases_map_storage'
        Marker = 'stop must release map storage'
        Edits = @(@{ F = "self.active = false;`n        self.tilemap = None;"; R = 'self.active = false;' }) }
@@ -178,31 +194,49 @@ try {
         # also exits zero, and so does a stale binary cargo decided not to
         # rebuild. Require the run to say it executed exactly one test, and a
         # detecting control to say it failed.
+        $verdict = $null
+        $note = $null
         if (-not $applied) {
-            $controlFailures += "$($control.Name): the patched source changed under the run, so it proves nothing"
+            $verdict = "$($control.Name): the patched source changed under the run, so it proves nothing"
         } elseif ($output -match 'error\[E\d+\]|could not compile') {
-            $controlFailures += "$($control.Name): did not compile, so it proves nothing"
+            $verdict = "$($control.Name): did not compile, so it proves nothing"
         } elseif ($output -notmatch 'Compiling protogine') {
             # Every control edits a source file, so a correct run must rebuild.
             # If cargo decided the crate was up to date, it ran a binary built
             # from different code and the result is about that binary, not this
             # control. Observed under concurrent `cargo` load.
-            $controlFailures += "$($control.Name): cargo did not rebuild, so the run is about a stale binary"
+            $verdict = "$($control.Name): cargo did not rebuild, so the run is about a stale binary"
         } elseif ($output -notmatch 'running 1 test(?!s)') {
-            $controlFailures += "$($control.Name): the run did not execute exactly one test, so it proves nothing"
+            $verdict = "$($control.Name): the run did not execute exactly one test, so it proves nothing"
         } elseif ($control.Marker -ne 'PASSES' -and $output -notmatch 'test result: FAILED') {
-            $controlFailures += "$($control.Name): $($control.Test) did not fail with the guard removed"
+            $verdict = "$($control.Name): $($control.Test) did not fail with the guard removed"
         } elseif ($control.Marker -eq 'PASSES') {
-            if ($code -ne 0) { $controlFailures += "$($control.Name): expected to still pass, but failed at $where" }
-            else { "REDUNDANT GUARD CONFIRMED: $($control.Name)" }
+            if ($code -ne 0) { $verdict = "$($control.Name): expected to still pass, but failed at $where" }
+            else { $note = "REDUNDANT GUARD CONFIRMED: $($control.Name)" }
         } elseif ($code -eq 0) {
-            $controlFailures += "$($control.Name): $($control.Test) still passed with the guard removed"
+            $verdict = "$($control.Name): $($control.Test) still passed with the guard removed"
         } elseif ($output -notmatch [regex]::Escape($control.Marker)) {
-            $controlFailures += "$($control.Name): failed at '$where', not '$($control.Marker)'"
+            $verdict = "$($control.Name): failed at '$where', not '$($control.Marker)'"
         } elseif ($control.Crash) {
-            "CRASH CONTROL DETECTED: $($control.Name) -> $where"
+            $note = "CRASH CONTROL DETECTED: $($control.Name) -> $where"
         } else {
-            "CONTROL DETECTED: $($control.Name) -> $where"
+            $note = "CONTROL DETECTED: $($control.Name) -> $where"
+        }
+
+        if ($control.Expect) {
+            # A self-test: the harness is supposed to refuse this one. Reaching a
+            # verdict at all, or the wrong verdict, means a gate is not working.
+            if (-not $verdict) {
+                $controlFailures += "$($control.Name): the harness accepted a control it must refuse"
+            } elseif ($verdict -notmatch [regex]::Escape($control.Expect)) {
+                $controlFailures += "$($control.Name): refused as '$verdict', not '$($control.Expect)'"
+            } else {
+                "SELF-TEST REFUSED AS EXPECTED: $($control.Name)"
+            }
+        } elseif ($verdict) {
+            $controlFailures += $verdict
+        } else {
+            $note
         }
     }
 } finally {
@@ -225,4 +259,6 @@ if ($controlFailures.Count -gt 0) {
     $controlFailures | ForEach-Object { "  $_" }
     exit 1
 }
-"`nAll $($controls.Count) map guards behaved as specified."
+$guards = ($controls | Where-Object { -not $_.Expect }).Count
+$selfTests = $controls.Count - $guards
+"`nAll $guards map guards behaved as specified, and the harness refused all $selfTests self-tests."

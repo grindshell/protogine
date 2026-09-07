@@ -609,6 +609,22 @@ serially before believing a red result. This is recorded as an open limitation
 rather than a fixed defect, because it has not been reproduced on demand and no
 mechanism has been established.
 
+Those gates are themselves controlled. Each harness carries two self-tests it
+must *refuse*: a control naming a test that does not exist, and one whose edit
+compiles and changes nothing the test observes. Both were accepted as ordinary
+results before this phase, and either would have reported every guard as covered
+while proving nothing. Removing a gate makes the corresponding self-test fail and
+name it, which was verified by removing one. The review session independently
+built the same three-case check against a frozen extraction of the commit and
+confirmed the harness refuses the two it should and still detects the third;
+committing them means the property cannot rot.
+
+One residual hazard is reader-side and deliberately not engineered around: the
+harness *script* is a live file, so two invocations taken while tooling is being
+edited can run different control lists. Verify a commit by extracting it - `git
+archive HEAD` into a scratch directory - rather than by running against a working
+tree that can move.
+
 One control is recorded as redundant in both profiles and one in release only.
 Removing the body sort changes nothing, because bodies never affect one another,
 and the difference is not observable through the API at all: a work or invariant
