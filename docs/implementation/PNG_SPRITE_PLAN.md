@@ -1,23 +1,18 @@
 # ADR-002: Bundle PNG assets and sprite drawing
 
-**Status:** Complete. Phases 0-4 delivered, with the full check matrix run.
-P1-P8, including the P7 manual-eviction extension, accepted 2026-09-06.
-The [Phase 0 record](PNG_SPRITE_PHASE0.md) freezes the implementation contracts
-and records dependency/worker/GPU feasibility evidence. Phase 1 implemented the
-headless asset service, Phase 2 its Luau and runtime integration, Phase 3 the
-shared renderer, GPU residency and Player integration, and Phase 4 the authoring
-sample and its delivery evidence; their records are at the end of this document.
-Implemented APIs and limits are documented in the README; the unresolved gaps
-each phase records are the standing limitations.
+**Status:** Complete on Windows MSVC x64: Phases 0-4 and the recorded
+post-completion corrections. P1-P8, including manual eviction, accepted 2026-09-06.
 **Date:** 2026-09-06.
 **Decider:** Project owner.
 **Baseline:** `61a72adb93c94c4a5dada0a7c0384f2f44490976`.
 
-The selected next feature is bundle-local PNG loading, sprite/tileset drawing,
-and shared runtime support. This document records the accepted decisions,
-implementation contracts to finalize, and phase exits. It does not describe
-implemented APIs. Record contract changes and
-verification evidence here as work proceeds.
+The [Phase 0 record](PNG_SPRITE_PHASE0.md) freezes feasibility choices; the
+contracts below incorporate delivery refinements. [README](../../README.md)
+describes current APIs/limits and [DEVELOPMENT](../DEVELOPMENT.md) owns the
+check matrix. Dated completion records retain historical commands, measurements
+and phase-local gaps. Later phases close earlier gaps; standing limitations are
+listed under [Phase 4](#unresolved-gaps-1) and the
+[post-completion corrections](#post-completion-review-corrections).
 
 ## Outcome and scope
 
@@ -44,31 +39,24 @@ is required by this milestone.
 
 ## Current contracts to preserve
 
-- [Drawing data](../../src/drawing.rs) contains owned `Clear` and `Rect`
-  commands and has no graphics dependency. [Script bindings](../../src/scripting/drawing.rs)
-  validate before f32 conversion; a successful draw publishes one fresh list.
-  Fault/stop clears it. Rejected host `alpha` preserves the accepted list.
-- [ScriptHost](../../src/scripting.rs) supplies drawing independently of
-  [GameRuntime](../../src/runtime.rs). Keep PNG/sprite authoring available in
-  both. Runtime-only world/input/native APIs retain their existing boundaries.
-- `GameRuntime::finish_call` releases the entire `ScriptHost` as soon as a
-  session reaches `Stopped` or `Faulted`, before native teardown. Everything the
-  host owns disappears at that moment, so a host-owned asset store cannot outlive
-  termination and renderer-held GPU resources are the only surviving state.
-- [Player](../../src/bin/player.rs) owns a private rectangle renderer today.
-  Its capture path draws, invokes shutdown, then reads the framebuffer.
-  New GPU resources must survive any queued drawing through that readback.
-- [Filesystem bindings](../../src/scripting/filesystem.rs) canonicalize roots,
-  enforce [portable names](../../src/portable_path.rs), and reject links/reparse
-  points below each root. `resolve` does not canonicalize the final node or
-  recheck containment; segment validation plus per-descendant link rejection
-  carry that weight today. Their 1 MiB file and 8 MiB callback transfer limits
-  are utility contracts; PNG loading needs its own accounting.
-- Fixed ticks, input edges, world pixels, callback deadlines, VM cancellation,
-  native teardown order, and script-owned persistence stay as documented in
-  [ADR-001](SCRIPTING_C_API_PLAN.md) and the [agent guide](../../AGENTS.md).
-- `game/game.tot` remains the optional version-1 native-plugin manifest.
-  This feature adds no manifest fields and no asset scanning.
+- [Owned drawing data](../../src/drawing.rs) has no graphics dependency. Bindings
+  validate before f32 conversion and publish only successful draws. Fault/stop
+  clears commands; rejected host alpha preserves the accepted list.
+- [ScriptHost](../../src/scripting.rs) supplies assets/drawing independently of
+  [GameRuntime](../../src/runtime.rs); world/input/native APIs remain runtime-only.
+  Runtime terminal cleanup releases its host before native teardown. Renderer
+  GPU slots and pinned immutable pixels may outlive that host through queued work.
+- The [Player](../../src/bin/player.rs) uses the shared renderer. Capture queues
+  drawing, shuts down, then reads the framebuffer; textures survive that readback.
+- [Rooted traversal](../../src/rooted_path.rs) is shared by assets and
+  [filesystem utilities](../../src/scripting/filesystem.rs). Both reject invalid
+  [portable names](../../src/portable_path.rs) and descendant links/reparse points.
+  Only assets canonicalize/recheck the final file. PNG accounting is separate
+  from the filesystem's 1 MiB/file and 8 MiB/callback limits.
+- Fixed timing/input, world pixels, deadlines/cancellation, native teardown and
+  script-owned persistence retain [ADR-001](SCRIPTING_C_API_PLAN.md)'s contracts.
+  `game.tot` remains the optional version-1 native manifest; no asset fields or
+  scanning are added.
 
 ## Accepted decisions and implementation follow-through
 
@@ -85,92 +73,46 @@ is required by this milestone.
 
 ### Headless validation versus repeatable GPU captures
 
-GPU-only loading does not inherently make frames nondeterministic. Repeat seeded
-captures still validate the actual renderer on the tested graphics stack. They
-require a GPU context, including on a machine that creates an offscreen context
-without showing a window. Protogine's existing headless configuration uses no
-graphics context at all; it can validate paths, decoded pixels, dimensions,
-handle lifetimes, and owned drawing commands if decoding is a shared CPU service.
-Final rendered pixels still need the Player capture tests.
-
-P2 establishes one CPU decode path that also feeds GPU upload. Retain RGBA until
-logical unload or session retirement; count any remaining pinned owners until
-released. This preserves the session snapshot and lets headless tools inspect
-real pixels. A future different retention policy requires its own reload and
-accounting contract.
+Shared CPU decoding lets tools verify paths, pixels, dimensions, identities and
+owned commands without a graphics context. Final rendered pixels still require
+Player captures on a tested graphics stack. Retain immutable RGBA until logical
+unload or session retirement, accounting any pinned owners until release; future
+retention changes need their own reload/accounting contract.
 
 ### Staged processing
 
 `request -> queued -> reading -> decoding/converting -> CPU ready -> uploading
--> drawable` separates independent work and publication boundaries. Init/update
-may enqueue a request and retain an opaque image handle immediately; neither
-callback waits for the file to finish. Ready cache hits reuse the handle. Scripts
-can inspect status and draw a loading screen while other gameplay continues.
+-> drawable` separates work from publication. Admission resolves metadata
+synchronously; no callback waits for content/decode. Cache hits reuse identity.
+One worker handles file reads, metadata, native rows and RGBA conversion. Merely
+chunking reads before a whole-image decode would not satisfy staged processing.
+The pinned row reader performs metadata and interlaced frame work in
+non-preemptible worker stages; retain interlaced support and pinned dependencies.
 
-Use an engine-owned destination buffer for encoded chunks; do not expose a
-partially decoded image to scripts. A 32 KiB read quantum is a starting point,
-not the entire tick allowance. At exactly one quantum per 60 Hz tick, a 17 MiB
-file needs 544 ticks, about 9.07 seconds, just for reading. Multiple quanta may
-run under an aggregate service budget. Several concurrent requests share that
-budget; the allowance must not multiply by the number of jobs.
+Use [Phase 0 grants and ordering](PNG_SPRITE_PHASE0.md#work-grants-bounds-and-ordering):
+32 KiB quanta, eight per grant/pass, soft 2 ms cutoffs, one CPU service pass per
+frame/step, no catch-up grants or accumulated credits. Requests share the budget.
+GPU row-band transfers stay on the context thread; publish only complete images.
+Texture allocation, filesystem calls and decoder stages can overrun the cutoff.
 
-Chunked reads alone do not spread PNG decompression, RGBA conversion, or texture
-allocation/upload. The current whole-image `read_image` call cannot be placed
-after EOF and described as incremental loading. The pinned `image` reader has
-a row-based path for noninterlaced PNGs, but its interlaced path decodes a whole
-frame when creating the reader. Header/metadata processing can also do work
-independent of a pixel-row allowance. Phase 0 selected a bounded worker using the
-pinned row reader, including its non-preemptible interlaced/metadata stages.
-Do not drop interlaced support or substitute a dependency silently.
-
-GPU work remains on the graphics thread. Upload complete RGBA row bands through
-bounded region updates, keeping the image unavailable for drawing until every
-band is transferred. Texture allocation/resizing is still a non-preemptible
-operation that must be measured separately. Bounded bytes reduce work but do
-not guarantee a wall-clock deadline for filesystem calls, decoding, or drivers.
-
-Use the exact grant, publication and frontend order in the Phase 0 record: one
-CPU grant per frame/step, no repeated grants across catch-up ticks, GPU service
-before the runtime frame, and snapshots committed at the first update boundary.
-Standalone ScriptHost uses the same CPU service without a renderer. Production
-completion ticks may vary. Preload/completion-trace helpers drive the same service;
-capture drains pending work without advancing simulation before drawing. They do
-not introduce another loader, validation policy or script deadline override.
-
-Asset service slices run outside the Luau callback's execution budget. Preserve
-the existing 1 s startup and 100 ms update/draw cancellation contracts for script
-execution; do not extend/reset those deadlines on every chunk or request.
-Hitting a normal service-slice budget yields until a later pass. A separate job
-deadline, if needed, needs an explicit failure/cancellation policy; elapsed time
-for the whole staged job is not the duration of one Luau callback.
+Service work runs outside Luau deadlines; preserve 1 s startup/shutdown and
+100 ms update/draw budgets without resetting them per request or chunk. Normal
+slice exhaustion yields. Preload/trace drivers and capture drain the same service
+without advancing simulation or overriding script deadlines. Production completion
+ticks vary; a whole-job deadline would need a separate cancellation policy.
 
 ### Image access, eviction, and cancellation boundaries
 
-The script's image handle is the public view of its session-local cache
-entry: identity, status, dimensions when known, and deliberate utility operations.
-Drawing passes that handle. The renderer's reusable GPU slot is an implementation
-detail and must never become a script-visible mutable texture pointer.
+Handles expose identity, status and dimensions, never mutable texture pointers.
+Init/update `unload` invalidates every alias, removes path lookup and cancels
+pending jobs. Retained handles keep terminal status; a later request gets a new ID.
+A dedicated cancellation API, GPU-only eviction and raw pixels remain deferred.
 
-Manual eviction uses `ctx.assets.unload(image)` in init/update. It invalidates
-every alias and removes the path lookup; a later request gets a fresh identity.
-Status remains inspectable on retained handles in the live session. The Phase 0
-record defines idempotence, pending-job cancellation, pinned storage and frame
-retirement. Separate GPU-only eviction and raw pixel-buffer access are deferred.
-
-Cancellation should address the job identity and discard its partial buffers,
-release file/decoder resources, and prevent late completion from publishing it.
-If work runs on a worker, cancellation can suppress publication immediately but
-cannot promise to interrupt an in-progress non-preemptible operation. Define
-worker shutdown/join behavior as specified in Phase 0: wake, cancel and join one
-worker without detached workers or late publication. A dedicated script
-cancellation API remains deferred; unloading a pending image already cancels it.
-
-Neither cancellation nor eviction may recycle a GPU slot while queued drawing
-still references it. Pending/published frame references need pinning until their
-work is submitted/discarded, and releases take effect at a documented boundary.
-Implement eviction with resident-count accounting, wrapper-cache
-cleanup, stale-handle behavior, and slot reuse together; the default session-end
-residency rule below must not be applied to an explicitly evicted image.
+Cancel by full job identity, suppress late publication, release buffers and join
+the worker at teardown. An active non-preemptible operation may delay the join;
+never detach workers. Keep registry counts and canonical-wrapper cleanup bounded.
+Pin queued-frame resources through presentation/readback before clearing or
+reusing GPU slots; logical unload does not release pixels still owned elsewhere.
 
 ## Ownership and feature boundaries
 
@@ -187,56 +129,34 @@ flowchart TD
     Renderer --> Commands
 ```
 
-- Add image identifier/metadata types to `src/assets.rs`; keep those types and
-  drawing data available without graphics or scripting. Put file/decode/store
-  implementation behind an `assets` feature enabling the existing `image`
-  dependency. No new workspace member is needed.
-- `ScriptHost` owns an `AssetStore` rooted at the same canonical bundle as its
-  filesystem API, plus the VM handle cache. This follows the existing
-  `FileSystem` precedent rather than the runtime-owned `EngineContext` pattern,
-  because standalone hosts must load PNGs. `GameRuntime` exposes read-only
-  access through its host, and that accessor yields an empty view once the host
-  has been released on stop or fault. Rust tools can borrow image
-  metadata/pixels; scripts receive metadata copies and handles with scoped
-  eviction operations. A raw pixel-buffer API is deferred.
-- Store/path/decoder errors and accounting remain independent of mlua. Rust
-  loading uses an explicit load budget with the same byte/count limits; bindings
-  translate immediate argument errors and expose staged job failures without
-  depending on a currently executing Luau callback. Supply service budgets and
-  cancellation through a host hook rather than making the asset module depend
-  on the scripting host. Publish immutable image contents only on successful
-  completion; the registry can accept further requests during update.
-- Add `src/scripting/assets.rs` for scoped bindings. Make `scripting` enable
-  `assets`. Standalone `ScriptHost` loads real PNGs without a window.
-- Add `src/rendering.rs` under a `graphics` feature enabling `assets` and
-  Macroquad. Change `player` to enable `graphics`, `scripting`, and
-  `native-plugins`. Capture's `image` use is satisfied through `assets`.
-- The application owns one renderer for its graphics context's lifetime and
-  reuses it across runtime restarts. Session-to-texture mappings expire on
-  retirement; a bounded pool of cleared GPU allocation slots remains. This is
-  allocation reuse, not a cache of prior game assets or their contents.
-- `graphics` does not enable `scripting`, so the renderer cannot reference
-  `GameRuntime`. Keep the typed renderer error in `src/rendering.rs`, the
-  presentation-fault entry point on `GameRuntime`, and any command validation
-  shared by bindings and renderer in a feature-free module: `src/drawing.rs`,
-  or the unconditional part of `src/assets.rs`. Neither feature implies the
-  other, so shared validation cannot live under either one.
-- Keep Macroquad 0.4.16 with default features disabled and the current PNG-only
-  `image` dependency. Pin it exactly as `image = "=0.24.9"`: this feature depends
-  on specific decoder and limit semantics that a caret range could move
-  underneath it.
-  Verify the feature graph and lockfile; do not combine this feature with a
-  decoder/library upgrade.
-- The kernel does not own images, textures, sprite components, or the renderer.
-  A future editor drives these same runtime/rendering interfaces. Startup text
-  and window management remain Player responsibilities.
+- `src/assets.rs` exposes feature-free identity/status/bound types; `assets`
+  enables the store/worker and PNG-only `image = "=0.24.9"`. Keep the exact pin:
+  decoder/limit behavior is part of this contract. No new workspace member.
+- `ScriptHost` owns the canonical bundle-rooted `AssetStore`, scoped asset
+  bindings and VM wrapper cache. `GameRuntime::assets()` borrows the live store
+  through its host and returns `None` after host release. Metadata is owned;
+  immutable pixels may be pinned. Scripts receive no raw pixel access.
+- Store errors, grants, cancellation and accounting are independent of mlua.
+  Bindings translate immediate refusals and inspectable admitted-job failures;
+  publication rollback spans Rust admission and final VM allocation.
+- `scripting` enables `assets`; `graphics` enables `assets` and Macroquad 0.4.16
+  with default features disabled. Neither enables the other. `player` enables
+  graphics, scripting and native plugins; capture reaches `image` through assets.
+- The application owns one renderer/pool per graphics context, reused across
+  runtime restarts with cleared slots and new session mappings. The kernel owns
+  no images, textures, sprite components or renderer. Editor playtesting must
+  use these shared contracts; Player retains startup text/window management.
+- Renderer errors live in `src/rendering.rs`; `GameRuntime` owns presentation
+  faults. Shared validation lives in feature-free `src/drawing.rs`/asset types,
+  never behind just graphics or scripting. Keep feature-graph verification
+  separate from a decoder/library upgrade.
 
 | Configuration | Required behavior |
 | --- | --- |
 | `--no-default-features` | Core and command/identifier types compile without image decoding, Luau, or Macroquad |
 | `--no-default-features --features assets` | Rust asset decoding/store tests run without VM or graphics |
 | `--no-default-features --features scripting` | Real Luau asset loading and sprite commands work headlessly |
-| `--no-default-features --features graphics` | Shared renderer compiles without scripting/native plugins; constructing it requires a live Macroquad context |
+| `--no-default-features --features graphics` | Shared renderer has no VM dependency; `new` and validation need no context, texture operations need the live owning context |
 | Default `player` / `--all-features` | Existing Player and native behavior plus shared sprite rendering |
 
 ## Bundle loading and image lifetime
@@ -254,7 +174,7 @@ My Game/
       character.png
 ```
 
-The proposed `ctx.assets.request_png("assets/tiles.png")` addresses the bundle
+`ctx.assets.request_png("assets/tiles.png")` addresses the bundle
 root, including when called from a required submodule. It never resolves against
 the module directory, working directory, executable directory, or writable data
 root. `assets/` is a convention, not a mandatory directory.
@@ -286,32 +206,16 @@ root. `assets/` is a convention, not a mandatory directory.
    become that new job. Retain terminal status as specified in Phase 0.
    Counters for attempted work are never rolled back.
 
-Extract a small non-VM rooted-read/path helper from the current filesystem code
-where needed; share traversal rules rather than routing assets through
-`ctx.fs.read`. The two callers need different final-node policies: `ctx.fs`
-keeps today's behavior, while asset loading adds canonicalization and a
-containment recheck on the resolved file. Make that step a parameter of the
-helper rather than changing `ctx.fs`. Keep existing utility limits, listing
-classification, mkdir rollback, and writes intact, and run their regressions
-after the extraction. The existing stable-bundle assumption applies: this is
-not protection against concurrent hostile filesystem replacement.
+`src/rooted_path.rs` shares traversal with `ctx.fs` using a final-node policy.
+Assets require a regular file, canonicalization and containment recheck;
+filesystem reads/listing/mkdir/write retain their own behavior and limits.
+Bundle trees must stay stable; this does not isolate hostile filesystem races.
 
-Each `ImageId` contains a process-unique session identity and an append-only
-image identity with private construction. Use checked session allocation, not
-wrapping IDs or reusable addresses. No identity is handed out twice within a session,
-including numbers burned by a failed publication: keep the sequence strictly
-append-only so the no-reuse rule is auditable by inspection instead of by
-re-deriving why an unpublished ID could not have escaped. Update-time requests
-can burn more than one callback's allowance over a long session, so use a checked
-monotonic counter independent of resident storage slots. Every lookup checks
-session identity and entry state. GPU cache keys include the full ID; reusing a
-physical allocation slot never reuses the image identity.
-
-Keep `ImageId` a plain `Copy` scalar — a monotonic session counter plus a monotonic
-image number — so `DrawCommand` retains its existing `Clone, Copy, Debug, PartialEq`
-derivation. Do not model session identity with an `Rc` marker as `EntityHandle`
-does: a reusable address cannot satisfy the cross-session rule and would cost
-`Copy`.
+`ImageId` is a private-construction `Copy` scalar: checked process-unique session
+number plus append-only image number. Burn failed-publication IDs; never reuse
+addresses or resident slots as logical identities. Lookups check session/state,
+and GPU keys use the full ID. Sprite commands retain `Clone, Copy, Debug,
+PartialEq`; unlike `EntityHandle`, image identity needs no `Rc` marker.
 
 Coalesced pending requests and ready cache hits return the same Luau userdata,
 including `rawequal` and table-key identity. Keep canonical wrappers only while
@@ -350,21 +254,14 @@ samples. Normalize supported input to top-to-bottom, tightly packed RGBA8 with
 straight alpha; opaque formats receive alpha 255. Preserve decoded sample bytes
 without ICC/gamma correction, premultiplication, or vertical flipping.
 
-The pinned decoder supplies each of these; Phase 0 tested the following mechanisms.
-`PngDecoder::with_limits` sets
-`png::Transformations::EXPAND`, which is what makes palette expansion, tRNS
-alpha, and 1/2/4-bit grayscale work without extra handling, and which
-deliberately does not narrow 16-bit samples. So 16-bit input surfaces as
-`L16`/`La16`/`Rgb16`/`Rgba16` from `color_type()` on the constructed decoder and
-is rejected before any output allocation; APNG is detected with `is_apng()`.
-For the whole-image baseline, `read_image` asserts that the supplied buffer
-length equals `total_bytes()` and panics on mismatch. That size uses the decoder's
-native color type — three bytes per pixel for `Rgb8`, not four. A staged path must
-likewise size native rows/scratch from the decoder's representation and account
-for RGBA conversion separately; it need not retain a second full-image buffer.
-RGBA input may reuse its validated output directly. Use the Phase 0 worker/reader
-path rather than calling whole-image `read_image` on the runtime thread after
-chunked reads.
+The pinned `PngDecoder::with_limits` installs dimension/allocation limits before
+reader construction and uses `png::Transformations::EXPAND`: palette/tRNS and
+low-bit grayscale expand. `color_type()` still reports `L16`, `La16`, `Rgb16` or
+`Rgba16` for 16-bit input, refused before output allocation. `is_apng()` detects
+APNG. Size native rows/scratch by the native
+color type and account RGBA conversion separately; RGB uses three bytes/pixel.
+The whole-image `read_image` asserts buffer length equals native `total_bytes()`;
+use the Phase 0 worker/row reader rather than that call on the runtime thread.
 
 | Resource | Bound and accounting (detailed grants/ownership in Phase 0) |
 | --- | --- |
@@ -391,34 +288,19 @@ asymmetry is deliberate: `clear` and `rect` take scalars and are bounded
 adequately by the deadline, while a rejected sprite may already have cost two
 option-table inspections, so its refusals need their own ceiling.
 
-The encoded cap includes 1 MiB of headroom above the 16 MiB RGBA8 maximum for
-scanline filters, compression framing, and chunks. The pinned encoder produced
-a valid 2048x2048 RGBA PNG of 16,780,612 bytes in the review probe, exceeding
-16 MiB by 3,396 bytes. Both that file and two such files fit the revised 17/34
-MiB allowances. Add an incompressible boundary fixture so this case stays covered.
+The 17 MiB encoded cap leaves framing/metadata headroom above 16 MiB RGBA.
+The independently generated 2048x2048 incompressible fixture is 16,780,612 bytes,
+3,396 above 16 MiB; two fit the 34 MiB staging allowance. Dimensions alone never
+guarantee acceptance: metadata or inefficient encoding can exceed the encoded cap.
 
-Encoded size remains an independent restriction: arbitrary metadata, chunk
-fragmentation, or inefficient encoding can exceed 17 MiB even within 2048x2048.
-Document both limits; do not promise that every PNG within the dimension limit
-fits. The aggregate staging allowance accommodates two files at the encoded cap,
-or more smaller files. It limits concurrent storage, not lifetime throughput:
-completed stages release capacity for subsequent requests. A bounded waiting
-queue must distinguish temporary capacity pressure from an impossible request.
-Admission/reservation must let at least one active job reach completion; partial
-buffers from several jobs must not consume all staging capacity and leave every
-job waiting for more. Include that case when measuring queue fairness.
-
-Check dimensions/products before output allocation. Bound each read by the
-remaining file/staging allowance plus the overflow probe, so a failing read cannot
-allocate past the service's storage budget. Check retained
-capacity before decoding, reserve work before performing it, and
-release all temporary buffers on failure. Avoid cloning RGBA buffers for each
-command or upload. Identify encoded storage, decoder workspace, conversion
-scratch, retained CPU storage, and GPU storage separately in the implementation.
-These are storage bounds and scheduling budgets, not measured latency
-guarantees. The former 34 MiB encoded/128 MiB decoded cumulative init-work limits
-are superseded by the Phase 0 staged-processing, scratch-reservation and
-catch-up contracts.
+Staging bounds concurrent ownership, not lifetime throughput. Reserve buffers
+before work, check actual reads plus the overflow probe, and release temporary
+storage on failure. The FIFO must let an active job complete rather than deadlock
+on several partial buffers. Insufficient retained/pinned capacity fails a job;
+ordinary slice exhaustion yields. Keep encoded, decoder/scratch, retained CPU and
+GPU accounting distinct; avoid per-command/upload pixel copies. The former
+34 MiB encoded/128 MiB decoded cumulative init-work limits were replaced by
+Phase 0's staged grants.
 
 Invalid arguments, wrong phases and admission/path-resolution errors are
 catchable. After admission, I/O/format/unsupported/limit/capacity errors become
@@ -427,17 +309,12 @@ yields. API-attempt abuse and callback deadlines remain latched outside protecte
 calls. Worker panic/disconnect and invariant faults stop the session through the
 runtime service-fault path. Use the exact Phase 0 classifications/status schema.
 
-Work between yield/cancellation boundaries is not preempted by VM interrupts.
-Keep protected script cancellation and independently bound adversarial decoder
-fixtures with a 10-second child-process watchdog. Never present an image allocation setting as a total process or GPU
-memory guarantee: the decoder's `max_alloc` is best-effort, and driver/allocator
-overhead is outside these counters. It is weaker than it looks. `max_alloc`
-becomes `png::Limits { bytes }`, which in png 0.17.16 reserves roughly one
-output line plus a little metadata, explicitly excludes caller-supplied buffers,
-and is documented as best-effort. The effective bounds against a hostile file
-are therefore the engine's own encoded-byte cap and the `max_image_width`/
-`max_image_height` header check, not `max_alloc`. See the
-[image 0.24.9 limit contract](https://docs.rs/image/0.24.9/image/io/struct.Limits.html).
+VM interrupts cannot preempt decoder work. Adversarial fixtures need independent
+10-second child watchdogs. `max_alloc` is best-effort: png 0.17.16 accounts roughly
+one output line plus some metadata and excludes caller buffers. Engine encoded-byte
+and early dimension checks supply the effective file bounds; neither these nor
+[image's allocation limit](https://docs.rs/image/0.24.9/image/io/struct.Limits.html)
+bounds total process memory or driver overhead.
 
 ## Luau API and drawing semantics
 
@@ -453,7 +330,7 @@ are therefore the engine's own encoded-byte cap and the `max_image_width`/
 refuse explicitly. `ctx.draw` still exists only in draw. Top-level modules
 receive no context. Neither handles nor metadata tables expose engine internals.
 
-`size` and `sprite` reject a handle whose session is not this host's as an
+`status`, `size`, `unload` and `sprite` reject a foreign-session handle as an
 ordinary catchable error, mirroring the existing `foreign entity handle`
 behavior in the world bindings. This is a binding-level check, separate from
 the renderer's later validation of copied commands against a live store. Only
@@ -477,10 +354,8 @@ ctx.draw.sprite(character, x, y, {
 ```
 
 - The 256-call `ctx.assets` budget is per callback, so a `size` query inside a
-  per-tile draw loop will exhaust it on any real room. Dimensions are frozen
-  once an image is ready; the sample must read them once and keep them, and the authoring
-  documentation must say so rather than leaving authors to discover the ceiling
-  as a fault.
+  per-tile draw loop can exhaust it. Dimensions are frozen once validated;
+  the sample reads them once and keeps them, as the authoring README documents.
 - Coordinates are top-left screen pixels, positive x right and positive y down,
   matching rectangles. Source coordinates are image pixels, never tile indices.
   Source rectangles are half-open; integer x/y are nonnegative, integer
@@ -513,7 +388,7 @@ ctx.draw.sprite(character, x, y, {
   or latched budget failure discards the entire pending frame and clears the
   published list. Every valid sprite participates in the existing command cap.
 
-Add a `DrawCommand::Sprite` variant with an `ImageId`, normalized explicit
+`DrawCommand::Sprite` is a variant with an `ImageId`, normalized explicit
 source rectangle, destination rectangle, flips, and RGBA tint. Keep source
 coordinates integer-valued until renderer conversion. Scalar owned data can
 remain `Copy`; no Macroquad or mlua types enter this enum.
@@ -525,7 +400,7 @@ upload, render, and retirement operations as frozen in Phase 0. This replaces
 the earlier single prepare-before-play transaction. The behavior is:
 
 1. Attach a live session to a retired renderer and admit completed CPU images
-   as they arrive, including during play. Lazily create missing
+   as they arrive, including during play. Attaching retires the previous session first. Lazily create missing
    pool slots once through `Texture2D::from_rgba8`; resize/repopulate existing
    slots through the scoped adapter below. New pool slots start as transparent
    1x1 images; allocate destination storage, then transfer bounded RGBA row bands
@@ -568,7 +443,8 @@ the earlier single prepare-before-play transaction. The behavior is:
    invariant faults and backend process failures.
 6. Retire only after queued work is submitted/discarded, on the owning graphics
    thread with its context still alive. Invalidate the session mapping and
-   shrink every used slot to transparent 1x1 RGBA8. Retain those cleared slots
+   shrink every used slot to transparent 1x1 RGBA8. Track cleared contents
+   separately from size: a populated 1x1 slot still needs clearing. Retain cleared slots
    for the next session; retirement is idempotent. Do not allow a new
    session to inherit any old `ImageId` mapping or image content.
 
@@ -591,7 +467,7 @@ region bounds, row alignment and exact checked RGBA8 lengths before these calls;
 reapply nearest filtering and no mipmaps. The pinned Windows implementation
 updates the existing texture record's dimensions, which Macroquad then reads
 for size and source UV calculation. Phase 0 verified that path behaviorally;
-Phase 3 repeats the checks through the actual shared renderer.
+Phase 3 repeated the checks through the production renderer.
 
 Document the adapter's unsafe invariants: a live context on its owning thread,
 exclusive short-lived access, no retained backend references, and no other
@@ -618,7 +494,8 @@ the Game error screen as today before readback. Only then retire the session;
 the exiting Player may also drop the renderer while the context is alive. Do
 not clear/repopulate slots between queueing the final frame and its readback,
 or render again from stopped assets to save it. Interactive Escape/window-close
-and fault paths must likewise retire queued work and image contents safely.
+and fault paths retire safely too. Interactive faults retire after presentation
+while the error screen remains open; capture retirement follows readback.
 
 Macroquad texture creation returns a texture, not a recoverable allocation
 result. Do not promise containment of driver OOM, context loss, or backend
@@ -645,7 +522,7 @@ behavior or pixels. Keep changes as separate logical slices.
 
 | Phase | Work and primary files | Exit / stop gate |
 | --- | --- | --- |
-| 0. Contract and feasibility — complete | `examples/png_sprite_probe.rs`, fixture/watchdog tools, and `PNG_SPRITE_PHASE0.md`. | Contracts frozen; exact CPU/GPU pixels, metadata/interlace worker behavior, bounded upload passes, 100 pool cycles, capture lifetime and negative controls passed on the recorded Windows stack. Production integration remains later work. |
+| 0. Contract and feasibility — complete | `examples/png_sprite_probe.rs`, fixture/watchdog tools, and `PNG_SPRITE_PHASE0.md`. | Contracts frozen; exact CPU/GPU pixels, metadata/interlace worker behavior, bounded upload passes, 100 pool cycles, capture lifetime and negative controls passed on the recorded Windows stack. Production integration followed in Phases 1-4. |
 | 1. Headless asset service — complete | `src/assets.rs` and supporting modules; rooted-read extraction; `Cargo.toml`, `src/lib.rs`; `tests/assets.rs`. Implement admitted jobs, stage advancement, bounds, cache/identity, decode and teardown. | Identical decoded pixels through bounded service passes without VM/GPU. Rooting, coalescing, rollback, cancellation-safe teardown, queue fairness, storage pressure and stale/foreign IDs pass. Existing filesystem regressions remain intact. |
 | 2. Luau and runtime integration — complete | `src/scripting/assets.rs`, `src/scripting/drawing.rs`, `src/scripting.rs`, `src/runtime.rs`, `src/drawing.rs`; runtime/test drivers. | Init/update requests work in ScriptHost and GameRuntime; callbacks continue while loading. Status/error/readiness, eviction utilities, canonical wrappers, publication, budgets and cleanup obey frozen contracts. Preload/completion-trace tests use the same service path. No GPU dependency enters scripting-only builds. |
 | 3. Shared renderer and Player — complete | `src/rendering.rs`, `src/bin/player.rs`, readiness acknowledgements and fault integration; actual Player captures/input probes. | Bounded upload passes publish only complete images; rendering never forces loading. One admission/upload sequence per uncached image, explicit eviction/reload, queued-frame pinning, mixed ordering, shutdown captures and repeated-session pool bounds pass. Pending work is cleaned on faults/exit. Existing rectangle/startup/native captures pass. |
@@ -719,8 +596,8 @@ implementations cannot pass by reproducing their own conversion or crop logic.
   coordinates. Test transparent texels over colored backgrounds, half-alpha pixels
   combined with tint alpha, nonwhite RGB tint, 1x/2x scales, offscreen clipping,
   image switches, intervening rectangles/clears, and an empty next frame. Use
-  exact opaque/nearest samples and a stated small rounding tolerance for blend
-  channels, not broad whole-image similarity.
+  exact untinted opaque/nearest samples and the recorded one-byte tolerance
+  for tinted/blended channels, not broad whole-image similarity.
 - **Loading and retirement:** Count reads/decodes/uploads in test-owned
   instrumentation to prove draw traversal never triggers them and completed
   images are not read/decoded/uploaded again without an explicit residency action.
@@ -768,46 +645,22 @@ sample as compatibility coverage.
 
 ## Required checks and completion record
 
-For implementation, run the Rust and scripting suites from [AGENTS.md](../../AGENTS.md),
-including release headless tests and the lifecycle example. Add these commands
-once the new features and `assets` test target exist:
+The [development guide](../DEVELOPMENT.md) owns the Rust, assets-only,
+scripting-only, graphics-only, native/SDK, release and GPU/input commands. Apply
+all affected configurations; preserve independent watchdogs. Check feature graphs
+when changing dependencies and rerun the distance benchmark/protected-call probes
+when deadline enforcement changes.
 
-```text
-cargo test --workspace --no-default-features --features assets
-cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
-cargo check --workspace --all-targets --no-default-features --features graphics
-cargo clippy --workspace --all-targets --no-default-features --features graphics -- -D warnings
-cargo test --release --no-default-features --features scripting --test assets --test drawing --test runtime
-cargo test --test player_capture -- --ignored
-cargo test --test plugins -- --ignored
-cargo build --release --bin protogine-player
-pwsh -NoProfile -File tests/player_input.ps1
-```
+Use both staged and preloaded `script_host` drivers against
+`examples/games/sprites`; confirm both images complete in the trace. The default
+three-tick lifecycle run does not prove asset completion. Capture, live input and
+headless replay prove different boundaries.
 
-Inspect `cargo tree --no-default-features --features scripting` and the corresponding
-`assets` and `graphics` graphs to verify the feature boundaries above. Run the
-native/SDK matrix in AGENTS.md when modifying native teardown integration; keep
-the independent watchdogs. If exact deadline enforcement changes, rerun the
-distance benchmark and its protected-call regressions. Add all newly required
-feature/test commands to AGENTS.md when those features are implemented.
-
-The current `script_host` example runs only three ticks; that is not a sufficient
-completion check for staged assets. Phase 2 must add a bounded preload/drain or
-completion-trace driver and document its actual command. Keep the existing
-lifecycle example checks, and never report a loading sample as verified merely
-because the three-tick process exited successfully.
-
-Record each phase's changed files, commands and results, behavioral observations,
-capture paths/dimensions/ticks, platform/graphics stack, and unresolved gaps.
-Distinguish a missing GPU context from a failed rendering test. No test run or
-image generated during implementation may be described as verified here before
-it is actually inspected. Keep performance claims limited to measured evidence.
-
-Completion requires all four delivery phases after feasibility, the full
-applicable check matrix, copied-game and interactive evidence, documentation
-matching final APIs/limits, and no unresolved correctness gate. Archive the plan
-as completed only then. Until implementation starts, documentation changes need
-only content, link, and diff review; this draft does not require running Rust tests.
+The records below retain actual commands, source changes, measurements, platform,
+negative controls and verification limits. Completion required all four delivery
+phases after feasibility, applicable checks, copied-game/interaction evidence and
+no open correctness gate. Documentation-only edits require content, link and diff
+review; they do not refresh historical execution evidence.
 
 ## Phase 1 completion record
 
@@ -1056,6 +909,8 @@ the same reason, since deadline enforcement did not change.
 
 ### Unresolved gaps for later phases
 
+Historical handoff at this phase's close; subsequent records track resolution.
+
 - No Luau API exists yet. `ctx.assets`, the canonical VM wrappers, the attempt
   budget, phase checks and terminal status retained on handles are Phase 2, and
   `roll_back` is unused until then.
@@ -1154,11 +1009,9 @@ releases it without invoking scripts. Worker loss and broken invariants become
 session faults through the existing fault path, while a failed job stays
 inspectable.
 
-Every `ctx.assets` operation refuses a foreign handle catchably. The ADR's Luau
-API section names only `size` and `sprite`, while the Phase 0 record says "every
-asset operation checks session identity"; the two disagree and the broader Phase 0
-reading is implemented, because a handle from another store is equally meaningless
-to `status` and `unload`.
+Every handle-taking asset operation refuses a foreign handle catchably. Phase 2
+resolved the earlier summary's omission of `status`/`unload` in favor of Phase 0's
+universal session check; the API summary above now states the implemented rule.
 
 ### Contract refinements made during implementation
 
@@ -1351,6 +1204,8 @@ Two review observations were checked and deliberately left as they are.
   and unchanged.
 
 ### Unresolved gaps for later phases
+
+Historical handoff at this phase's close; subsequent records track resolution.
 
 - No renderer exists, so `GpuResidency` is still always `unavailable`,
   `UploadAck` still has no producer, and the Player draws no sprite. Nothing here
@@ -1607,6 +1462,8 @@ unchanged.
 
 ### Unresolved gaps
 
+Historical Phase 3 handoff; Phase 4 supplies the authoring sample below.
+
 - The distance benchmark was not rerun: deadline enforcement is unchanged.
 - Cross-GPU pixel equality is not established. Every pixel and pool observation
   here is from one Windows NVIDIA OpenGL stack, as in Phase 0.
@@ -1849,22 +1706,18 @@ the renderer nor deadline enforcement changed in this phase.
 - In a release Player the loading state lasts a few frames rather than seconds,
   because both images are small. The long staged trace above is from a debug
   build. Neither is a latency guarantee.
-- The live probe runs the committed sample with one added statement, a position
-  log at the end of update, so it is not literally the shipped file. The
-  insertion is inert by construction rather than by inspection: it reads locals
-  that update has already computed, and reading them has no observable effect,
-  so nothing it does can change `x`, `y`, `steps` or `facing`. Its only costs
-  are two utility calls against a 128-call budget, one interpolation against the
-  callback deadline, and log volume. The script also fails if its anchor line
-  moves, so a refactor cannot leave it silently probing something else.
+- The live probe adds one end-of-update position log, reading `x`, `y`, `steps`
+  and `facing` without mutating them. It adds interpolation/logging cost against
+  the callback deadline and log budget; timing is therefore instrumented.
+  The runner fails if its insertion anchor no longer matches the sample.
 - No test asserts a fractional tint alpha at the pixel level, and none publishes
   one at the command level either: `script_assets` covers fractional red, green
   and blue and refuses out-of-range alpha, but every accepted tint it publishes
   has `a = 1`. The removed `examples/games/loading/` used `a = 0.35` and was
-  never captured, so nothing regressed with it. Alpha is the same array element
-  as the three covered channels, which is why this is a note and not a hole.
-- No screenshot is committed. The captures are reproducible from the recorded
-  commands, as in Phase 3.
+  never captured. Fractional tint alpha remains an explicit command/pixel
+  coverage gap; coverage of the other channels does not prove it.
+- No Phase 4 screenshot is committed. Its captures are reproducible from the
+  recorded commands, as in Phase 3; Phase 0 retains its separate reference image.
 
 ## Post-completion review corrections
 
@@ -1894,7 +1747,7 @@ the renderer nor deadline enforcement changed in this phase.
   last CPU pin after a store disappears midway through a larger upload.
 
 Verification: the required baseline, assets-only, graphics-only and scripting
-check matrices in `AGENTS.md` passed, including the release Player build and
+check matrices (now centralized in [DEVELOPMENT](../DEVELOPMENT.md)) passed, including the release Player build and
 release headless tests. The default workspace test initially failed because the
 sandbox could not execute clang; rerunning with compiler access passed. Both
 staged and preloaded sample drivers completed both images. The GPU harness
@@ -1936,7 +1789,7 @@ color type. Its later `set_limits` does not update the underlying PNG reader's
 allocation limit, which is why this plan requires limits at construction. The
 png 0.17.16 source shows that limit reserving roughly one output line, excluding
 caller buffers by its own documentation. These source observations were followed
-by the Phase 0 adversarial fixtures; Phase 1 still needs service-level coverage.
+by Phase 0 adversarial fixtures and Phase 1 service-level coverage.
 
 The locally resolved Macroquad 0.4.16 source exposes source rectangles,
 destination size and flips in `DrawTextureParams`; RGBA8 texture upload takes
@@ -1951,7 +1804,7 @@ Batcher entries survive ordinary texture collection. Miniquad 0.4.11's
 remove that record, while `texture_resize` updates the existing record in place.
 Those observations motivate a context-lifetime pool with cleared contents at
 session retirement. Phase 0 subsequently verified resize/reuse and registration
-counts; Phase 3 must verify production integration. The earlier plan correction
+counts; Phase 3 later verified production integration. The earlier plan correction
 itself performed no GPU probe.
 Texture destruction uses the live graphics context. The [texture API documentation](https://docs.rs/macroquad/0.4.16/macroquad/texture/struct.Texture2D.html)
 also documents RGBA8 upload and explicit filtering. Source support alone does

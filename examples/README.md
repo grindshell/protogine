@@ -23,10 +23,8 @@ which reads the sheet with the Python standard library alone:
 python tools/sample_sprites.py
 ```
 
-Regenerating rewrites both committed files identically, so the crop's
-provenance is a statement that can be rechecked rather than a memory. The two
-encodings also differ deliberately: the tileset stays 1-bit indexed and the
-character sheet is 8-bit RGBA, so the sample loads both PNG color types.
+Regeneration rewrites both committed files identically. The tileset remains
+1-bit indexed and the character sheet 8-bit RGBA, exercising both PNG color types.
 
 To use different artwork, replace either PNG in a copied bundle and relaunch the
 same Player executable; no Rust rebuild is involved. The tileset needs only the

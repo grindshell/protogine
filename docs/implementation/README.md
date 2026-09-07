@@ -1,24 +1,26 @@
-# Implementation plans
+# Implementation records
 
-This directory contains accepted and completed implementation plans. Each plan
-records its status, design decisions, phase contracts, verification evidence,
-and deferred work.
-
-Commands and plain-text repository paths in these plans assume the repository
-root unless noted otherwise.
-
-## In progress
-
-No plan is currently in progress.
+Accepted decisions, phase contracts, delivery evidence and deferred scope live
+here. No plan is currently in progress. The [authoring README](../../README.md)
+describes current behavior; [AGENTS](../../AGENTS.md) owns contribution rules and
+[DEVELOPMENT](../DEVELOPMENT.md) owns current verification commands.
 
 ## Completed
 
-- [PNG_SPRITE_PLAN.md](PNG_SPRITE_PLAN.md) — Completed staged bundle-local PNG
-  loading, sprite drawing, headless asset support, shared rendering, and
-  script-controlled eviction. [Phase 0](PNG_SPRITE_PHASE0.md) froze the contracts
-  with CPU/GPU evidence; Phase 1 delivered the headless asset service, Phase 2
-  its Luau and runtime integration, Phase 3 the shared renderer and Player
-  integration, and Phase 4 the authoring sample and delivery evidence.
-- [SCRIPTING_C_API_PLAN.md](SCRIPTING_C_API_PLAN.md) — Completed Luau scripting and
-  native C plugin milestone for Windows MSVC x64: Phases 0–5, including Phase 1a,
-  with one post-completion amendment.
+| Record | Delivered scope |
+| --- | --- |
+| [ADR-001: Scripting and C API](SCRIPTING_C_API_PLAN.md) | Luau host, data/I/O, kernel/input, scripted Player and trusted C batch plugins; Phases 0-5 including 1a, Windows MSVC x64 |
+| [ADR-002: PNG assets and sprites](PNG_SPRITE_PLAN.md) | Staged bundle PNG service, Luau handles/eviction, shared renderer and authoring sample; Phases 0-4 |
+| [PNG/sprite Phase 0](PNG_SPRITE_PHASE0.md) | Frozen initial contracts and dependency/worker/GPU feasibility receipts supporting ADR-002 |
+
+Current contract summaries incorporate later corrections. Dated records retain
+historical versions, commands, test counts and measurements; later records close
+or supersede earlier phase gaps. They do not imply tests were rerun during a doc
+edit. Paths/commands assume the repository root unless noted; historical commands
+may reference retired fixtures such as `examples/games/loading/`, now replaced
+by `examples/games/sprites/`.
+
+When changing behavior, update the authoring contract and relevant decision
+record together. Keep commands in DEVELOPMENT; record only actual execution
+evidence in completion entries. Preserve artifact hashes, negative controls,
+platform limits and unresolved decisions when pruning.

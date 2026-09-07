@@ -1,35 +1,32 @@
 # ADR-001: Luau scripting and the native plugin API
 
-**Status:** D1-D8 accepted; Phases 0, 1, 1a, 2, 3, 4, and 5 complete on Windows MSVC.
-One post-completion amendment to the source-loading contract is recorded at the
-end of this document.
+**Status:** Complete on `x86_64-pc-windows-msvc`: D1-D8 and Phases 0-5,
+including Phase 1a. Later review corrections and source-loading amendments are
+recorded below.
 **Date:** 2026-09-05.
 **Decider:** Project owner.
 **Baseline:** `539659e` (Player, bundle discovery, built-in capture).
 
-This plan tracks the accepted architecture and its phased implementation. The
-implementation record below defines what exists; later API names, signatures,
-and contracts remain proposals until implemented and verified.
+This record retains accepted decisions, contracts and delivery evidence. The
+[README](../../README.md) describes the current authoring API; the
+[development guide](../DEVELOPMENT.md) owns current validation commands.
+Dated verification records describe their phase's state, dependencies, commands
+and measurements. Later records supersede earlier gaps; they are not fresh test
+results. PNG assets and shared rendering were delivered by [ADR-002](PNG_SPRITE_PLAN.md).
 
 ## Context and fixed requirements
 
-The Player currently discovers `game/main.luau` beside its executable, renders
-startup states, and supports unattended PNG capture. The shared library now also
-contains an optional headless Luau runtime with a kernel, velocity integration,
-and frame/input timing. The Player runs shipped scripts and owned drawing commands;
-native plugins initialize and shut down around the VM. Luau can invoke native
-batch computations through scoped, validated buffer calls.
+Protogine shares a kernel/runtime between the Player and future editor. Luau
+owns game behavior; trusted C plugins provide synchronous batch computation.
+The Player discovers `game/main.luau` beside its executable and supports capture.
+The runtime remains usable without graphics.
 
-Preserve the shared editor/Player kernel, primarily Luau-authored games, and a
-C-compatible native plugin interface. Use `hecs` 0.11.1 and `mlua` 0.12.1 with
-`luau-jit`; retain Macroquad 0.4.16 and Kira 0.12.4 for their respective services.
-Use `tot` 0.2.0 from its GitHub repository for structured game data and
-`libloading` 0.9.0 for runtime native-library loading. Save handling belongs to
-game scripts; general filesystem and data-conversion utilities may support it.
-The C API is initially a plugin interface into a running Protogine instance;
-embedding the whole engine into another application is a separate capability.
+Required technologies are hecs 0.11.1, mlua 0.12.1 with `luau-jit`, Macroquad
+0.4.16, tot 0.2.0 from GitHub, libloading 0.9.0 and Kira 0.12.4 for future audio.
+Save schemas, timing and migration belong to scripts. This C API is a plugin
+boundary; embedding the whole engine is separate scope.
 
-## Decisions to settle
+## Accepted decisions
 
 | ID | Status | First step | Alternative and consequence |
 | --- | --- | --- | --- |
@@ -42,12 +39,9 @@ embedding the whole engine into another application is a separate capability.
 | D7 | Accepted 2026-09-05 | Scripts own saves; engine may provide filesystem, tot parsing/formatting, and JSON/YAML/TOML export utilities | Engine-owned save schemas, slots, migrations, and save timing are outside the engine contract |
 | D8 | Accepted 2026-09-05 | Use `libloading` 0.9.0 for runtime C API plugins | The loader supplies library/symbol access; Protogine still defines ABI and lifetime rules |
 
-The accepted decisions establish the initial authoring model, native buffer
-scope, first target, distribution/restart approach, dependencies, and save
-ownership. Command buffers are retained as a future design option, not part of
-the first implementation. D3 is accepted and implementation is authorized.
-Finalize detailed callback signatures, ABI rules, and limits in each phase,
-recording evidence and resolving incompatibilities before advancing.
+Command buffers remain a future option requiring their own ordering and
+mutation contract. The completed phase records below freeze the callback,
+ABI and resource-limit details.
 
 The tot declaration and optional libloading dependency are implemented:
 
@@ -56,8 +50,8 @@ tot = { git = "https://github.com/totlang/tot", rev = "031226fdcd930421580161faf
 libloading = "=0.9.0"
 ```
 
-The tot revision matches the inspected GitHub HEAD and `v0.2.0` tag, verified
-with `git ls-remote`, and declares package version 0.2.0. The version constraint
+The tot revision matched GitHub HEAD and `v0.2.0` when verified on 2026-09-05
+with `git ls-remote`; its package declares version 0.2.0. The version constraint
 checks the package version, not a Git tag; `Cargo.lock` records the revision.
 `../tot` is a source reference for development, not the shipped dependency source.
 The `scripting` feature enables `tot/yaml` and `tot/toml`; the core remains free
@@ -65,7 +59,7 @@ of conversion dependencies. The TOML syntax above is for Cargo's own manifest;
 game manifests use tot. Historical verification records below retain their
 original dependency versions; the upgrade record follows Phase 1a.
 
-## Proposed ownership and dependency boundaries
+## Ownership and dependency boundaries
 
 ```mermaid
 flowchart TD
@@ -85,31 +79,25 @@ flowchart TD
 - `GameRuntime` owns a kernel, VM, plugin instances, lifecycle state, and clock.
   The Player owns window/input polling and rendering; the editor later drives
   the same runtime interface. Constructing or testing a runtime needs no window.
-- Start with modules in the existing library: `kernel`, `runtime`, `scripting`,
-  `plugins`, and renderer-independent draw command types. Add modules as needed
-  by each phase, rather than creating empty subsystems upfront.
-- Keep `mlua` behind a `scripting` feature and the loader behind `native-plugins`.
-  The Player enables scripting when it can actually run games. The no-graphics
-  runtime test configuration must exercise real Luau and kernel code.
-- Rust owns `hecs::World`. Lua references, plugin pointers, and graphics handles
-  are not kernel component storage. A later standalone plugin API crate may
-  contain only ABI definitions, without dependencies on the engine or VM.
+- Kernel/runtime/scripting/plugins and owned draw types live in the shared
+  library. Keep `mlua` behind `scripting`, the loader behind `native-plugins`,
+  and graphics independent of scripting. Player enables all three.
+- Rust owns `hecs::World`; Lua references, plugin pointers and graphics handles
+  are not kernel component storage. The separate SDK contains only ABI
+  definitions. Add further splits only when needed.
 - Run game callbacks, engine systems, and native calls on the runtime thread.
   Never keep a `hecs` query/reference or a Rust dynamic borrow alive across a
   call into game code.
 
 ## Luau authoring contract
 
-The entry module runs once and returns a table. Optional fields `init`, `update`,
-`draw`, and `shutdown` must be functions when present; other field names are
-reserved until the table schema is defined. Top-level code may define state and
-require modules, but cannot mutate the world or draw.
-
-Illustrative API, not executable against the current Player:
+`main.luau` runs once and returns exactly one plain table with optional
+`init`, `update`, `draw` and `shutdown` functions. Unknown fields, metatables
+and callback return values are refused. Top-level code may define state and
+require modules, but receives no context. A minimal runnable game:
 
 ```luau
 local x = 16
-
 return {
     init = function(ctx)
         ctx.log("Game started")
@@ -124,262 +112,173 @@ return {
 }
 ```
 
-| Phase | Callable operations | Result |
-| --- | --- | --- |
-| Module loading | Project-local `require`, standard Luau utilities | Validated callback table |
-| `init(ctx)` | Log, engine state creation, native calls, enabled data/filesystem utilities | Called once after all required plugins initialize |
-| `update(ctx, dt)` | Input reads, world reads/writes, native calls, enabled data/filesystem utilities | One simulation tick |
-| Engine systems | Rust systems over hecs | Complete the tick after the game callback |
-| `draw(ctx, alpha)` | Read world/input, append draw commands, log | One owned draw list; no world mutation |
-| `shutdown(ctx)` | Bounded cleanup/logging and enabled data/filesystem utilities | Called once after successful init on orderly shutdown |
+Scoped context functions expire after their callback; returned owned values and
+opaque handles may be retained. No yielding or reentrant game callbacks. Only
+init/update mutate the world or invoke native computation. Draw reads state and
+publishes commands; shutdown performs bounded cleanup after successful init on
+normal exit. [Phase 1a](#phase-1a-implementation-contract) defines data/I/O phases;
+[ADR-002](PNG_SPRITE_PLAN.md#luau-api-and-drawing-semantics) adds asset operations.
 
-Context objects are valid only for their callback. Retaining one in a Lua table
-must yield an ordinary script error when used later, never a stale reference.
-Use safe scoped bindings or checked callback-generation tokens; prove the chosen
-mechanism before publishing the API. Callbacks may not yield or reenter another
-game callback in this first version.
+World writes are immediate, and engine systems follow a successful update.
+Reads/enumeration return owned snapshots; no ECS/dynamic borrow crosses VM work.
+Validate session and generation for opaque handles, and roll back a spawn whose
+wrapper publication fails. Never expose pointers or encode full 64-bit entity
+handles in Lua numbers. The private cache's exact numeric key is an internal
+lookup, not a public handle. See [Phase 2](#phase-2-implementation-contract).
 
-World operations borrow the kernel briefly and release it before returning to
-Luau. Reads return owned values; enumeration returns a snapshot of opaque entity
-handles, not a borrowed ECS iterator. Writes during init/update are immediate and
-visible to later reads in the same callback. Engine systems run afterward.
-
-World-mutating calls from `draw` fail. Scripts must also avoid advancing their
-own gameplay state in `draw`; the engine cannot enforce purity of Lua upvalues.
-Draw commands contain owned data and are cleared each frame. Validate numeric
-inputs and command counts before they reach graphics APIs.
-
-Entity handles are engine-owned userdata with session identity and generation
-validation. Never expose a raw entity pointer or encode a 64-bit handle in a Lua
-floating-point number. A stale handle, a handle from a stopped session, or a
-despawned entity produces a script error. The initial component API should expose
-only concrete types needed by the sample game, rather than arbitrary Rust types.
+Draw cannot mutate the world; scripts must also keep gameplay upvalue changes
+in update. Validate numbers before graphics conversion, bound commands and publish
+only successful draws. Fault/stop clears the list; rejected alpha preserves it.
 
 ### Time, input, and snapshots
 
-D3 selects a fixed-step simulation, covering gameplay as well as any future
-physics. `update(ctx, dt)` advances one tick with `dt = 1/60`; Rust engine systems
-then complete that tick. `draw(ctx, alpha)` runs once per presented frame, at the
-rate allowed by rendering, VSync, or a frame cap. The simulation rate does not
-cap drawing at 60 FPS.
+`update(ctx, dt)` and subsequent kernel systems advance `1/60` second per tick.
+Each presentation frame samples input, runs zero or more ticks, then draws once.
+At 120 FPS there are roughly two draws per tick; at 30 FPS, two ticks per draw.
+Ticks are simulation steps, not threads or precisely spaced wall-clock events.
 
-For example, at a steady 120 FPS there are roughly two draws per simulation tick;
-at 30 FPS there are roughly two simulation ticks before each draw. Each frame
-polls input, runs zero or more due ticks, then draws once. Ticks advance fixed
-amounts of simulation time; they are not separate threads or a guarantee of
-exactly spaced wall-clock execution. The overload policy below bounds catch-up.
-
-This corresponds to the fixed-update timing concept in Godot/Unity. In this
-initial proposal, Protogine's `update` is the fixed gameplay callback; there is
-no additional variable-rate gameplay update callback. Keep gameplay changes in
-the tick and use interpolation between stored simulation states for smooth
-rendering. `alpha` is the fractional progress between ticks, not elapsed seconds.
-Providing alpha alone does not store or interpolate those states automatically.
-A later frame-update hook for camera/UI/presentation state remains possible,
-with its mutation permissions and execution order defined separately.
-
-- Fixed tick duration: `1/60` second. Interactive frames accumulate at most
-  250 ms of wall time and execute at most five ticks. On overload, discard whole
-  excess ticks and retain only the fractional remainder; record overloads.
-- Held input is sampled for each tick. Press/release edges wait for the next
-  tick, are consumed once, and are not repeated across catch-up ticks.
-- Pass the remaining fractional tick as draw interpolation `alpha`. Specify
-  order explicitly whenever behavior depends on entity traversal; hecs query
-  order is not a gameplay ordering contract.
-- For game capture, propose exactly one tick per captured-mode render frame,
-  neutral input, `alpha = 0`, and a documented fixed engine RNG seed. Frame N
-  observes N completed ticks after init. Existing startup screens still perform
-  no simulation. Input replays and seed overrides can follow separately.
-- A selected capture frame alone is not a deterministic simulation. Verify the
-  clock/input/RNG rules with headless state assertions and repeated screenshots.
-  Do not promise identical floating-point or raster results across platforms.
+- Accumulate at most 250 ms/frame and run at most five ticks. Discard excess
+  whole ticks, retain the fractional alpha and report overloads/clamped time.
+- Held state uses the latest sample. Press/release edges wait through zero-tick
+  frames, reach only the first catch-up tick and then clear; draw sees its own
+  sampled edges. [Phase 2](#phase-2-implementation-contract) specifies explicit
+  taps, exact stepping and rounding tolerance.
+- `draw(ctx, alpha)` receives fractional tick progress in `[0,1)`. It stores or
+  interpolates nothing automatically. Entity traversal order must be explicit;
+  hecs query order is not a gameplay contract. A variable-rate presentation hook
+  remains separate scope with its own ordering and mutation rules.
+- Capture seeds Luau `math.random` with 0 before module load, uses neutral input
+  and performs one tick then draw(alpha=0) per rendered frame. Frame N observes
+  N completed ticks; startup screens run no simulation. Native state is not
+  seeded. [ADR-002](PNG_SPRITE_PHASE0.md#deterministic-validation) adds asset draining.
+- Verify state with headless replays and repeated same-stack captures. Selected
+  frame numbers alone do not establish determinism; cross-platform float/RNG
+  or pixel equality is not promised.
 
 ### Modules, resource access, and failures
 
-- Keep `game/main.luau` as the entry point and ship source in this milestone.
-  Load text chunks with bundle-relative source names for tracebacks. Do not
-  accept arbitrary precompiled bytecode as interchangeable game data.
-- Provide project-local `require` through mlua's Luau resolver API. Propose
-  `require("./module")` relative to the importing module, `.luau` files only,
-  canonical-path caching once per VM, and an explicit error for cyclic imports.
-  Define path normalization/case rules and test symlink/junction escape, absolute
-  paths, parent traversal, missing modules, and failed-module cache cleanup.
-- Keep an explicit standard-library/host-API allowlist. Provide deliberate
-  filesystem utilities as described below; do not expose process execution,
-  network, raw VM pointers, or script-selected DLL loading in this milestone.
-- Treat the game as one trust domain. Luau sandboxing protects its environment;
-  an enabled native plugin executes trusted code in the process. VM interruption
-  cannot stop a native function that does not return.
-- Before execution, specify and test VM memory, callback deadline, import depth,
-  draw-command, and buffer limits. Starting values to evaluate: 64 MiB VM heap,
-  1 second for load/init/shutdown, 100 ms per update/draw, import depth 64,
-  10,000 draw commands/frame, and 16 MiB combined native buffers/call. These are
-  development guardrails to validate, not measured performance targets.
-- Phase 1 resolves allocation-error behavior: Luau may catch allocation errors
-  while the VM heap cap remains enforced. Those errors are recoverable; uncaught
-  allocation errors fault the session. Host-detected deadline/source/import/log
-  failures latch a fault outside Lua. Do not infer a latched allocation-failure
-  signal from mlua's public memory-limit API; it supplies no such notification.
-- An uncaught Lua exception, invalid callback result, or deadline faults the
-  session. Recoverable API errors may be handled by game code; host-detected
-  deadline, resource-limit, or native contract failures latch a fault outside
-  Lua so `pcall` cannot clear it. Stop updates and show source/callback context;
-  do not retry each frame.
-  Do not claim transactional rollback: immediate world writes and Lua upvalues
-  may already have changed. Discard the failed session before running it again.
-- Init failure skips script shutdown and tears down initialized host resources.
-  After a runtime fault, skip further game callbacks; normal stop calls shutdown
-  once under its deadline. Cleanup failure must not prevent host-owned teardown.
+Ship UTF-8 `.luau` source with bundle-relative traceback names. Require uses
+extensionless paths relative to the importer, canonical-file caching once per VM,
+and errors for cycles, failed imports, ambiguity and root escapes. Failed results
+are not cached. The [Phase 0/1 record](#implementation-record-phases-0-and-1)
+freezes resolver/allowlist/limit details; the [BOM amendment](#leading-byte-order-marks-in-module-source-2026-09-07)
+accepts one leading encoding signature after checking the on-disk source size.
+
+The game is one trust domain. Scripts have an explicit library/API allowlist
+without process execution, network, raw pointers or script-selected DLL loading;
+native plugins execute trusted in-process code. VM interrupts cannot preempt
+I/O, source/JIT compilation or native functions.
+
+Defaults are 64 MiB VM heap, 1 s for load/init/shutdown, 100 ms for update/draw,
+256 KiB/source, 256 compiled modules, 64 active imports, and 4 KiB/message plus
+64 KiB/callback logging. Drawing and native buffers have separate limits.
+These are guardrails, not performance targets or total process-memory bounds.
+
+Caught VM allocation errors remain recoverable under the heap cap; mlua provides
+no host-latched allocation-failure notification. Host-detected deadlines and
+resource/native-contract faults latch outside Luau. Uncaught exceptions and
+invalid callback results also fault the session. Check every VM interrupt and
+host boundary exactly; protected calls cannot clear cancellation.
+
+Faults stop callbacks and skip script shutdown, but release host resources and
+native instances. Normal stop runs shutdown once under its deadline. Preserve
+primary errors through cleanup. Earlier world writes/upvalue changes are not
+transactionally rolled back; restart discards the failed session.
 
 ### Structured data, filesystem utilities, and script-owned saves
 
-- Parse the optional `game/game.tot` manifest with the Rust tot library and
-  validate its versioned schema separately. Keep `game/main.luau` as the bundle
-  discovery marker; this manifest does not introduce a new required startup file.
-- Scripts decide what to save, the file layout and format, when to write, and
-  how to restore or migrate it. Do not add engine save slots, automatic ECS/VM
-  serialization, migration policy, or a special save lifecycle callback.
-- Propose general read/write/list/create-directory and atomic-replacement
-  helpers, plus tot parse/format and `tot-export` utilities for JSON, YAML, and
-  TOML. These are reusable data services, not an engine persistence framework.
-  A platform data-directory helper can supply a writable location without
-  choosing the game's save schema or naming rules.
-- Before exposing filesystem access, define path resolution, permitted roots,
-  byte limits, text/binary behavior, and I/O errors. Distinguish read-only bundle
-  data from writable locations; do not depend on the process working directory.
-  These host-access details are proposals, separate from script ownership of
-  saves. Synchronous I/O can stall a tick; scripts control when they use it.
-- Proposed access phases are init/update and orderly shutdown; draw performs no
-  filesystem writes. A game must not rely solely on shutdown to save: faults and
-  process termination can skip that callback. The engine does not save for it.
-- tot 0.2.0 exposes parse/format and JSON export, plus reusable YAML/TOML
-  converters behind its `yaml`/`toml` features. Use these library APIs rather
-  than copied adapters or CLI invocation. TOML export must explicitly select
-  `NullPolicy::Error`; its default omission policy violates the script contract.
-- Freeze the Luau value mapping before publishing the utilities. Preserve or
-  explicitly reject arbitrary-size integers, integer/float distinctions, null
-  versus absent values, and empty arrays versus objects. TOML cannot represent
-  null and has narrower integer limits; conversion errors or explicit lossy
-  options must be visible to the script. Do not silently claim all-format
-  round trips. File replacement failure must preserve the previous file, and
-  filesystem helpers must report failures rather than claiming a save succeeded.
+`game/game.tot` is an optional versioned native manifest; `main.luau` remains
+the discovery marker. Scripts own save schema, layout, format, timing, restoration
+and migration. The engine provides scoped tot parse/format/export and general
+rooted read/list/mkdir/atomic-write operations, with no save lifecycle or automatic
+ECS/VM serialization. Player data-directory selection remains future work.
 
-## C plugin API: proposed first contract
+[Phase 1a](#phase-1a-implementation-contract) defines roots, phases, value mappings,
+byte/operation bounds and replacement behavior. Preserve integer/float, null/absent
+and array/object distinctions; refuse unsupported conversions without silent loss.
+Use tot's library JSON/YAML/TOML exporters and TOML `NullPolicy::Error`, not CLI
+invocation or copied adapters. Synchronous I/O can stall a tick; scripts choose
+when to save and cannot rely solely on shutdown, which faults may skip.
+
+## C plugin API
 
 ### Discovery and lifetime
 
-When native plugins are introduced, add an optional, versioned `game/game.tot`
-manifest with an explicit ordered list of plugin IDs and bundle-relative library
-paths. A game without a manifest remains a script-only bundle. A declared plugin
-is required: missing, duplicate, incompatible, or failed entries fail startup.
-Do not scan directories and load every DLL encountered.
+The optional `game/game.tot` declares an ordered list of required plugin IDs and
+bundle-relative DLLs. No scanning or hot reload. Resolve/deduplicate all primary
+paths, load/query/validate every descriptor, then initialize in manifest order
+before VM creation. Failed init cleans itself up and publishes no instance.
 
-Use `libloading` 0.9.0 behind the loader module. Its library/symbol lifetime
-support does not replace Protogine's descriptor, instance, and teardown rules.
+[Phase 4](#implementation-record-phase-4) freezes ABI 1, trusted loading and
+Windows dependency lookup. An absolute primary path alone does not control
+helper DLL lookup. `libloading` supplies library/symbol access; the engine owns
+descriptor, instance and teardown rules.
 
-Resolve libraries from the canonical bundle root. Use absolute library paths and
-target-specific safe dependency lookup. Absolute primary-library paths alone do
-not establish dependency DLL lookup policy; verify a packaged dependency fixture
-on Windows before declaring portable export support.
-
-Load and validate all declarations before initializing them in manifest order.
-Initialize the VM only after required plugins are ready. On partial startup
-failure, shut down successfully initialized instances in reverse order. A failed
-plugin init must clean its own allocations and publish no usable instance.
-
-On normal teardown: stop game callbacks, run bounded script shutdown, destroy
-script references and the VM while libraries remain loaded, call plugin shutdown
-in reverse order, then release libraries. No live reload, background callbacks,
-or retained host buffers. Internal parallel computation is allowed only when all
-workers join before a native call returns.
+Normal teardown runs bounded Luau shutdown, destroys the VM/references, shuts
+down native instances in reverse order, then releases all libraries. Faults/drop
+skip Luau shutdown but retain native cleanup. Host pointers are scoped to
+synchronous runtime-thread calls; workers must join before return.
 
 ### Batch data versus engine command buffers
 
-The initial native buffers carry computation inputs and results. For example,
-one call supplies tile costs and 64 path requests; the plugin returns offsets
-and path points in an output buffer. Batching amortizes FFI and marshaling costs
-over many items. The Luau wrapper handles the byte layout for ordinary scripts.
-
-The proposed execution order is synchronous:
+Native buffers carry computation inputs/results. One call can process a tile
+grid or many requests, amortizing FFI and marshaling; a typed Luau wrapper owns
+the layout. The accepted synchronous order is:
 
 ```text
 update(ctx, dt)
   -> native call with batch inputs
   <- batch results
-  -> script applies results through engine operations
+  -> script applies results through immediate engine operations
 engine systems
-draw(ctx, alpha) -> render command list
+draw(ctx, alpha) -> owned render command list
 ```
 
-No engine system runs in the middle of that native call. The plugin neither
-submits ECS mutations nor receives implicit access to world storage. It may
-parallelize its computation internally, but must join its workers before return.
+No system runs during the native call and no plugin receives ECS storage.
+Internal parallel computation must join before return. The implemented
+[distance-field example](../../examples/games/native_distance/SCHEMA.md) computes
+one four-neighbor field per call.
 
-A command buffer instead holds deferred operations such as spawn, despawn, or
-set-position. The runtime would flush it at named points between systems, making
-it a possible way to integrate future script/plugin systems. That is a separate
-scheduling and mutation contract: define command order, read visibility, entity
-ID reservation, validation/failure behavior, and the flush points before adopting
-it. Merely passing bytes across the C ABI does not establish those semantics.
-
-The owner confirmed synchronous batch buffers for the first milestone and asked
-to retain command buffers as a future option. Immediate script world operations
-remain the proposed mutation contract. A future command buffer could coexist
-with batch computation; adding one must explicitly revise the immediate-write
-contract above. The
-existing proposed render command list only defers drawing, not world mutation.
+Engine command buffers remain a future option: deferred spawn/despawn/set-position
+would require explicit ordering, read visibility, entity-ID reservation, failure
+rules and flush points. Adding them must revise the immediate-write contract.
+Owned render commands defer drawing only; byte-buffer FFI defines no mutation
+schedule by itself.
 
 ### ABI shape and ownership
 
-Phase 4 implements one exported bootstrap symbol, `protogine_plugin_query`, followed by a
-versioned function table. Use an engine-owned ABI version independent of the
-engine package version. The bootstrap accepts requested ABI, destination size,
-and a host-allocated descriptor destination. The exact ABI 1 declarations are in
-the generated [C header](../../include/protogine_plugin.h); the Phase 4 implementation
-record freezes their constraints. The Phase 5 record freezes the Luau adapter.
+ABI 1 uses one `protogine_plugin_query` bootstrap and exact versioned C tables.
+The dependency-free [SDK](../../sdk/src/lib.rs) is the source of truth for the
+[generated header](../../include/protogine_plugin.h). [Phase 4](#implementation-record-phase-4)
+freezes layouts/lifetimes; [Phase 5](#implementation-record-phase-5) freezes calls.
+ABI versions are independent of the engine package version.
 
-| Surface | Required contract |
+| Surface | Contract |
 | --- | --- |
-| Host/plugin tables | ABI version and struct size prefix; C layout; fixed-width status/flag fields; explicit reserved fields |
-| Function declarations | Namespaced plugin/function IDs, pointer, and a documented buffer schema/version |
-| Instance | Opaque plugin-owned state from successful init; exactly one matching shutdown |
-| Host services | Initially logging only; valid on the runtime thread during a host-initiated call |
-| Input | Read-only byte span owned by host; valid only until the call returns |
-| Output | Host-allocated byte span with capacity and returned length; caller retains ownership |
-| Errors | Fixed-width status plus bounded UTF-8 diagnostic written into host-owned storage |
+| Tables | ABI/size prefix, fixed-width statuses/flags, reserved fields, exact target C layout |
+| Declarations | Namespaced plugin/function IDs, call pointer, byte schema ID/version; immutable before game init |
+| Instance | Plugin-owned opaque state; successful init requires one matching shutdown |
+| Host services | Bounded logging on the runtime thread during a host-initiated call |
+| Input/output | Host-owned read-only input and disjoint zeroed output scratch, explicit capacities/lengths; valid until return |
+| Errors | Fixed-width status and bounded UTF-8 diagnostics in unchanged host-owned storage |
 
-The initial Luau adapter can accept input/output `buffer` values through an API
-such as `ctx.native.call(plugin_id, function_id, input, output) -> written_bytes`.
-Use host-owned scratch storage across FFI first; copy results back only after a
-successful, validated return. Do not expose pointers into VM-managed buffers or
-silently perform one FFI call per element. A Luau wrapper gives each native
-function a useful typed authoring interface.
+`ctx.native.call(plugin_id, function_id, input, output)` returns written bytes.
+Copy VM buffers into host scratch before FFI; publish only a validated success
+prefix, preserving the suffix and all output on failure, including aliased VM
+buffers. No automatic retry. Recoverable plugin errors must leave instance state
+unchanged; panic/contract failure faults the session without claiming rollback.
+Use byte-defined encodings, not packed casts or alignment assumptions.
 
-No automatic retry after an insufficient-output-buffer error: a stateful call
-must not accidentally execute twice. Require error returns to leave instance
-state unchanged, and ignore output data on failure. Validate returned lengths.
-If a shim catches a panic or a plugin violates its return contract, fault and
-discard the session; do not imply that native state was rolled back.
-Use byte-defined encodings (for example little-endian fields), not packed casts
-or alignment assumptions. Benchmark the complete path including copies before
-adding zero-copy or direct ECS access.
+Keep unsafe code localized. Use `extern "C"`, `#[repr(C)]`, explicit lengths and
+opaque pointers; no Rust collections/references, trait objects, ECS or VM internals.
+No unwind, C++ exception or Lua longjmp may cross C. SDK shims catch unwind panics
+and guard payload disposal; aborts, corrupt pointers and hangs remain process
+failures. The loader cannot undo DLL initializer side effects.
 
-Use `extern "C"`, `#[repr(C)]`, explicit lengths, and opaque pointers where
-needed. Do not pass Rust collections, references, trait objects, `hecs::Entity`,
-or `lua_State` across the ABI. Freeze calling convention, integer widths,
-alignment, required table prefix, null/zero-length rules, and string encoding in
-the header. A C ABI is compatible only for the declared target/platform ABI.
-
-No Rust panic, C++ exception, or Lua longjmp may cross the boundary. Catch Rust
-panics in SDK/host shims where unwinding is enabled and translate them to status;
-abort-mode panics and native memory corruption remain process failures. A loader
-cannot validate arbitrary foreign pointers or undo DLL initializer side effects.
-
-The first ABI accepts an exact version and required table layout. Future
-append-only extensions require explicit size negotiation and compatibility tests;
-struct size alone does not promise compatibility. Keep libraries alive for every
-descriptor, function pointer, and instance reference. Registration is closed
-before game init, and native code cannot reenter the VM.
+Libraries stay loaded through every reachable descriptor, function and instance.
+No native reentry into Luau. Future append-only ABI extensions need explicit size
+negotiation/tests; struct size alone promises no compatibility. Measure the full
+typed path, including copies, before proposing zero-copy or direct ECS access.
 
 ### Alternatives and consequences
 
@@ -390,7 +289,7 @@ before game init, and native code cannot reenter the VM.
   Prefer a future explicit batch/query API if measurements justify it.
 - **Function tables over exported engine symbols:** Slightly more bootstrap code,
   but supplies explicit version negotiation and the same host contract in Player
-  and editor. This is the proposed starting point.
+  and editor. This is the accepted design.
 - **Batch buffers before a universal variant/value system:** Less ergonomic at
   the lowest level, but a smaller stable interface and measurable copying costs.
   Typed Luau wrappers supply ordinary game-facing functions.
@@ -417,43 +316,39 @@ Keep Rust ABI definitions as the header's source of truth and check regeneration
 for drift. Do not invent arbitrary API symbols beyond the reviewed bootstrap and
 minimum tables just to fill out an SDK.
 
-For the first performance example, propose a tile-grid pathfinding batch or
-distance-field computation. Pick one fixture and output contract before building
-it. Record release-build median/tail timings and crossover batch sizes on a named
-machine, including Lua marshaling and buffer copies. Correctness is mandatory;
-if the native path has no useful measured advantage, report that result and
-revisit the workload/adapter rather than advertising an unmeasured speedup.
+The distance-field example supplies the selected workload. Its
+[benchmark](../../examples/games/native_distance/BENCHMARK.md) records release
+median/p95, sizes, machine, marshaling/copies and observed crossover. Correctness
+is mandatory; a measured speedup is not an acceptance requirement.
 
 ### Compatibility and verification
 
-Preserve current no-bundle and inaccessible-bundle startup captures, existing
-capture controls, PNG dimensions, and configuration/write error codes. When real
-game execution exists, propose exit code `3` for load/script/plugin faults; saving
-a diagnostic screenshot must not turn such a failure into success. Explicitly
-test this addition alongside current startup-only capture behavior.
+Preserve missing/unavailable startup captures, dimensions, capture controls and
+exit codes: 0 success, 1 capture failure/interruption, 2 invalid configuration,
+3 game load/runtime/plugin fault. Saving a diagnostic PNG cannot turn a fault
+into success. Run the applicable [development checks](../DEVELOPMENT.md) for
+implementation changes and state unverified platform/toolchain/graphics limits.
 
-Run the repository's fmt/check/test/clippy/release checks for implementation
-changes. Add no-graphics scripting and plugin configurations as they become real,
-and run the built-in GPU capture test when presentation changes. Keep C compiler,
-loader, JIT, graphics, and unverified platform limits explicit in phase reports.
+Audio, tile-map authoring, editor UI/export, entity script attachments,
+asynchronous scripts/native work, custom plugin components, direct ECS views,
+hot reload, archive bundles, engine embedding, zero-copy/command buffers and
+Player writable-data selection remain outside this milestone. Native scratch
+allocation-refusal paths are source-reviewed but lack deterministic allocator
+injection. Other native targets remain unverified. Saves/migrations remain game
+responsibilities, not deferred engine features.
 
-Audio, full tile-map authoring, editor UI, entity script attachments, asynchronous
-scripts, custom plugin components, direct ECS buffer views, plugin hot reload,
-compiled bundle archives, and engine embedding remain later work. Save schemas
-and migration remain game-script responsibilities, not deferred engine features.
-
-## Evidence checked for this draft
+## Planning evidence
 
 - Local baseline: Rust 1.95.0, host `x86_64-pc-windows-msvc`; clang/clang-cl and
   gcc are discoverable. Initial planning did not build mlua/JIT or a C plugin.
   Subsequent Phase 0/1 build and execution evidence is recorded below. The initial
   Player and capture checks belong to baseline `539659e`.
-- The published [mlua feature list](https://docs.rs/crate/mlua/latest/features)
+- The published [mlua feature list](https://docs.rs/crate/mlua/0.12.1/features)
   identifies 0.12.1 and `luau-jit`. Its
-  [VM API](https://docs.rs/mlua/latest/mlua/struct.Lua.html) supplies custom Luau
+  [VM API](https://docs.rs/mlua/0.12.1/mlua/struct.Lua.html) supplies custom Luau
   require, scoped bindings, sandbox, memory-limit, and interrupt mechanisms.
-  Verify the exact selected build's behavior in Phase 0; docs availability is not
-  local execution proof. These `latest` links showed 0.12.1 on the date above.
+  Phase 0 subsequently verified the selected build; documentation alone was
+  not execution proof. Links are pinned to the inspected release.
 - [Luau embedding guidance](https://luau.org/sandbox/) explains source/bytecode
   trust, restricted standard libraries, and the limits of interrupting native
   calls. These constraints motivate engine-owned module and plugin loading.
@@ -464,17 +359,17 @@ and migration remain game-script responsibilities, not deferred engine features.
   and [Unity fixed updates](https://docs.unity3d.com/6000.0/Documentation/Manual/fixed-updates.html)
   distinguish frame callbacks from fixed simulation steps. They explain the
   timing analogy for D3, not a requirement to copy either engine's full API.
-- The inspected local tot checkout is clean and matches GitHub HEAD
+- The inspected local tot checkout was clean and matched GitHub HEAD
   `2f407897f985654cdbb6201ad01ba05216a6e3d7`, verified with `git ls-remote`.
   Its [Cargo manifest](https://github.com/totlang/tot/blob/2f407897f985654cdbb6201ad01ba05216a6e3d7/Cargo.toml)
   declares version 0.1.0. The
   [library API](https://github.com/totlang/tot/blob/2f407897f985654cdbb6201ad01ba05216a6e3d7/src/lib.rs)
   and [CLI converters](https://github.com/totlang/tot/blob/2f407897f985654cdbb6201ad01ba05216a6e3d7/cli/src/convert.rs)
-  establish the current parser/export split. Phase 0 parses a manifest fixture
-  through this Git dependency; Phase 1a now implements script data bindings.
+  established the parser/export split at the planning baseline. The upgrade
+  record below replaces that dependency with tot 0.2.0 and library exporters.
 - [libloading](https://github.com/nagisa/rust_libloading)
   documents unsafe loading, initializer execution, symbol typing, and library
-  lifetime. Version 0.9.0 is selected, not yet a project dependency.
+  lifetime. Version 0.9.0 was selected at planning and added in Phase 4.
 - The [Rust FFI guidance](https://doc.rust-lang.org/nomicon/ffi.html) is the
   reference for ABI layout, ownership, callback lifetimes, and unwinding rules.
 
@@ -587,7 +482,8 @@ Player or interpret a plugin manifest; manifest schema validation remains Phase 
   and `toml` dependencies are test-only, for independent output parsing.
   TOML is only an export target; `game.tot` remains tot.
 - Ordinary Luau tables are string-keyed objects; `data.array(table)` marks a
-  dense one-based array, including empty arrays. Parsed arrays retain this tag.
+  dense one-based array, including empty arrays. It checks keys only; format/export
+  validate elements. Parsed arrays retain this tag.
   `data.null` is a distinct immutable value; nil means an absent object member
   and cannot stand for a data value. `data.integer(decimal_text)` preserves
   arbitrary integers in immutable userdata with a `.text` field. All ordinary
@@ -617,6 +513,9 @@ Player or interpret a plugin manifest; manifest schema validation remains Phase 
   directories; `fs.mkdir` creates intermediate directories as needed.
   Writes/mkdir are allowed only in init/update/orderly shutdown; reads/list are
   also available in draw. All function references expire with their callback.
+  Listing classifies links, unrepresentable names and other nodes as `unsupported`
+  without hiding siblings; traversal stays refused. Failed mkdir unwinds only
+  directories created by that call, preserving existing or nonempty directories.
 - Paths use portable relative `/` segments, at most 4096 UTF-8 bytes; absolute,
   empty file paths, dot/parent segments, backslashes, Windows device names,
   trailing dots/spaces, and reserved characters are rejected. Empty paths select
@@ -748,8 +647,11 @@ commands remain Phase 3.
   Despawn/reuse, cross-session use, and stopped/faulted sessions reject access.
   A private VM table with weak values canonicalizes retained wrappers by session
   and generation, including when handles are Luau table keys. Unreferenced
-  wrappers/cache entries can be collected. Private binary cache keys are never
-  script-facing IDs or persisted data.
+  wrappers/cache entries can be collected. After the cache-key correction below,
+  private keys pack (session index, hecs slot) into exact numbers below 2^52;
+  retained session markers prevent address reuse, `SESSION_LIMIT` is 2^20, and
+  each hit compares the full handle to reject a reused slot. Keys are neither
+  script-facing IDs nor persisted data.
 - Init/update mutations are immediate. Draw/shutdown permit world reads only.
   Each operation releases Rust/hecs borrows before VM allocation or return to
   script code; retained functions expire while returned handles/values may live
@@ -1352,42 +1254,23 @@ review fixes for commit.
 
 ### Post-completion review: interrupt deadline sampling (superseded)
 
-The deadline-enforcement correction below supersedes this optimization. The
-assumption that only cheap bytecode runs between samples was incorrect: repeated
-standard-library calls can multiply the timeout. The measurements below record
-the rejected optimization, not current deadline behavior.
+Rejected optimization: `Budget::interrupted` sampled the clock once per 256
+interrupts while host `check` stayed exact and latched faults were observed on
+the next interrupt. The claimed cheap-bytecode bound was false: expensive Luau
+built-ins run between interrupts. The [later correction](#post-completion-review-deadline-enforcement-across-expensive-built-ins)
+restored exact checks everywhere.
 
-- Luau fires a VM interrupt on every loop back-edge and call, and the host read
-  the clock on each one to enforce the callback deadline. `Budget` now splits
-  that: `check` stays exact and is what every host-initiated operation uses
-  (data/filesystem/world/drawing bindings, native call entry and return, and
-  callback completion), while `interrupted` samples the clock once per 256
-  interrupts. A latched fault is still observed on the next interrupt, so only
-  the deadline's granularity changed. The 100 ms/1 s limits are unchanged.
-- The bound this introduces is on pure bytecode between samples: a tight loop
-  overruns by microseconds. Anything slow enough to matter — I/O, conversion,
-  native calls — already checks exactly on entry and return. Interrupts still
-  cannot preempt I/O, compiler/JIT work, or a native call, as before.
-- A unit test asserts the stride semantics directly: an elapsed deadline is
-  reported within at most one stride of `interrupted` calls, a latched fault
-  cancels on the very next interrupt regardless of the countdown, and `check`
-  never inherits the sampling interval. Rebuilding with the stride set so the
-  clock is never sampled makes the existing runaway-loop probes hit their
-  independent 10-second process watchdog, which is the negative control that the
-  sampling is what enforces the deadline.
-- The benchmark was re-measured because this changes the published Luau figures.
-  Rebuilt back to back in one session on the same machine and toolchain, 256x256
-  medians were 30.201 ms pure Luau / 8.882 ms native when checking every
-  interrupt, versus 13.091 ms / 3.748 ms once per 256. The every-interrupt run
-  reproduces the original Phase 5 table, establishing that the two runs are
-  comparable and that the change, not ambient load, accounts for the difference.
-  Both methods gain about 2.3x because both marshal in Luau, so the native
-  advantage is unchanged within run-to-run variation (3.40x to 3.49x) while the
-  absolute figures roughly halve. BENCHMARK.md now carries the current table,
-  the comparison, and a note that the earlier figures are superseded.
-- Verification on Windows MSVC x64: the full gate list above passes again,
-  including the scripting feasibility probes that exercise load, update, pcall,
-  xpcall, metamethod, module and native-frame cancellation.
+The stride unit test and existing protected-loop probes passed; disabling clock
+sampling altogether tripped the independent 10-second watchdog. That evidence
+proved cancellation existed, not that repeated built-ins respected the deadline.
+The full gate then passed but did not cover the failing workload.
+
+Historical back-to-back 256x256 medians on the same machine/toolchain were
+30.201/8.882 ms pure/native with every-interrupt checks, versus 13.091/3.748 ms
+with sampling (native ratios 3.40x/3.49x). Both improved about 2.3x because both
+marshal in Luau. These rejected-optimization figures are not current performance;
+[BENCHMARK.md](../../examples/games/native_distance/BENCHMARK.md) carries the
+2026-09-06 correction measurements and method.
 
 ### Post-completion review: listing classification and mkdir unwind
 
@@ -1411,8 +1294,9 @@ the rejected optimization, not current deadline behavior.
   a failure removes those deepest first. `remove_dir` refuses a nonempty
   directory, so anything a concurrent writer placed inside one survives, and a
   directory that already existed is never removed. Cleanup errors are ignored so
-  they cannot mask the primary failure. This matches the all-or-nothing
-  guarantee `fs.write` already gives through atomic replacement.
+  they cannot mask the primary failure. This is best-effort rollback: cleanup
+  failure or a concurrent writer can leave a directory behind, unlike atomic
+  replacement of one file.
 - A regression drives a component past the filesystem name limit so the failure
   lands after its ancestors exist, then asserts from Luau that the ancestors are
   gone, that a pre-existing directory survives and stays empty, and that a
@@ -1493,41 +1377,19 @@ the rejected optimization, not current deadline behavior.
 
 ### Leading byte order marks in module source, 2026-09-07
 
-The source-loading contract above requires UTF-8 `.luau` files and said nothing
-about a byte order mark, so one reached the compiler as content and Luau
-rejected it: `syntax error: main.luau:1: Expected identifier when parsing
-expression, got Unicode character U+feff`. Windows editors and PowerShell 5.1's
-`Out-File -Encoding utf8` both write UTF-8 with a mark, so an author who edits a
-shipped game on Windows can produce a file that will not load and an error that
-names a codepoint rather than the cause. The PNG/sprite Phase 3 review found
-this while establishing why `tests/player_input.ps1` needs PowerShell 7, whose
-`utf8NoBOM` encoding exists precisely because 5.1 has no BOM-free UTF-8 option.
+`BundleModules::compile` skips exactly one leading `U+FEFF` after UTF-8
+validation and the 256 KiB on-disk source check. Windows editors and PowerShell
+5.1's `Out-File -Encoding utf8` can emit that signature; previously Luau rejected
+it as `Expected identifier when parsing expression, got Unicode character U+feff`.
+Skipping the encoding signature widens accepted source without changing code.
 
-`BundleModules::compile` now skips exactly one leading `U+FEFF` after UTF-8
-validation and before compiling.
+`tests/scripting.rs` covers a marked entry and required module, a doubled mark,
+a stray mark after code, and byte-preserving `ctx.fs.read`. Non-leading marks
+remain compiler input; the tested stray/doubled marks fail as syntax. File reads
+must never strip game-owned bytes. Invalid UTF-8 remains refused; UTF-16 support
+and a specialized encoding diagnostic were not added.
 
-This is a widening: every file that loaded before still loads, because a file
-with a mark could not load at all. It is also not a departure from the engine's
-habit of refusing ambiguous input. APNG frames, 16-bit channels, numeric
-coercions and option-table metatables are refused because choosing among their
-possible meanings on the author's behalf is the harm. A leading mark has one
-meaning, an encoding signature, so skipping it decides nothing. rustc, Python,
-Go, MSVC and Node skip one for the same reason; Lua and Luau are the outliers.
-
-Three boundaries keep the change contained, each with a test in
-`tests/scripting.rs`:
-
-- Exactly one mark, exactly at the start. A `U+FEFF` after any source is content
-  and still fails to compile, and a doubled mark leaves the second one to fail.
-- Module source only. `ctx.fs.read` is untouched: the bytes it returns belong to
-  the game, and stripping there would silently corrupt a save file whose first
-  bytes happen to match.
-- After the 256 KiB source check, so that limit still describes bytes on disk.
-
-Verified by disabling the skip and confirming
-`a_leading_byte_order_mark_loads_while_one_elsewhere_still_fails` fails with the
-original `U+feff` diagnostic, then restoring it.
-
-UTF-16 files remain refused by UTF-8 validation with its own error. A friendlier
-diagnostic for that case was considered and left out: Windows tools write
-UTF-8-with-BOM, which is the case worth handling.
+Disabling the skip reproduced the original diagnostic in
+`a_leading_byte_order_mark_loads_while_one_elsewhere_still_fails`; restoring it
+passed. The [input probe](../../tests/player_input.ps1) still requires PowerShell 7
+for its own `utf8NoBOM` encoding use.

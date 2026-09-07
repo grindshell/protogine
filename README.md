@@ -1,7 +1,7 @@
 # Protogine
 
 Protogine (Prototype Engine) is a tile-based game engine inspired by RPG Maker,
-with a shared kernel for its editor and standalone Player.
+with a shared kernel for the standalone Player and planned editor.
 
 The Player runs shipped Luau games through the shared runtime. It opens a
 resizable window and displays **Missing game data** when no bundle is present.
@@ -120,8 +120,8 @@ cargo test --test player_capture -- --ignored
 
 ## Initial bundle convention
 
-For this first slice, a bundle is an unpacked `game` directory beside the
-executable, containing a readable `main.luau` file:
+A bundle is an unpacked `game` directory beside the executable, containing a
+readable `main.luau` file:
 
 ```text
 My Game/
@@ -281,7 +281,8 @@ cargo run --example script_host --no-default-features --features scripting -- ex
 
 `GameRuntime::load` takes an absolute game-directory path and `ScriptLimits`.
 `main.luau` returns a plain table containing optional `init`, `update`, `draw`,
-and `shutdown` functions. Callbacks return no values. The host exposes
+and `shutdown` functions; unknown fields and metatables are rejected. Callbacks
+return no values. The host exposes
 `ctx.log(message)`, `ctx.data`, `ctx.fs`, `ctx.assets`, `ctx.world`, `ctx.input`,
 and (during draw) `ctx.draw`, plus `ctx.native` with native support enabled. Stored context
 functions expire when their callback ends, while
@@ -304,8 +305,9 @@ bindings, with no world, input, native calls, or clock.
 
 Modules use extensionless relative paths, such as `require("./counter")` or
 `require("../shared")` within the bundle. Files must be UTF-8 `.luau` source. A
-leading byte order mark is accepted and skipped, since Windows editors write
-one; a `U+FEFF` anywhere else is source text and fails to compile.
+single leading byte order mark is accepted and skipped after the source-byte
+limit and UTF-8 checks. Other `U+FEFF` characters remain source text for the
+compiler; filesystem reads preserve all bytes.
 Aliases, dotted path segments, directory init modules, and paths escaping the
 canonical bundle root are rejected. Successfully loaded module values are cached
 once per VM; loaded source changes require a new host. Cycles and failed imports
@@ -459,9 +461,9 @@ stops nothing.
 ## Bundle images
 
 `ctx.assets` exists in every callback and loads PNGs from the bundle root
-through a bounded staged service. A request returns immediately with an opaque
-handle; the file is read, decoded and converted across later service passes, so
-gameplay continues while an image loads.
+through a bounded staged service. Admission resolves paths synchronously and
+returns an opaque handle without waiting for content reads or decoding. Later
+service passes read, decode and convert while gameplay continues.
 
 | Asset API | Behavior |
 | --- | --- |
@@ -493,14 +495,12 @@ Asset diagnostics retain at most 4096 UTF-8 bytes of logical path and 1024 bytes
 of message. A path longer than 4096 bytes is omitted from its refusal diagnostic;
 catching the error does not retain a copy of that oversized input outside the VM.
 
-Accepted PNGs are static RGB/RGBA, grayscale or grayscale-alpha and indexed
-color, including palette transparency, 1/2/4-bit grayscale expansion and
-interlacing. APNG and 16-bit channels are refused rather than silently narrowed.
-Both dimensions must be in `1..=2048`, encoded files are capped at 17 MiB and
-decoded content at 16 MiB per image and 64 MiB per session, with at most 128
-images and 8 unfinished jobs. Dimensions are frozen once an image is ready and
-the 256-call `ctx.assets` budget is per callback, so read a size once and keep
-it rather than querying inside a per-tile draw loop.
+The [Rust service contract](#bundle-image-loading) below defines supported PNGs
+and storage/work bounds. Dimensions are fixed once validated. The 256-call
+`ctx.assets` budget counts all attempts per callback, including malformed,
+wrong-phase and refused calls. Read a size once and keep it rather than querying
+inside a per-tile draw loop. All handle-taking operations reject foreign sessions;
+`size` also refuses unknown dimensions and failed/unloaded images.
 
 One CPU service pass runs per `frame` or `step`, whatever the catch-up tick
 count, and none during `init`, `draw` or a refused call. Loading progress becomes
@@ -593,9 +593,9 @@ links, other node types, and names outside the path policy above are listed as
 name never hides its siblings. An unsupported name may be lossy; do not use it
 as a path. Refusing to traverse those entries is unchanged.
 
-A failed `mkdir` removes the directories that call created, deepest first, so a
-partial tree is not left behind. It never removes a directory that already
-existed or one that is no longer empty.
+A failed `mkdir` attempts to remove directories that call created, deepest
+first. It preserves pre-existing/nonempty directories and the primary error;
+cleanup failures can leave a partial tree.
 
 Writes sync a temporary file in the destination directory, then replace the
 destination. A failed replacement preserves the old file and cleans the temporary
@@ -621,20 +621,11 @@ version without overwriting the existing data. There is no engine save lifecycle
 
 ## Bundle image loading
 
-The optional `assets` feature adds a bundle-rooted PNG service that needs no VM
-and no graphics context: the Rust `protogine::assets::AssetStore` behind
-`ctx.assets` and the shared renderer, usable on its own by tools. The rules
-below are the ones those bindings expose. See the
-[PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) for the milestone.
-
-A request names a bundle-relative `.png` path with portable slash-separated
-segments, never a path relative to the working directory, the module directory
-or the executable. Path validation and rooted resolution are synchronous, so a
-missing file, a refused spelling, or a full queue or registry is an immediate
-error that publishes no handle. Everything after that is staged across bounded
-service passes on one worker: reading, header parsing, output allocation,
-decoding and RGBA conversion. Content problems become inspectable failed jobs
-rather than errors at the call site.
+The optional `assets` feature exposes `protogine::assets::AssetStore`, the Rust
+service behind [ctx.assets](#bundle-images), without a VM or graphics context.
+Both interfaces share path, admission, identity and failure rules. The
+[PNG/sprite record](docs/implementation/PNG_SPRITE_PLAN.md) contains the design
+and delivery evidence.
 
 Accepted input is a static PNG with RGB, RGBA, grayscale, grayscale-alpha or
 indexed color, including palette transparency and 1/2/4-bit grayscale, and
@@ -653,101 +644,24 @@ straight alpha, without ICC or gamma correction, premultiplication or flipping.
 | Work per pass | 32 KiB work units, eight per pass, one non-preemptible stage |
 | Request spellings | 256 memoized, replaced in insertion order |
 
-Repeat requests for one canonical path reuse the same identity, and case
-aliases that resolve to one file on a case-insensitive filesystem reuse one
-image; nothing is lowercased to manufacture aliases elsewhere. `unload`
-invalidates a logical image for every alias and cancels any pending job, but
-bytes a caller still holds stay alive until it drops them. Identities are
-append-only, so a later request after a failure or unload is a new image and a
-stale one is refused by inspection. The byte ceilings are accounting rules and
-the 2 ms per-pass target is a scheduling cutoff, not a latency guarantee:
-filesystem calls, decompression and allocation can each overrun it.
+Case aliases that resolve to one canonical path reuse an identity on
+case-insensitive filesystems; other paths are never lowercased to manufacture
+aliases. Unload cancels pending work and invalidates every alias, but pixels a
+Rust caller pins remain alive and accounted until released. Image IDs are
+append-only; a later request after failure/unload receives a new identity.
+Rust inspection refuses retired IDs, while Luau handles retain terminal status.
+The byte ceilings are accounting rules; the 2 ms cutoff is a scheduling target,
+not a latency guarantee for filesystem calls, decompression or allocation.
 
 ## Code and checks
 
-- `src/lib.rs` exposes shared code; `src/bundle.rs` implements discovery.
-- `src/bin/player.rs` owns the Macroquad window and startup presentation.
-- `src/bin/player/capture.rs` handles capture configuration and PNG output.
-- `src/scripting.rs` and `src/scripting/modules.rs` provide the optional Luau host.
-- `src/kernel.rs`, `src/input.rs`, and `src/runtime.rs` own entities, logical input,
-  and fixed-step execution; `src/scripting/world.rs` supplies scoped bindings.
-- `src/scripting/data.rs`, `data/export.rs`, `filesystem.rs`, and `utilities.rs`
-  implement scoped data/I/O services and their shared callback limits.
-- `src/assets.rs` defines image identities, status snapshots and bounds without
-  any decoder; `src/assets/store.rs` and `src/assets/worker.rs` implement the
-  optional bounded PNG service. `src/rooted_path.rs` holds the traversal rules
-  shared with `ctx.fs`, differing only in the final-node policy.
-- `src/manifest.rs` validates tot declarations; `src/plugins.rs` owns native
-  loading, foreign calls, descriptor validation and teardown.
-- The workspace contains the engine, dependency-free `sdk`, and the separate
-  `tools/headergen` development utility pinned to cbindgen 0.29.2. Regenerate with
-  `cargo run -p protogine-headergen`; normal Player builds do not run codegen.
-  `.gitattributes` keeps the generated header in LF form for exact-byte checks.
-- The default `player` Cargo feature enables graphics, scripting and native
-  plugins. `scripting` enables `assets`, and `assets` alone builds the PNG
-  service without a VM or a window. The shared library can be built without
-  graphics, decoding or native loading.
+The default `player` feature enables `graphics`, `scripting` and `native-plugins`.
+Both `graphics` and `scripting` enable `assets`; neither enables the other.
+`--no-default-features` retains core and owned command/identity types without a
+VM, decoder or window. The workspace also contains the dependency-free plugin
+SDK and the development-only header generator.
 
-```text
-cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo test --workspace
-cargo test --workspace --no-default-features
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --no-default-features --features assets
-cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
-cargo test --workspace --no-default-features --features scripting
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
-cargo check --no-default-features --features native-plugins
-cargo test --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
-cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
-cargo test --release -p protogine-plugin-api
-cargo run -p protogine-headergen -- --check
-```
-
-On the supported Windows native target, the `plugins` suite requires `clang`
-(or a compiler path in `CLANG`) and the MSVC/Windows SDK. It compiles independent
-C DLLs against a copied header, asserts C/Rust layout agreement, and runs native
-loads/callbacks in child processes with an independent 15-second watchdog.
-It covers refusal cases, dependency decoys, initialization order, script faults,
-partial rollback and reverse teardown. Run `cargo test --test plugins -- --ignored`
-with a graphics context to verify copied Player startup/fault captures with DLLs.
-
-On Windows with PowerShell 7 and a working desktop/graphics context, run the
-repeatable [input/shutdown probe](tests/player_input.ps1):
-
-```powershell
-cargo build --release --bin protogine-player
-pwsh -NoProfile -File tests/player_input.ps1
-```
-
-It copies the Player into an isolated distribution under `target/player-input/`,
-injects native key events, and checks each arrow/Space/Backspace mapping, held
-state, press/release order, and shutdown exactly once on Escape/window-close.
-It also verifies exit code 3 for a shutdown fault. Logs remain beside the copied
-Player. Pass `-Player <executable>` to test another build. Capture/window
-environment overrides are excluded from the child process.
-
-Capture mode steps with neutral input, so no capture can show a game reacting to
-a key. The [sprite sample probe](tools/run_sprites_probe.ps1) posts real key
-events to a live Player instead and reads back what the game did:
-
-```powershell
-powershell -NoProfile -File tools/run_sprites_probe.ps1
-```
-
-It runs the committed sample with one statement added, a position log at the end
-of update, and checks movement up to the first solid tile and no further, both
-walk frames, the idle frame on release, turning around, and Space evicting both
-images so the next tick requests and reloads them.
-
-See [AGENTS.md](AGENTS.md) for architectural requirements and contribution guidance,
-and the [implementation plans](docs/implementation/README.md) for accepted and
-completed work. [PNG assets and sprite
-drawing](docs/implementation/PNG_SPRITE_PLAN.md) is complete: its
-[Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) froze the contracts and the
-CPU/GPU feasibility probes, and the four delivery phases built the asset
-service, the Luau API, the shared renderer and the sprite sample. Every limit
-and API described above is implemented.
+See [AGENTS.md](AGENTS.md) for source entry points and architectural rules,
+[development and verification](docs/DEVELOPMENT.md) for the required feature/check
+matrix and GPU/input probes, and [implementation records](docs/implementation/README.md)
+for accepted decisions, completed phases and remaining scope.

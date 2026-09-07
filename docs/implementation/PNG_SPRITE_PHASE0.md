@@ -1,9 +1,10 @@
 # PNG/sprite Phase 0: contracts and feasibility
 
-**Status:** Phase 0 complete, 2026-09-06. Production asset APIs
-and the shared renderer are not implemented. This record resolves the Phase 0
-contracts in [ADR-002](PNG_SPRITE_PLAN.md); its concrete choices supersede the
-earlier alternatives in that plan.
+**Status:** Phase 0 completed 2026-09-06. This is the historical feasibility
+record; production assets, bindings, renderer and sample were subsequently
+delivered in [ADR-002](PNG_SPRITE_PLAN.md). Its completion records refine these
+initial contracts and close the phase-local handoff gaps. Measurements and
+receipts below remain observations from this probe, not current benchmark runs.
 
 ## Selected implementation
 
@@ -60,11 +61,11 @@ process-memory or driver-reclamation guarantee follows from the table.
 
 One pass moves at most eight quanta, so a large image is frame-bound rather than
 worker-bound. A 17 MiB encoded file is 544 read quanta, its 16 MiB of RGBA output
-is 512 conversion bands, and its upload is 64 GPU passes; an image starts uploading
-only once its CPU content is complete, so that is about 196 service passes, roughly
-3.3 seconds at 60 Hz. The Kenney sheet needs about ten. Scripts must therefore
-expect multi-second readiness for maximum-size images and draw a loading state,
-and Phase 4's sample cannot treat a small sheet as representative of that wait.
+is 512 conversion bands, and its upload is 64 GPU passes. Upload starts only after
+CPU completion: about 196 bulk-work passes (3.3 seconds at 60 Hz), plus stage,
+EOF and scheduling delays. Even the Kenney sheet needs multiple CPU and GPU passes;
+Phases 1 and 3 record those separately. Scripts need a loading state for maximum
+images; the small Phase 4 sheets are not representative of that wait.
 Raising the per-pass multiplier would revise the frozen grant above, so it needs
 its own measured evidence rather than a Phase 1-3 convenience adjustment.
 
@@ -110,8 +111,8 @@ does not reorder other commands. A clear still discards earlier drawing.
 | API | Contract |
 | --- | --- |
 | `ctx.assets.request_png(path)` | Init/update only; returns the canonical pending/ready handle. Coalesced and ready hits preserve `rawequal` and table-key identity. An explicit retry after failure/unload receives a new image identity. |
-| `ctx.assets.status(image)` | All live callbacks; owned read-only snapshot described below. Terminal status stays inspectable on retained handles in the same live session. |
-| `ctx.assets.size(image)` | All live callbacks; returns width, height once validated; refuses while unknown, failed or unloaded. |
+| `ctx.assets.status(image)` | All live callbacks; owned snapshot described below; editing the returned table changes no service state. Terminal status stays inspectable on retained handles in the same live session. |
+| `ctx.assets.size(image)` | All live callbacks; returns `{width, height}` once validated; refuses while unknown, failed or unloaded. |
 | `ctx.assets.unload(image)` | Init/update only; invalidates the logical image for every alias, removes path/spelling lookups and schedules resource retirement. Returns true on the first unload and false for an already failed/unloaded handle in this session. Pending unload cancels the job internally. |
 | `ctx.draw.sprite(image, x, y, options?)` | Draw only; requires CPU-ready live image, validates the existing ADR-002 scalar/crop contract, and appends an owned command. Pending/failed/unloaded handles are catchable refusals. |
 
@@ -164,7 +165,7 @@ it and accumulate workers/buffers across restarts. An in-progress non-preemptibl
 operation may delay that join. Preserve VM destruction before native teardown;
 the asset worker cannot hold VM or native-plugin references.
 
-## Rust boundaries to implement in Phases 1–3
+## Rust boundaries selected for Phases 1–3
 
 `AssetStore` owns admission, limits, immutable decoded images, job channels and
 status. Its request/unload/status/size/image accessors and service-pass operation
@@ -175,8 +176,9 @@ late acknowledgements for unloaded/terminated images, fault on malformed current
 ones. `ScriptHost` owns scoped wrappers; `GameRuntime` forwards a read-only view,
 upload acknowledgements and the explicit host preload pump.
 
-`MacroquadRenderer` exposes `attach(session)`, `service_uploads(store, budget)`,
-`render(store, commands)` and `retire()`. Attachment allocates no full-size image.
+`MacroquadRenderer` was specified with attach, upload-service, render and retire
+operations. The implemented signatures and additional admission/validation
+operations are in [src/rendering.rs](../../src/rendering.rs). Attachment allocates no full-size image.
 Upload service returns bounded owned acknowledgements for the next update
 boundary. It retains no borrowed store references across calls. Queued texture
 owners and any temporary immutable CPU owners survive until their work completes;
@@ -205,8 +207,8 @@ machine/frame rate; the fixed simulation timestep does not make I/O deterministi
 ## Probe and observations
 
 The [Rust probe](../../examples/png_sprite_probe.rs) exercises pinned dependency
-APIs directly. It is neither the future renderer nor a second copy of the
-Player renderer. It reuses the actual Player PNG writer. The
+APIs directly and reuses the Player PNG writer. Production integration is
+verified by the [renderer harness](../../examples/renderer_harness.rs). The
 [fixture generator](../../tools/png_probe_fixtures.py) uses Python stdlib and
 independent PNG/expected-pixel specifications; the Rust probe independently
 constructs Adam7 scanlines and checks against its original RGBA bytes.
@@ -238,12 +240,11 @@ cache and OS scheduling uncontrolled, not throughput promises or benchmark perce
 | 2048 GPU upload | 512 region calls, 3.268 ms summed loop; 64 actual passes across frames at 256 KiB/pass; largest pass 0.128 ms |
 | Kenney GPU upload | 36 region calls, 0.163 ms total |
 
-The worker row repeats the same interlaced input through the gated mailbox. Its
-conversion cost is several times the main-thread row above it, reproducibly, because
-the worker parks and unparks between bands and loses cache locality. The selected
-design pays that cost, so the worker row is the representative conversion figure.
-It does not threaten the budget: about 0.029 ms per band leaves eight bands far
-below the 2 ms pass target.
+The worker row repeats the interlaced input through a mailbox that parks/unparks
+between individual bands. Its measured conversion cost was higher (about
+0.029 ms/band), but the probe did not isolate the cause. In particular, cache
+locality was not measured, and production can perform eight bands per grant.
+Do not use this row as a production conversion estimate or latency bound.
 
 GPU destination allocation returned in 0.009 ms (2048) / 0.007 ms (Kenney).
 Drivers may defer real allocation cost to later calls; this measures API return
@@ -262,7 +263,8 @@ The worker probe adds an explicit 40 ms stage delay to make scheduler evidence
 observable. Main-thread polling continued through that delay and actual Adam7
 reader work; cancellation during the delay permitted late reader work to finish
 but prevented ready publication. These are dependency/protocol probes, not claims
-that production GameRuntime loading or its future queue fairness tests exist.
+about production GameRuntime loading or queue fairness; later phases tested
+those through the shared service.
 
 GPU checks passed 100 empty/one/128-image session cycles with changing dimensions
 and contents, identical raw slot IDs, exactly 128 registrations, and every retired
@@ -280,9 +282,8 @@ the generated repeat capture had identical PNG bytes.
 
 These observations establish the selected backend path on this graphics stack.
 They do not establish cross-GPU exact pixels, driver memory reclamation, production
-callback publication/eviction behavior, or full runtime queue safety. Those remain
-the explicit behavioral exits of Phases 1–3, using the actual shared service and
-Player once implemented.
+callback publication/eviction behavior, or full runtime queue safety. Those were the
+Phases 1-3 exits, recorded in ADR-002 using the actual shared service and Player.
 
 ## Check results and handoff
 
@@ -313,8 +314,6 @@ expected-negative assertions. `cargo tree --locked --offline` confirmed image
 The Kenney source PNG hash remained
 `0d9abf9b812a441e1673bc166d61abb6236c0bc46b3775700bd4d4364ba170e0`.
 
-Phase 1 starts with the headless AssetStore and rooted-reader extraction, keeping
-the service out of the kernel and production GPU implementation out of that slice.
-No correctness/feasibility decision remains open for that phase; the unimplemented
-runtime, script, eviction and real-renderer regressions remain its and later
-phases' delivery requirements. No commit or push was made.
+At this handoff, no feasibility decision blocked Phase 1's headless store and
+rooted-reader extraction. Runtime publication, script eviction and production
+renderer regressions remained later delivery gates, since completed in ADR-002.
