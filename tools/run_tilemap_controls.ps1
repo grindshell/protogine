@@ -154,6 +154,13 @@ function Restore-ControlSources {
 }
 
 $controlFailures = @()
+# Every control's full cargo output, for the same reason as the collision
+# harness: a run that disagrees with a serial one cannot be diagnosed from a
+# one-line summary, and the diagnosis is usually a comparison against a control
+# that behaved.
+$controlLogs = Join-Path $controlRepo 'target\tilemap-controls\runs'
+if (Test-Path -LiteralPath $controlLogs) { Remove-Item -LiteralPath $controlLogs -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $controlLogs | Out-Null
 try {
     foreach ($control in $controls) {
         # An edit defaults to the control's own file but may name another, so a
@@ -179,8 +186,11 @@ try {
         $arguments += @('--test', 'tilemap', '--no-default-features', '--', $control.Test)
         $output = & cargo @arguments 2>&1 | Out-String
         $code = $LASTEXITCODE
-        # Read back before restoring: the conclusion is only about this control
-        # if the file cargo compiled still carried the mutation.
+        # Read back before restoring. This establishes that the patch was still
+        # in place when cargo exited, which is weaker than "cargo compiled it" -
+        # a clobber reverted mid-run would pass - but there is no cheap way to
+        # observe the file during a compile, and every instance observed so far
+        # has been persistent.
         $applied = $true
         foreach ($file in $controlSources) {
             if ([IO.File]::ReadAllText((Join-Path $controlTree $file)) -ne $patched[$file]) {
@@ -188,6 +198,7 @@ try {
             }
         }
         Restore-ControlSources
+        [IO.File]::WriteAllText((Join-Path $controlLogs "$($control.Name).txt"), $output, (New-Object Text.UTF8Encoding $false))
 
         $where = ($output -split "`r?`n" | Where-Object { $_ -match 'panicked at|assertion' } | Select-Object -First 2) -join ' | '
         # A zero exit is not evidence on its own: a filter that selects no test
@@ -257,6 +268,9 @@ if ((Get-SourceFingerprint -Repo $controlRepo -Files $controlSources) -ne $contr
 if ($controlFailures.Count -gt 0) {
     "`nUNCOVERED GUARDS:"
     $controlFailures | ForEach-Object { "  $_" }
+    "`nFull cargo output for each: $controlLogs"
+    "A red result from a run that overlapped another cargo invocation is worth"
+    "re-running serially before it is believed; see the header."
     exit 1
 }
 $guards = ($controls | Where-Object { -not $_.Expect }).Count

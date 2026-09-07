@@ -199,8 +199,11 @@ exits zero, and so does a stale binary cargo decided not to rebuild, so either
 could report a live guard as dead or a dead guard as live. Every conclusion is
 gated on four separate things: the patched source surviving the run, the crate
 actually recompiling, exactly one test executing, and a detecting control's test
-reporting failure. Each control's full cargo output is saved under
-`target/<harness>/failures/`. The copy also stamps every file it writes, because
+reporting failure. Every control's full cargo output is saved under
+`target/<harness>/runs/`, passing ones included, because diagnosing a
+disagreement usually means comparing against a control that behaved. The
+read-back establishes that the patch was still in place when cargo exited, which
+is slightly weaker than "cargo compiled it". The copy also stamps every file it writes, because
 `Copy-Item` preserves source timestamps and the copy reuses its own `target/`.
 
 Each harness carries two self-tests it must *refuse*: a control naming a test

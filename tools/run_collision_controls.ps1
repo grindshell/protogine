@@ -302,10 +302,11 @@ function Restore-ControlSources {
 }
 
 $controlFailures = @()
-# A failing control's full cargo output, saved rather than summarised. A run that
+# Every control's full cargo output, saved rather than summarised: a run that
 # disagrees with a serial one is a finding about the harness, and it cannot be
-# diagnosed from a one-line summary after the fact.
-$controlLogs = Join-Path $controlRepo 'target\collision-controls\failures'
+# diagnosed from a one-line summary after the fact. Passing controls are kept
+# too, because the diagnosis is usually a comparison against one.
+$controlLogs = Join-Path $controlRepo 'target\collision-controls\runs'
 if (Test-Path -LiteralPath $controlLogs) { Remove-Item -LiteralPath $controlLogs -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $controlLogs | Out-Null
 function Save-ControlOutput {
@@ -337,8 +338,11 @@ try {
         $arguments += @('--test', 'collision', '--no-default-features', '--', $control.Test)
         $output = & cargo @arguments 2>&1 | Out-String
         $code = $LASTEXITCODE
-        # Read back before restoring: the conclusion is only about this control
-        # if the file cargo compiled still carried the mutation.
+        # Read back before restoring. This establishes that the patch was still
+        # in place when cargo exited, which is weaker than "cargo compiled it" -
+        # a clobber reverted mid-run would pass - but there is no cheap way to
+        # observe the file during a compile, and every instance observed so far
+        # has been persistent.
         $applied = $true
         foreach ($file in $controlSources) {
             if ([IO.File]::ReadAllText((Join-Path $controlTree $file)) -ne $patched[$file]) {
