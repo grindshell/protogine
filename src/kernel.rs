@@ -299,13 +299,13 @@ impl Kernel {
     }
 
     /// The world coordinate of a tile face, for callers converting between tile
-    /// and world coordinates. `None` without a map.
+    /// and world coordinates. Refuses with `NoTileMap` when none is installed.
     pub fn tile_face(&self, axis: Axis, index: i32) -> Result<f64, KernelError> {
         Ok(self.map()?.face(axis, index))
     }
 
     /// The cell containing a world coordinate, saturated one cell outside the
-    /// grid. `None` without a map.
+    /// grid. Refuses with `NoTileMap` when none is installed.
     pub fn tile_at(&self, axis: Axis, world: f64) -> Result<i32, KernelError> {
         Ok(self.map()?.cell_at(axis, world))
     }

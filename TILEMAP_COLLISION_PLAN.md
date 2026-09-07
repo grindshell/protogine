@@ -316,7 +316,7 @@ log anchor. Keep a separate headless assertion of post-step kernel position.
 | Phase | Work | Required exit evidence |
 | --- | --- | --- |
 | 0. Contract and feasibility **(complete)** | Apply accepted T1-T8; freeze M1 API/schema, rounding and refusal semantics. Capture current sprite expectations. Prototype the numerical cases and count worst-case work/storage without adding production APIs. | Met on 2026-09-07; see the [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md). Contracts reflect the accepted decisions; the adjacent-f64 clamp rule holds over 889,145 domain-wide cases with at most two repair steps, no fallbacks and a 2^-28 pixel maximum gap; huge-velocity and maximum-footprint fixtures clamp exactly at the finite boundary; `120 * FIXED_DT` was verified to be exactly 2.0 rather than assumed; measured storage and work fit the caps, with the max-load long-sweep costing 11,386,880 of the 16,777,216 fixed-pass units. Overlap, transition and budget semantics are defined, so no stop gate remains. |
-| 1. Kernel map ownership **(complete)** | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Met on 2026-09-07 by `src/tilemap.rs`, its kernel integration and `tests/tilemap.rs`. Rectangular maps and tiles, negative-origin conversion, malformed size/ID/array input by reason, owned reads and snapshots, region and edit bounds, and a refused replacement leaving the installed map whole are all proven; the suite runs in the core configuration. `tools/run_tilemap_controls.ps1` carries thirteen mutation controls: twelve remove a guard and fail at a named assertion, and one is expected to keep passing because the rule it removes is redundant with another. |
+| 1. Kernel map ownership **(complete)** | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Met on 2026-09-07 by `src/tilemap.rs`, its kernel integration and `tests/tilemap.rs`. Rectangular maps and tiles, negative-origin conversion, malformed size/ID/array input by reason, owned reads and snapshots, region and edit bounds, and a refused replacement leaving the installed map whole are all proven; the suite runs in the core configuration. `tools/run_tilemap_controls.ps1` carries seventeen mutation controls: thirteen fail at a named assertion, three are labelled crash controls because the library panics on its own bounds check before a test assertion is reached, and one is expected to keep passing because the rule it removes is redundant with another. |
 | 2. Colliders and fixed systems | Optional hecs collider, placement guards, pure axis solver and bounded all-candidate commit. Extend all Phase 1 mutations to enforce collider invariants. | Sweeps/teleports/edits obey T3-T6; no-collider integration is unchanged; late failure moves no entity; max-load/watchdog and entity-order checks pass. |
 | 3. Luau integration | Scoped world extensions, raw validation/copying, shared attempts and new work/output budgets; real runtime fixtures. | Phase/expiry/foreign/reused handles, malformed calls, `pcall` latching, allocation rollback, callback ordering, restart/fault and zero-tick/catch-up behavior pass headlessly. |
 | 4. Sample and release proof | Replace sample collision, adapt its probe, add tile-edit/high-speed fixtures, update authoring docs and development checks. | Original room/art/control expectations preserved; collision during loading/unload, same-tick edits, 30/60/144 FPS replay, copied Player captures and injected-input probe pass. Record M1 completion and limits; leave the plan active for M2-M4. |
@@ -448,17 +448,32 @@ and without default features all clean. `cargo test --workspace` reports 187
 passing and 5 ignored across 22 targets, up from 170 across 21; the core
 `--no-default-features` run reports 37 passing across 21 targets, up from 20,
 which is where the new suite's 14 integration and 3 unit tests live.
-`pwsh -NoProfile -File tools/run_tilemap_controls.ps1` reports twelve controls
-detected and one redundant guard confirmed, in both debug and `-Release`.
+`pwsh -NoProfile -File tools/run_tilemap_controls.ps1` reports thirteen assertion
+controls detected, three crash controls detected and one redundant guard
+confirmed, in both debug and `-Release`.
 
-Named negative-control assertions: `stop must release map storage`,
-`a far coordinate must saturate one cell out`, `cell_at did not converge` (debug)
-and `the cell left of a negative origin is -1, not 0` (release), the row-major
-and solidity cell comparisons, `must be solid`, the region bounds panic and cap
-assertion, `bad ID at`, the cell-product and geometry-limit refusals, and the
-`set_tile` bounds assertion. A thirteenth control replaces mathematical floor
-alone and is expected to keep passing, which records that floor and the
-exact-face correction are redundant by design rather than that either is dead.
+Every marker names the exact assertion text. Generic `assertion` or `panicked`
+substrings are refused as markers: they match any failure at all, which would
+reduce the harness to "something broke" and silently absorb a control that moved
+to a different failure site. Where a control fails elsewhere in release, both
+markers are recorded and the profile selects. Named assertions: `stop must
+release map storage`, `a far coordinate must saturate one cell out`, `cell_at did
+not converge` (debug) and `the cell left of a negative origin is -1, not 0`
+(release), `tile ID at 1,0`, `solidity at 3,0`, `must be solid`, `region must
+refuse an empty width`, `only the per-call cap can refuse a region this map
+contains`, `bad ID at`, `the cell product bound must refuse a 1024x1024 map`,
+`schema must refuse zero columns`, `schema must refuse zero tile width` and `one
+pixel past the geometry limit must be refused`.
+
+Three controls are labelled crash controls rather than assertion controls:
+removing the region bounds check, the region negative-origin check or the
+`set_tile` bounds check makes the library panic on its own slice or index check
+before any test assertion is reached. That is weaker evidence than a test
+catching the mistake, so they are labelled instead of being allowed to look like
+the others; their markers pin the exact panic text per profile. A seventeenth
+control replaces mathematical floor alone and is expected to keep passing, which
+records that floor and the exact-face correction are redundant by design rather
+than that either is dead.
 
 Two Phase 0 obligations are discharged: `TileMap::cell_at` saturates one cell
 outside the grid and debug-asserts convergence instead of relying on callers
@@ -471,8 +486,20 @@ Limits unchanged from the Phase 0 record. Deliberately not in this phase, and
 still Phase 2's: colliders, sweeps, the T6 collider guards on every mutation
 above, and the allocation-free no-map/no-collider integration control. Phase 1
 adds no per-tick work and leaves `fixed_update` untouched, which
-`a_map_changes_nothing_about_entities_without_colliders` pins. The next unmet
-gate is Phase 2.
+`a_map_changes_nothing_about_entities_without_colliders` pins.
+
+Two coverage gaps are recorded rather than closed, both because Phase 1 cannot
+reach them. `a_refused_replacement_leaves_the_installed_map_whole` proves less
+than its name: `set_tilemap` cannot currently fail, because a candidate that does
+not validate never becomes a `TileMap`, so its kernel-side assertions are
+trivially true. Atomicity by construction is the better design and is why the
+test has nothing to catch yet, but Phase 2 makes `set_tilemap` genuinely fallible
+through collider revalidation, and that test needs teeth at the same moment.
+`TileMapError::Capacity` is likewise unexercised: `try_reserve_exact` of at most
+8 KiB will not fail on any machine this runs on. It stays as defensive code
+covering the fallible-reservation rule, with no claim of coverage.
+
+The next unmet gate is Phase 2.
 
 Decision update, 2026-09-07: the owner accepted T2-T8, explicitly required the
 collider to be a hecs component, accepted T1's first milestone while making

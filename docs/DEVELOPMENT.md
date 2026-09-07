@@ -209,11 +209,16 @@ pwsh -NoProfile -File tools/run_tilemap_controls.ps1
 pwsh -NoProfile -File tools/run_tilemap_controls.ps1 -Release
 ```
 
-Run both profiles when changing `cell_at`: in debug its own convergence assertion
-fires first, and only in release does the test's assertion do the catching. One
-control is expected to *pass*, recording that mathematical floor and the
-exact-face correction are redundant by design. Rerun after editing either file;
-a stale anchor is reported as a stale control rather than a passing guard.
+Run both profiles: several controls fail at different sites once `debug_assert`
+is compiled out, and each marker names the exact assertion for its profile.
+Markers must never be a bare `assertion` or `panicked` substring, which would
+match any failure and reduce the harness to "something broke". Three controls are
+labelled crash controls, where removing the guard panics inside the library
+before a test assertion is reached; that is weaker evidence than a test catching
+the mistake, so it is labelled rather than hidden. One control is expected to
+*pass*, recording that mathematical floor and the exact-face correction are
+redundant by design. Rerun after editing either file; a stale anchor is reported
+as a stale control rather than a passing guard.
 
 ### Tilemaps and collision
 

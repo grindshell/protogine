@@ -69,9 +69,17 @@ fn row_major_ids_and_solidity_survive_a_rectangular_grid() {
     for row in 0..ROWS as i32 {
         for column in 0..COLUMNS as i32 {
             let expected = CELLS[(row as u32 * COLUMNS + column as u32) as usize];
-            assert_eq!(grid.tile(column, row).unwrap(), expected, "{column},{row}");
+            assert_eq!(
+                grid.tile(column, row).unwrap(),
+                expected,
+                "tile ID at {column},{row}"
+            );
             let solid = expected != 0 && SOLIDS[expected as usize - 1];
-            assert_eq!(grid.is_solid(column, row), solid, "{column},{row}");
+            assert_eq!(
+                grid.is_solid(column, row),
+                solid,
+                "solidity at {column},{row}"
+            );
         }
     }
     // The two cells that separate row-major from column-major on this fixture.
@@ -199,10 +207,18 @@ fn faces_stay_exact_against_the_geometry_limit() {
     // One pixel further out on either axis leaves the domain.
     let mut past = description;
     past.origin_x += 1;
-    assert_eq!(past.check(), Err(TileMapError::Geometry));
+    assert_eq!(
+        past.check(),
+        Err(TileMapError::Geometry),
+        "one pixel past the geometry limit must be refused"
+    );
     let mut below = description;
     below.origin_y = (-GEOMETRY_LIMIT - 1) as i32;
-    assert_eq!(below.check(), Err(TileMapError::Geometry));
+    assert_eq!(
+        below.check(),
+        Err(TileMapError::Geometry),
+        "one pixel below the geometry limit must be refused"
+    );
     let mut edge = description;
     edge.origin_x = -(GEOMETRY_LIMIT as i32);
     edge.origin_y = -(GEOMETRY_LIMIT as i32);
@@ -212,8 +228,9 @@ fn faces_stay_exact_against_the_geometry_limit() {
 #[test]
 fn malformed_dimensions_ids_and_arrays_are_refused_by_reason() {
     let valid = info();
-    for (description, expected) in [
+    for (label, description, expected) in [
         (
+            "zero columns",
             TileMapInfo {
                 columns: 0,
                 ..valid
@@ -221,6 +238,7 @@ fn malformed_dimensions_ids_and_arrays_are_refused_by_reason() {
             TileMapError::Dimension,
         ),
         (
+            "too many rows",
             TileMapInfo {
                 rows: MAX_DIMENSION + 1,
                 ..valid
@@ -228,6 +246,7 @@ fn malformed_dimensions_ids_and_arrays_are_refused_by_reason() {
             TileMapError::Dimension,
         ),
         (
+            "zero tile width",
             TileMapInfo {
                 tile_width: 0,
                 ..valid
@@ -235,29 +254,38 @@ fn malformed_dimensions_ids_and_arrays_are_refused_by_reason() {
             TileMapError::TileSize,
         ),
         (
+            "an oversized tile height",
             TileMapInfo {
                 tile_height: MAX_TILE_SIZE + 1,
                 ..valid
             },
             TileMapError::TileSize,
         ),
-        (
-            // Each dimension is legal on its own; only the product is not.
-            TileMapInfo {
-                columns: MAX_DIMENSION,
-                rows: MAX_DIMENSION,
-                ..valid
-            },
-            TileMapError::CellCount,
-        ),
     ] {
-        assert_eq!(description.check(), Err(expected), "{description:?}");
+        assert_eq!(
+            description.check(),
+            Err(expected),
+            "schema must refuse {label}"
+        );
         assert_eq!(
             TileMap::new(description, vec![true], Vec::new()).err(),
             Some(expected),
-            "construction must refuse for the same reason"
+            "construction must refuse {label} for the same reason"
         );
     }
+
+    // Each dimension is legal on its own; only the product is not, so this is
+    // the one refusal the per-axis bounds above cannot account for.
+    let product = TileMapInfo {
+        columns: MAX_DIMENSION,
+        rows: MAX_DIMENSION,
+        ..valid
+    };
+    assert_eq!(
+        product.check(),
+        Err(TileMapError::CellCount),
+        "the cell product bound must refuse a 1024x1024 map"
+    );
 
     // The largest legal shape is accepted, so the bounds above are exclusive of
     // the legal values rather than off by one.
@@ -327,20 +355,26 @@ fn regions_copy_a_bounded_rectangle_and_refuse_everything_else() {
         vec![CELLS[CELLS.len() - 1]]
     );
 
-    for (column, row, columns, rows) in [
-        (0, 0, 0, 1),                    // empty
-        (0, 0, 1, 0),                    // empty
-        (0, 0, COLUMNS + 1, ROWS),       // one column past the edge
-        (0, 0, COLUMNS, ROWS + 1),       // one row past the edge
-        (1, 0, COLUMNS, ROWS),           // shifted off the edge
-        (-1, 0, 1, 1),                   // negative origin
-        (0, -1, 1, 1),                   // negative origin
-        (0, 0, MAX_REGION_CELLS + 1, 1), // over the per-call cap
+    for (label, column, row, columns, rows) in [
+        ("an empty width", 0, 0, 0, 1),
+        ("an empty height", 0, 0, 1, 0),
+        ("one column past the edge", 0, 0, COLUMNS + 1, ROWS),
+        ("one row past the edge", 0, 0, COLUMNS, ROWS + 1),
+        ("a rectangle shifted off the edge", 1, 0, COLUMNS, ROWS),
+        ("a negative column", -1, 0, 1, 1),
+        ("a negative row", 0, -1, 1, 1),
+        (
+            "a request over the per-call cap",
+            0,
+            0,
+            MAX_REGION_CELLS + 1,
+            1,
+        ),
     ] {
         assert_eq!(
             grid.region(column, row, columns, rows).err(),
             Some(TileMapError::Region),
-            "{column},{row} {columns}x{rows}"
+            "region must refuse {label}"
         );
     }
 
@@ -360,7 +394,8 @@ fn regions_copy_a_bounded_rectangle_and_refuse_everything_else() {
     // One row more is still wholly inside this map, so only the cap refuses it.
     assert_eq!(
         wide.region(0, 0, MAX_DIMENSION, rows_at_cap + 1).err(),
-        Some(TileMapError::Region)
+        Some(TileMapError::Region),
+        "only the per-call cap can refuse a region this map contains"
     );
 }
 
@@ -528,19 +563,37 @@ fn a_map_changes_nothing_about_entities_without_colliders() {
             .set_velocity(&entity, protogine::kernel::Velocity { x: 60.0, y: -60.0 })
             .unwrap();
     }
+    // Track where it actually went, so "through a wall" is checked rather than
+    // asserted next to the checks.
+    let mut entered_a_solid_tile = false;
     for _ in 0..10 {
         bare.fixed_update().unwrap();
         mapped.fixed_update().unwrap();
+        let position = mapped.snapshot().unwrap()[0].position;
+        let column = mapped.tile_at(Axis::X, position.x).unwrap();
+        let row = mapped.tile_at(Axis::Y, position.y).unwrap();
+        // `tile` refuses outside the map, so this counts only solid cells the
+        // entity was genuinely inside, never the solid exterior.
+        if mapped.tile(column, row).is_ok() && mapped.tile_solid(column, row).unwrap() {
+            entered_a_solid_tile = true;
+        }
     }
     assert_eq!(
         bare.snapshot().unwrap()[0].position,
         mapped.snapshot().unwrap()[0].position
     );
-    // Including straight through a solid tile and out of the map entirely: only
-    // an entity given a collider in Phase 2 is constrained.
+    assert!(
+        entered_a_solid_tile,
+        "the entity never entered a solid tile, so this proves nothing about collision"
+    );
+    // And it ended outside the map entirely. Only an entity given a collider in
+    // Phase 2 is constrained by either.
     let position = mapped.snapshot().unwrap()[0].position;
     assert_eq!(position, Position { x: 18.0, y: -2.0 });
-    assert!(mapped.tile_solid(1, 0).unwrap(), "it passed through a wall");
+    assert!(
+        position.y < mapped.tile_face(Axis::Y, 0).unwrap(),
+        "the entity should have left the map"
+    );
 }
 
 #[test]

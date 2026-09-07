@@ -5,6 +5,17 @@
 # assertion. A guard that cannot be observed failing is not covered, and a
 # passing suite alone does not distinguish the two.
 #
+# Markers name the exact assertion, never a generic 'assertion' or 'panicked'
+# substring: those match any failure at all, which would reduce the harness to
+# "something broke" and silently absorb a control that moved to a different
+# failure site. Where a control fails somewhere else in release, both markers
+# are listed and the profile selects.
+#
+# Two controls are marked `Crash`. Removing those guards does not reach a test
+# assertion at all; the library panics first on its own bounds check. That is
+# weaker evidence than a test catching the mistake, so they are labelled rather
+# than allowed to look like assertion controls.
+#
 # Source files are restored after every control and again on any failure or
 # interruption, and the run refuses to start on a dirty working tree so a
 # restore can never be mistaken for the author's own edit.
@@ -43,7 +54,7 @@ $controls = @(
        Edits = @(@{ F = 'let guess = ((world - origin) / tile).floor();'; R = 'let guess = ((world - origin) / tile).trunc();' }) }
 
     @{ Name = 'transposed-offset'; File = 'src/tilemap.rs'; Test = 'row_major_ids_and_solidity'
-       Marker = 'assertion'
+       Marker = 'tile ID at 1,0'
        Edits = @(@{ F = 'row as usize * self.info.columns as usize + column as usize'; R = 'column as usize * self.info.rows as usize + row as usize' }) }
 
     @{ Name = 'outside-not-solid'; File = 'src/tilemap.rs'; Test = 'outside_the_map_is_solid'
@@ -51,15 +62,27 @@ $controls = @(
        Edits = @(@{ F = "if !self.contains(column, row) {`n            return true;`n        }"; R = "if !self.contains(column, row) {`n            return false;`n        }" }) }
 
     @{ Name = 'nonzero-is-solid'; File = 'src/tilemap.rs'; Test = 'row_major_ids_and_solidity'
-       Marker = 'assertion'
+       Marker = 'solidity at 3,0'
        Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
 
-    @{ Name = 'unbounded-region'; File = 'src/tilemap.rs'; Test = 'regions_copy_a_bounded_rectangle'
-       Marker = 'panicked'
+    @{ Name = 'unbounded-region'; File = 'src/tilemap.rs'; Test = 'regions_copy_a_bounded_rectangle'; Crash = $true
+       Marker = 'range end index 16 out of range for slice of length 15'
        Edits = @(@{ F = 'if far_column > i64::from(self.info.columns) || far_row > i64::from(self.info.rows) {'; R = 'if false {' }) }
 
+    # In release the negative column becomes a huge usize and the slice range
+    # rejects it; in debug the contains assertion inside `offset` gets there
+    # first. Only Vec's own bounds checking stands behind this guard, which is
+    # why it is worth controlling at all.
+    @{ Name = 'region-negative-origin'; File = 'src/tilemap.rs'; Test = 'regions_copy_a_bounded_rectangle'; Crash = $true
+       Marker = if ($Release) { 'range start index 18446744073709551615 out of range for slice of length 15' } else { 'assertion failed: self.contains(column, row)' }
+       Edits = @(@{ F = 'if column < 0 || row < 0 {'; R = 'if false {' }) }
+
+    @{ Name = 'empty-region-allowed'; File = 'src/tilemap.rs'; Test = 'regions_copy_a_bounded_rectangle'
+       Marker = 'region must refuse an empty width'
+       Edits = @(@{ F = 'if columns == 0 || rows == 0 {'; R = 'if false {' }) }
+
     @{ Name = 'uncapped-region'; File = 'src/tilemap.rs'; Test = 'regions_copy_a_bounded_rectangle'
-       Marker = 'assertion'
+       Marker = 'only the per-call cap can refuse a region this map contains'
        Edits = @(@{ F = 'if requested > u64::from(MAX_REGION_CELLS) {'; R = 'if false {' }) }
 
     @{ Name = 'unchecked-tile-id'; File = 'src/tilemap.rs'; Test = 'malformed_dimensions_ids_and_arrays'
@@ -67,15 +90,23 @@ $controls = @(
        Edits = @(@{ F = 'if cells.iter().any(|id| *id > highest) {'; R = 'if false {' }) }
 
     @{ Name = 'unchecked-cell-product'; File = 'src/tilemap.rs'; Test = 'malformed_dimensions_ids_and_arrays'
-       Marker = 'assertion'
+       Marker = 'the cell product bound must refuse a 1024x1024 map'
        Edits = @(@{ F = 'if u64::from(self.columns) * u64::from(self.rows) > u64::from(MAX_CELLS) {'; R = 'if false {' }) }
 
+    @{ Name = 'unchecked-dimension'; File = 'src/tilemap.rs'; Test = 'malformed_dimensions_ids_and_arrays'
+       Marker = 'schema must refuse zero columns'
+       Edits = @(@{ F = "if !(1..=MAX_DIMENSION).contains(&count) {"; R = 'if false {' }) }
+
+    @{ Name = 'unchecked-tile-size'; File = 'src/tilemap.rs'; Test = 'malformed_dimensions_ids_and_arrays'
+       Marker = 'schema must refuse zero tile width'
+       Edits = @(@{ F = "if !(1..=MAX_TILE_SIZE).contains(&tile) {"; R = 'if false {' }) }
+
     @{ Name = 'no-geometry-limit'; File = 'src/tilemap.rs'; Test = 'faces_stay_exact_against_the_geometry_limit'
-       Marker = 'assertion'
+       Marker = 'one pixel past the geometry limit must be refused'
        Edits = @(@{ F = 'if origin < -GEOMETRY_LIMIT || far > GEOMETRY_LIMIT {'; R = 'if false {' }) }
 
-    @{ Name = 'edit-skips-bounds'; File = 'src/tilemap.rs'; Test = 'single_cell_edits_apply_immediately'
-       Marker = 'panicked'
+    @{ Name = 'edit-skips-bounds'; File = 'src/tilemap.rs'; Test = 'single_cell_edits_apply_immediately'; Crash = $true
+       Marker = if ($Release) { 'index out of bounds: the len is 15 but the index is 18446744073709551615' } else { 'assertion failed: self.contains(column, row)' }
        Edits = @(@{ F = "if !self.contains(column, row) {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()"; R = "if false {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()" }) }
 )
 
@@ -122,6 +153,8 @@ try {
             $controlFailures += "$($control.Name): $($control.Test) still passed with the guard removed"
         } elseif ($output -notmatch [regex]::Escape($control.Marker)) {
             $controlFailures += "$($control.Name): failed at '$where', not '$($control.Marker)'"
+        } elseif ($control.Crash) {
+            "CRASH CONTROL DETECTED: $($control.Name) -> $where"
         } else {
             "CONTROL DETECTED: $($control.Name) -> $where"
         }
