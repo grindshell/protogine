@@ -196,10 +196,19 @@ Runs may therefore overlap freely and may be run against uncommitted work.
 
 A zero exit is never read as evidence on its own. A filter that selects no test
 exits zero, and so does a stale binary cargo decided not to rebuild, so either
-could report a live guard as dead or a dead guard as live. Each run must state
-that it executed exactly one test, and a detecting control must state that the
-test failed. The copy also stamps every file it writes, because `Copy-Item`
-preserves source timestamps and the copy reuses its own `target/` between runs.
+could report a live guard as dead or a dead guard as live. Every conclusion is
+gated on four separate things: the patched source surviving the run, the crate
+actually recompiling, exactly one test executing, and a detecting control's test
+reporting failure. Each control's full cargo output is saved under
+`target/<harness>/failures/`. The copy also stamps every file it writes, because
+`Copy-Item` preserves source timestamps and the copy reuses its own `target/`.
+
+**Re-run serially before believing a red result.** Isolation from the working
+tree is proven by the fingerprint; isolation from concurrent `cargo` is not.
+Under heavy parallel cargo load a control has been seen reporting uncovered where
+a serial run on the same tree passes all of them. The mechanism is unidentified,
+every observed instance has been in the safe direction, and the gates above exist
+so that a wrong answer is loud rather than silent.
 
 Markers must never be a bare `assertion` or `panicked` substring: those match any
 failure at all, which would reduce a harness to "something broke" and silently

@@ -20,6 +20,10 @@
 # to the working tree, so a build that overlaps this run cannot pick up a
 # deliberately broken source. The run proves that rather than asserting it: it
 # fingerprints the engine sources before and after and fails if either moved.
+#
+# Isolation from the working tree is proven; isolation from concurrent `cargo`
+# is not. See the header of `run_collision_controls.ps1`: re-run serially before
+# believing a red result.
 param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 $controlRepo = Split-Path -Parent $PSScriptRoot
@@ -159,6 +163,14 @@ try {
         $arguments += @('--test', 'tilemap', '--no-default-features', '--', $control.Test)
         $output = & cargo @arguments 2>&1 | Out-String
         $code = $LASTEXITCODE
+        # Read back before restoring: the conclusion is only about this control
+        # if the file cargo compiled still carried the mutation.
+        $applied = $true
+        foreach ($file in $controlSources) {
+            if ([IO.File]::ReadAllText((Join-Path $controlTree $file)) -ne $patched[$file]) {
+                $applied = $false
+            }
+        }
         Restore-ControlSources
 
         $where = ($output -split "`r?`n" | Where-Object { $_ -match 'panicked at|assertion' } | Select-Object -First 2) -join ' | '
@@ -166,8 +178,16 @@ try {
         # also exits zero, and so does a stale binary cargo decided not to
         # rebuild. Require the run to say it executed exactly one test, and a
         # detecting control to say it failed.
-        if ($output -match 'error\[E\d+\]|could not compile') {
+        if (-not $applied) {
+            $controlFailures += "$($control.Name): the patched source changed under the run, so it proves nothing"
+        } elseif ($output -match 'error\[E\d+\]|could not compile') {
             $controlFailures += "$($control.Name): did not compile, so it proves nothing"
+        } elseif ($output -notmatch 'Compiling protogine') {
+            # Every control edits a source file, so a correct run must rebuild.
+            # If cargo decided the crate was up to date, it ran a binary built
+            # from different code and the result is about that binary, not this
+            # control. Observed under concurrent `cargo` load.
+            $controlFailures += "$($control.Name): cargo did not rebuild, so the run is about a stale binary"
         } elseif ($output -notmatch 'running 1 test(?!s)') {
             $controlFailures += "$($control.Name): the run did not execute exactly one test, so it proves nothing"
         } elseif ($control.Marker -ne 'PASSES' -and $output -notmatch 'test result: FAILED') {

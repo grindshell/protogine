@@ -595,6 +595,20 @@ guard as live. Both harnesses now require the run to state that it executed
 exactly one test, and require a detecting control to state that the test failed,
 rather than inferring both from an exit code.
 
+**Isolation from the working tree is proven; isolation from concurrent `cargo`
+is not, and the mechanism is unidentified.** Under heavy parallel cargo load, a
+control has been observed reporting uncovered where a serial run on the same tree
+passes all of them - by the review session first, and reproduced here once before
+becoming elusive again. Every observed instance has been in the safe direction:
+the harness cried wolf rather than passing a control that had not applied. Each
+conclusion is now separately gated on the patched source surviving the run, the
+crate actually recompiling, exactly one test executing, and a detecting control's
+test reporting failure, and every control's full cargo output is saved so a
+disagreement can be diagnosed rather than re-guessed. The headers say to re-run
+serially before believing a red result. This is recorded as an open limitation
+rather than a fixed defect, because it has not been reproduced on demand and no
+mechanism has been established.
+
 One control is recorded as redundant in both profiles and one in release only.
 Removing the body sort changes nothing, because bodies never affect one another,
 and the difference is not observable through the API at all: a work or invariant

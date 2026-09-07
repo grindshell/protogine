@@ -22,6 +22,16 @@
 # to the working tree, so a build that overlaps this run cannot pick up a
 # deliberately broken source. The run proves that rather than asserting it: it
 # fingerprints the engine sources before and after and fails if either moved.
+#
+# Isolation from the working tree is proven; isolation from concurrent `cargo`
+# is not. Under heavy parallel cargo load a control has been observed reporting
+# uncovered when a serial run on the same tree passes all of them. The mechanism
+# is unidentified. Every observed instance has been in the safe direction - the
+# harness cried wolf rather than passing a control that had not applied - and
+# each conclusion is now separately gated on the patch surviving the run, the
+# crate actually recompiling, exactly one test executing, and a detecting
+# control's test reporting failure. Re-run serially before believing a red
+# result, and read the saved cargo output for the control that failed.
 param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 $controlRepo = Split-Path -Parent $PSScriptRoot
@@ -275,6 +285,16 @@ function Restore-ControlSources {
 }
 
 $controlFailures = @()
+# A failing control's full cargo output, saved rather than summarised. A run that
+# disagrees with a serial one is a finding about the harness, and it cannot be
+# diagnosed from a one-line summary after the fact.
+$controlLogs = Join-Path $controlRepo 'target\collision-controls\failures'
+if (Test-Path -LiteralPath $controlLogs) { Remove-Item -LiteralPath $controlLogs -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $controlLogs | Out-Null
+function Save-ControlOutput {
+    param([string]$Name, [string]$Text)
+    [IO.File]::WriteAllText((Join-Path $controlLogs "$Name.txt"), $Text, (New-Object Text.UTF8Encoding $false))
+}
 try {
     foreach ($control in $controls) {
         # An edit defaults to the control's own file but may name another, so a
@@ -300,7 +320,16 @@ try {
         $arguments += @('--test', 'collision', '--no-default-features', '--', $control.Test)
         $output = & cargo @arguments 2>&1 | Out-String
         $code = $LASTEXITCODE
+        # Read back before restoring: the conclusion is only about this control
+        # if the file cargo compiled still carried the mutation.
+        $applied = $true
+        foreach ($file in $controlSources) {
+            if ([IO.File]::ReadAllText((Join-Path $controlTree $file)) -ne $patched[$file]) {
+                $applied = $false
+            }
+        }
         Restore-ControlSources
+        Save-ControlOutput -Name $control.Name -Text $output
 
         $where = ($output -split "`r?`n" | Where-Object { $_ -match 'panicked at|assertion|left:|right:' } | Select-Object -First 3) -join ' | '
         # A zero exit is not evidence on its own: a filter that selects no test
@@ -308,8 +337,16 @@ try {
         # rebuild. Both would read as "the guard is dead" or "the guard is live"
         # at random, which is worse than no harness. Require the run to say it
         # executed exactly one test, and a detecting control to say it failed.
-        if ($output -match 'error\[E\d+\]|could not compile') {
+        if (-not $applied) {
+            $controlFailures += "$($control.Name): the patched source changed under the run, so it proves nothing"
+        } elseif ($output -match 'error\[E\d+\]|could not compile') {
             $controlFailures += "$($control.Name): did not compile, so it proves nothing"
+        } elseif ($output -notmatch 'Compiling protogine') {
+            # Every control edits a source file, so a correct run must rebuild.
+            # If cargo decided the crate was up to date, it ran a binary built
+            # from different code and the result is about that binary, not this
+            # control. Observed under concurrent `cargo` load.
+            $controlFailures += "$($control.Name): cargo did not rebuild, so the run is about a stale binary"
         } elseif ($output -notmatch 'running 1 test(?!s)') {
             $controlFailures += "$($control.Name): the run did not execute exactly one test, so it proves nothing"
         } elseif (-not $control.Passes -and $output -notmatch 'test result: FAILED') {
@@ -348,6 +385,9 @@ if ((Get-SourceFingerprint -Repo $controlRepo -Files $controlSources) -ne $contr
 if ($controlFailures.Count -gt 0) {
     "`nUNCOVERED GUARDS:"
     $controlFailures | ForEach-Object { "  $_" }
+    "`nFull cargo output for each: $controlLogs"
+    "A red result from a run that overlapped another cargo invocation is worth"
+    "re-running serially before it is believed; see the header."
     exit 1
 }
 "`nAll $($controls.Count) collision guards behaved as specified."

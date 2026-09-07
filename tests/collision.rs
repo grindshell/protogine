@@ -679,7 +679,9 @@ fn the_clamp_postcondition_holds_against_an_interior_face() {
     // source is unavailable and the only one left is the face's own alignment.
     // Hence binade-boundary faces and a 2^-31 offset grid: without both, this
     // configuration finds nothing, which says how rare the effect is at this
-    // ratio rather than anything about the rule.
+    // ratio rather than anything about the rule. Walking adjacent *extents*
+    // finds nothing here either, for the same reason: the extent is not the
+    // sensitive parameter, the offset is.
     let step = 2.0_f64.powi(-31);
     let mut repairs = 0;
     let mut cases = 0;
