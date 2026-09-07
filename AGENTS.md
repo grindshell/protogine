@@ -30,8 +30,12 @@ the shared library also builds with `--no-default-features`.
 
 [README](README.md) documents running games and the implemented APIs/limits.
 [TODO](TODO.md) owns the remaining feature backlog; the root
-[tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) is a draft with implementation
-unstarted. Proposed plan contracts do not supersede implemented behavior.
+[tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) records accepted T1-T8 with
+implementation unstarted. Single-map collision is the first milestone;
+simultaneous maps, independent layers and streaming are required before full
+plan completion. Colliders are hecs components; T6's first-milestone lifecycle
+must be revised for later scope. Detailed proposals remain marked in the plan;
+accepted directions do not imply implemented behavior.
 [Development and verification](docs/DEVELOPMENT.md) owns the required check
 matrix and harness guidance. [Implementation records](docs/implementation/README.md)
 retain decisions, phase contracts, evidence and deferred scope. Both scripting/C

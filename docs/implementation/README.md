@@ -10,7 +10,7 @@ describes current behavior; [AGENTS](../../AGENTS.md) owns contribution rules an
 
 | Plan | Status |
 | --- | --- |
-| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | Draft for review; implementation unstarted |
+| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required, implementation unstarted |
 
 Active plans live at the repository root and move here when complete.
 

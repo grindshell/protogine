@@ -2,16 +2,31 @@
 
 Current backlog, reconciled with the implementation records on 2026-09-07.
 Feature checkboxes track unimplemented scope; verification gaps are listed
-separately below. Only the next milestone has
-a draft execution plan; the other groups have no committed order or design.
+separately below. Tilemaps/collision has an active plan with accepted directions
+and staged core delivery; the other groups have no committed order or design.
 Completed work and historical evidence live in [implementation records](docs/implementation/README.md).
 
-## Next milestone
+## Active feature: tilemaps and collision
 
 - [ ] **Engine-owned tilemaps and solid-tile collision.** Move authoritative
   grid state and collision-aware movement into the shared kernel, with Luau
-  authoring APIs and a migrated sprite sample. See the draft
-  [tilemap/collision plan](TILEMAP_COLLISION_PLAN.md); implementation is unstarted.
+  authoring APIs and a migrated sprite sample. The overall feature stays open
+  until all four required milestones below are delivered. See the
+  [tilemap/collision plan](TILEMAP_COLLISION_PLAN.md); T1-T8 are accepted with
+  scope clarifications, and implementation is unstarted.
+
+- [ ] **M1: Single-map tilemaps and solid-tile collision.** The next delivery:
+  one kernel map, optional hecs colliders, swept movement and sample migration.
+- [ ] **M2: Simultaneous maps.** Independent live maps, entity membership,
+  transfers and map-local lifecycle, including the required T6 revision.
+- [ ] **M3: Independent layers.** Separate tile layers with explicit editing,
+  visual order, collision participation and lifecycle.
+- [ ] **M4: Streaming.** Incremental region loading/retirement with bounded
+  residency/work and defined behavior for colliders, unavailable data and edits.
+
+M2-M4 are required core features, not optional deferred extensions. Their
+detailed contracts and limits must be frozen before their implementation. M1
+completion does not complete the feature or archive its plan.
 
 ## Core product work
 

@@ -3,8 +3,9 @@
 Protogine (Prototype Engine) is a tile-based game engine inspired by RPG Maker,
 with a shared kernel for the standalone Player and planned editor.
 
-See [TODO.md](TODO.md) for remaining features and the draft
-[tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) for the next milestone.
+See [TODO.md](TODO.md) for remaining features and the
+[tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) for accepted directions and
+required milestones, beginning with single-map collision.
 
 The Player runs shipped Luau games through the shared runtime. It opens a
 resizable window and displays **Missing game data** when no bundle is present.
