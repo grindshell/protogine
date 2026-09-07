@@ -83,13 +83,24 @@ reason.
 against the grid - the sweep, the placement check, `set_position`, cell-edit
 validation and install revalidation - must reconstruct the box with the identical
 expression `(position + offset) + size`, through one shared helper rather than a
-locally reassociated equivalent. This is a correctness requirement, not a style
-preference: N5 leaves a clamped body within one ulp of its blocking face at the
-domain edge - the measured worst gap of 2^-28 is exactly the ulp there - so a
-differently associated sum has enough room to land on the wrong side of it. No
-divergence between associations was observed over 39,939 domain-edge cases, so
-this is thin-margin hardening rather than a demonstrated bug; freezing it is what
-keeps it that way.
+locally reassociated equivalent.
+
+This is a correctness requirement rather than a style preference, and the reason
+is structural, not statistical. Equality with the blocking face is permitted by
+N3 and routinely attained, so the reconstructed edge has **zero** margin by
+design: a reassociation that rounds even one ulp high converts a legal flush
+contact into an overlap. The aligned case is the common one, not a corner. Three
+fixtures in the probe land flush and then assert the box is free - `edge contact
+is free: a flush box must not overlap` at face 64, `maximum footprint: the
+clamped box must be free` reconstructing to exactly 16777216.0 at the geometry
+limit, and `sample fence stop` where the shipped sample's 640 + 32 is exactly the
+fence face 672. Each of those breaks under a one-ulp-high reconstruction.
+
+The residual gap N5 reports is a rounding statistic and says nothing about this
+margin: it is a maximum, while what matters here is the minimum, which is zero.
+No divergence between associations was observed over 39,939 domain-edge cases, so
+this remains hardening rather than a demonstrated bug - but the justification does
+not depend on any measured number and survives those numbers changing.
 
 **N4. Sweeps enumerate faces, never pixels or endpoints.** For positive travel,
 start at the first face at or after the leading edge and iterate while
