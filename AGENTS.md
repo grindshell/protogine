@@ -29,6 +29,9 @@ the shared library also builds with `--no-default-features`.
 | Native | [Manifest](src/manifest.rs), [loader](src/plugins.rs), [buffer bridge](src/scripting/native.rs), [SDK](sdk/src/lib.rs), generated [C header](include/protogine_plugin.h) and [headergen](tools/headergen/src/main.rs) |
 
 [README](README.md) documents running games and the implemented APIs/limits.
+[TODO](TODO.md) owns the remaining feature backlog; the root
+[tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) is a draft with implementation
+unstarted. Proposed plan contracts do not supersede implemented behavior.
 [Development and verification](docs/DEVELOPMENT.md) owns the required check
 matrix and harness guidance. [Implementation records](docs/implementation/README.md)
 retain decisions, phase contracts, evidence and deferred scope. Both scripting/C

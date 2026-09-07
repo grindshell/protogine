@@ -1,9 +1,18 @@
 # Implementation records
 
 Accepted decisions, phase contracts, delivery evidence and deferred scope live
-here. No plan is currently in progress. The [authoring README](../../README.md)
+here. The [root TODO](../../TODO.md) owns the remaining feature backlog.
+The [authoring README](../../README.md)
 describes current behavior; [AGENTS](../../AGENTS.md) owns contribution rules and
 [DEVELOPMENT](../DEVELOPMENT.md) owns current verification commands.
+
+## Planned
+
+| Plan | Status |
+| --- | --- |
+| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | Draft for review; implementation unstarted |
+
+Active plans live at the repository root and move here when complete.
 
 ## Completed
 
