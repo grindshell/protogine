@@ -1,11 +1,12 @@
 # ADR-002: Bundle PNG assets and sprite drawing
 
-**Status:** Accepted design; Phases 0 and 1 complete. Phases 2-4 not started.
+**Status:** Accepted design; Phases 0, 1 and 2 complete. Phases 3-4 not started.
 P1-P8, including the P7 manual-eviction extension, accepted 2026-09-06.
 The [Phase 0 record](PNG_SPRITE_PHASE0.md) freezes the implementation contracts
 and records dependency/worker/GPU feasibility evidence. Phase 1 implemented the
-headless asset service; its record is at the end of this document. The Luau
-bindings, runtime integration, shared renderer and sample remain unimplemented.
+headless asset service and Phase 2 its Luau and runtime integration; their
+records are at the end of this document. The shared renderer, GPU residency and
+the authoring sample remain unimplemented.
 **Date:** 2026-09-06.
 **Decider:** Project owner.
 **Baseline:** `61a72adb93c94c4a5dada0a7c0384f2f44490976`.
@@ -643,7 +644,7 @@ behavior or pixels. Keep changes as separate logical slices.
 | --- | --- | --- |
 | 0. Contract and feasibility — complete | `examples/png_sprite_probe.rs`, fixture/watchdog tools, and `PNG_SPRITE_PHASE0.md`. | Contracts frozen; exact CPU/GPU pixels, metadata/interlace worker behavior, bounded upload passes, 100 pool cycles, capture lifetime and negative controls passed on the recorded Windows stack. Production integration remains later work. |
 | 1. Headless asset service — complete | `src/assets.rs` and supporting modules; rooted-read extraction; `Cargo.toml`, `src/lib.rs`; `tests/assets.rs`. Implement admitted jobs, stage advancement, bounds, cache/identity, decode and teardown. | Identical decoded pixels through bounded service passes without VM/GPU. Rooting, coalescing, rollback, cancellation-safe teardown, queue fairness, storage pressure and stale/foreign IDs pass. Existing filesystem regressions remain intact. |
-| 2. Luau and runtime integration | `src/scripting/assets.rs`, `src/scripting/drawing.rs`, `src/scripting.rs`, `src/runtime.rs`, `src/drawing.rs`; runtime/test drivers. | Init/update requests work in ScriptHost and GameRuntime; callbacks continue while loading. Status/error/readiness, eviction utilities, canonical wrappers, publication, budgets and cleanup obey frozen contracts. Preload/completion-trace tests use the same service path. No GPU dependency enters scripting-only builds. |
+| 2. Luau and runtime integration — complete | `src/scripting/assets.rs`, `src/scripting/drawing.rs`, `src/scripting.rs`, `src/runtime.rs`, `src/drawing.rs`; runtime/test drivers. | Init/update requests work in ScriptHost and GameRuntime; callbacks continue while loading. Status/error/readiness, eviction utilities, canonical wrappers, publication, budgets and cleanup obey frozen contracts. Preload/completion-trace tests use the same service path. No GPU dependency enters scripting-only builds. |
 | 3. Shared renderer and Player | `src/rendering.rs`, `src/bin/player.rs`, readiness acknowledgements and fault integration; actual Player captures/input probes. | Bounded upload passes publish only complete images; rendering never forces loading. One admission/upload sequence per uncached image, explicit eviction/reload, queued-frame pinning, mixed ordering, shutdown captures and repeated-session pool bounds pass. Pending work is cleaned on faults/exit. Existing rectangle/startup/native captures pass. |
 | 4. Authoring sample and delivery | `examples/games/sprites/` using the supplied Kenney sheet and provenance; README/AGENTS/index updates; complete verification matrix. | Copied Player shows a responsive loading state, then the room and animated controllable character. Requests during update and PNG replacement without rebuilding are demonstrated. Deterministic preload replay, live loading interaction, and limitations are recorded. |
 
@@ -1067,6 +1068,306 @@ the same reason, since deadline enforcement did not change.
   Phase 3 adds GPU reservations beside it; if a second holder ever becomes
   concurrent, the aggregate clause in `grant_allocate` is where that has to be
   revisited, and it will fault rather than silently over-reserve.
+
+## Phase 2 completion record
+
+Completed 2026-09-06 on Windows 10 x64, MSVC, stable rustc. This phase touched
+no graphics code beyond one skipped command arm in the Player, and required no
+graphics context.
+
+### Changed files
+
+- `src/drawing.rs`: `DrawCommand::Sprite(Sprite)` with an `ImageId`, an integer
+  half-open `SourceRect`, a destination rectangle, flips and an RGBA tint, all
+  `Copy` scalars. The scalar range rules are the `valid_coordinate`,
+  `valid_extent` and `valid_color` predicates plus `Sprite::check` and
+  `SourceRect::fits`, so the bindings and the Phase 3 renderer validate through
+  one definition rather than two copies.
+- `src/scripting/assets.rs`: `ImageHandle`, the published script-visible view,
+  the canonical wrapper cache and the `ctx.assets` bindings, plus the two
+  harness-only unit tests.
+- `src/scripting/drawing.rs`: `ctx.draw.sprite` with option, source and tint
+  parsing. `clear` and `rect` now call the shared predicates unchanged.
+- `src/scripting/utilities.rs`: separate 256-call asset and 10,000-attempt
+  sprite counters beside the existing 128-call utility counter. All three latch
+  through the same host budget, outside `pcall`.
+- `src/scripting.rs`: `ScriptHost` owns the store, binds `ctx.assets` in every
+  callback, exposes `assets()`, `advance_assets` and `drain_assets`, runs one
+  service pass in the standalone `update()`, and releases the store on stop,
+  fault and drop.
+- `src/runtime.rs`: read-only `assets()` that empties once the host is released,
+  one service pass per valid `frame`/`step`, publication at the first update
+  boundary, the preload pump, and asset service faults routed through the
+  existing primary-fault handling.
+- `src/bin/player.rs`: skips sprite commands until the Phase 3 renderer exists.
+- `examples/script_host.rs`: `--preload` and `--ticks`, plus the per-stage asset
+  trace. `examples/games/loading/` is the driver bundle it exercises.
+- `tests/script_assets.rs`, `README.md`, `AGENTS.md`, `examples/README.md`,
+  `docs/implementation/README.md`.
+
+### Implemented contracts
+
+`ctx.assets` exists in every live callback and is read-only. `request_png` and
+`unload` refuse outside init and update; `status` and `size` do not. Every entry
+point counts its attempt before the phase check and argument conversion, so
+cache hits, refusals and malformed calls all consume the 256-call budget, and
+none of them touch the 128-call utility budget.
+
+A request resolves synchronously on a miss, admits, and returns the canonical
+wrapper. Publication is the last step: if the userdata or its cache entry cannot
+be allocated, the store rolls the admission back and burns the image number.
+Repeat requests for one live image return the same userdata, so `rawequal` and
+table-key identity hold, and a request after failure or unload is a new identity.
+
+`status` returns the frozen schema as owned VM values, `size` returns
+`{width, height}` once validated, and `unload` invalidates every alias, returning
+true once. `ctx.draw.sprite` requires a live CPU-ready image, validates the
+scalar and crop rules, and appends one owned command; it never advances loading
+and never spends the asset budget on its own dimension lookup.
+
+Scripts read a published view of the store rather than the store itself. Worker
+progress reaches that view only at a publication boundary, so a zero-tick frame
+cannot reveal a completed image and `state`, `stage` and `bytes_read` advance at
+the fixed tick rate rather than the presentation frame rate. A script's own
+request and unload publish immediately: the boundary governs worker results, not
+the caller's own action within the callback that took it. Rust callers read the
+live store through `assets()` instead, which is what lets a test observe the
+difference. The view is keyed by image number and bounded by the registry
+exactly as the wrapper cache is.
+
+`GameRuntime::frame` and `step`, and standalone `ScriptHost::update`, each start
+exactly one CPU service pass. Catch-up ticks, `init`, `draw` and refused calls
+grant none. Publication happens at the first update boundary of a frame: the
+view is refreshed, terminal status is copied onto its retained handle, the
+wrapper leaves the strong cache, and that same drain releases the registry slot.
+`advance_assets` and
+`drain_assets` drive the same service without running callbacks or advancing
+simulation, and publish for the same reason preload helpers exist. Normal
+shutdown can still inspect ready metadata and then releases
+the store; a fault releases it immediately and runs no Luau shutdown; drop
+releases it without invoking scripts. Worker loss and broken invariants become
+session faults through the existing fault path, while a failed job stays
+inspectable.
+
+Every `ctx.assets` operation refuses a foreign handle catchably. The ADR's Luau
+API section names only `size` and `sprite`, while the Phase 0 record says "every
+asset operation checks session identity"; the two disagree and the broader Phase 0
+reading is implemented, because a handle from another store is equally meaningless
+to `status` and `unload`.
+
+### Contract refinements made during implementation
+
+- **The script-visible view is a separate published map, not the store.** The
+  frozen boundary rule is unenforceable while `status`, `size` and `sprite` read
+  live store state, because the store publishes readiness during the service
+  pass. `Images` therefore keeps the committed status per image number and
+  refreshes it in `commit`. This is what makes `bytes_read` and `stage` behave
+  as snapshots rather than as a live counter, which is also what a loading bar
+  needs to replay at a different presentation frame rate. All three readers go
+  through it: `size` derives its dimensions from the same snapshot rather than
+  from `AssetStore::size`, since a `size` that reached through to the store
+  would leave half the boundary unenforced.
+- **A script's own request and unload publish immediately, under a stated
+  invariant.** The boundary governs worker results, not an action taken inside a
+  callback that is already past it: `init` must see the handle it just requested
+  as `queued`, and the callback that unloads must see `unloaded`. But
+  `AssetStore::unload` builds its terminal status from the store's live stage and
+  byte count, so this exception depends on no CPU service pass running between a
+  commit and the callbacks that follow it. Every path satisfies that today —
+  `frame`, `step` and `update` service and then commit immediately before
+  running update, `init` sees a fresh store, and `draw` refuses both operations
+  — so the view and the store always agree at that point. The dependency is
+  load-bearing rather than incidental, and it is recorded at `publish_now` as
+  well as here. Phase 3's GPU service does not advance the CPU store and so
+  preserves it; a later phase that services the CPU store elsewhere in a frame
+  would let an unload publish progress the boundary had withheld.
+- **Publication is also what releases registry slots, and no callback or run of
+  zero-tick frames can drain itself.** A terminal entry keeps its slot until the
+  next update boundary, which is Phase 1's frozen rule. So a single callback, or
+  a stretch of zero-tick frames, that unloads and re-requests more than 128
+  images is refused with `limit` rather than recycling slots. Draining
+  mid-callback would consume the ready transitions the Phase 3 renderer needs,
+  and it buys nothing a later tick does not already give.
+- **`size` returns a table.** The frozen contract names the values, not the
+  shape; `{width = w, height = h}` matches `ctx.world.position`'s `{x, y}`.
+- **Sprite refusals name the state they found**, for example `sprite requires a
+  ready image; this one is loading`, so a script can distinguish "not yet" from
+  "never" without a second `status` call against its budget.
+- **The example's `--preload` drains after init and after each measured step**,
+  before that step's draw, rather than only once at startup. That is the frozen
+  capture-mode schedule, and it is the only form that makes an update-time
+  request deterministic.
+- **`ScriptHost::fault` joins the asset worker.** Immediate invalidation is the
+  frozen fault rule, and the store joins on shutdown, so an in-progress
+  non-preemptible decoder stage can delay a fault's return exactly as it can
+  delay a drop.
+
+### Behavioral observations
+
+- The `loading` driver, debug build, requests the Kenney sheet during update at
+  tick 2 and reports ready at tick 99 on three consecutive runs, with 17,497
+  bytes, 2 read calls and 36 conversion bands. Bytes and bands match Phase 1 and
+  Phase 0 for the same file; only they are reproducible.
+- That tick number is a property of this driver on this machine, not a load-time
+  guarantee, and it is not stable across builds: the same driver measured 93 and
+  105 before the publication boundary was implemented. Treat it as one
+  observation. A pass only makes progress when the previous grant's reply has
+  arrived, and this example steps far faster than 60 Hz, so roughly seven steps
+  elapse per grant. Within a grant the debug build converts about three bands
+  before the 2 ms soft cutoff, against eight in the frozen allowance. A 60 Hz
+  Player would collect one grant per frame instead.
+- `--preload` reports the same 17,497 bytes and 36 bands with the sheet ready at
+  tick 2, after 21 service passes, reproducibly. The staged and preloaded runs
+  publish the same content through the same service, and the drain between a
+  step and its draw is what makes an update-time request ready in the same tick.
+- Two hundred consecutive zero-tick frames advance the service to completion and
+  publish nothing: the draw callback observes one identical `queued/0` snapshot
+  throughout and draws no sprite, while the store's own counters show the image
+  completed. One `step` then publishes it. Against the pre-boundary
+  implementation the same probe failed at frame 34. Proving exactly two distinct
+  snapshots is what rules out `bytes_read` dribbling through between updates.
+- At four presentation frames per fixed tick, the first frame that draws the
+  image is a ticking frame, on the fourth of its group. That is the case a
+  replay claim rests on and the one a never-ticking probe cannot reach:
+  readiness never surfaces on the zero-tick frames in between.
+- Two hundred unload-and-re-request cycles across update boundaries admit 200
+  images with no refusal, no resident bytes and at most one memoized spelling.
+  The registry-slot ceiling recorded below is therefore a per-boundary
+  consequence of the frozen terminal-slot rule, not a slow leak.
+- `resident=1103872` appears one tick after the header is validated and before
+  decoding finishes, because output is reserved at the allocate grant. That is
+  the reservation, not completed content.
+- Service passes are exactly one per valid `frame` (with zero, one or five
+  catch-up ticks) or `step`, and zero for `init`, `draw` and a refused frame.
+- A zero-tick frame leaves an unloaded image's registry entry in place; the next
+  `step` publishes the transition, after which the store no longer knows the
+  identity while the script's retained handle still reports `unloaded/complete`.
+- Ten thousand protected sprite refusals cost more than the default 100 ms draw
+  budget in a debug build, so the attempt-ceiling test raises its callback
+  timeout. The ceiling under test is the attempt count; the deadline is covered
+  by the existing scripting suites.
+
+### Commands and results
+
+All passed on this machine:
+
+```text
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo test --workspace --no-default-features
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release --bin protogine-player
+cargo test --workspace --no-default-features --features assets
+cargo clippy --workspace --all-targets --no-default-features --features assets -- -D warnings
+cargo test --workspace --no-default-features --features scripting
+cargo check --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets
+cargo test --release --no-default-features --features scripting,native-plugins --lib --test plugins --test manifest
+cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/loading
+cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/loading
+cargo test --test player_capture -- --ignored
+cargo test --test plugins -- --ignored
+```
+
+`tests/script_assets.rs` contains 20 tests and runs in about 1.2 seconds in
+debug and 0.2 seconds in release. The two harness-only cases are library unit
+tests. Every existing suite passes unchanged, including the ignored GPU captures
+and the native plugin suites, which confirms that adding a store to every
+`ScriptHost` and a variant to `DrawCommand` changed no existing behavior.
+
+`cargo tree` confirms the boundaries are intact: `--features assets` resolves
+image 0.24.9 and png 0.17.16, `--features scripting` adds mlua on top, and
+neither pulls in Macroquad or Miniquad, so no GPU dependency enters a
+scripting-only build. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+`tests/player_input.ps1` was not rerun, and neither was the distance benchmark:
+physical input, Player shutdown and deadline enforcement are untouched by this
+phase. The Player's only change is skipping a command variant it cannot yet draw.
+
+### Review corrections
+
+The Phase 2 diff review found one blocking defect and three coverage gaps, all
+fixed in this phase before any commit.
+
+- **The update boundary did not gate script-visible readiness.** `commit` took
+  the settled transitions and cleaned up wrappers, but `status`, `size` and the
+  sprite binding read the live store, and the store publishes readiness during
+  the service pass. So the `ticks > 0` guard in `frame` gated terminal-slot
+  release only, and nothing gated readiness. A `GameRuntime` that only ever
+  calls `frame(0.0, ...)` crosses no update boundary, yet its draw callback
+  observed `ready` and published a sprite at frame 34. That failed the frozen
+  "zero-tick frames ... hold new script-visible snapshots until the next update"
+  rule, and it is exactly the determinism Phase 4 has to claim: at 144 Hz a
+  sprite could first appear on a zero-tick frame with no 60 Hz counterpart.
+  `Images` now keeps the published view described above.
+  `zero_tick_frames_hold_new_snapshots_until_the_next_update` runs 200 zero-tick
+  frames, asserts the draw callback sees one identical snapshot and draws
+  nothing while the store's counters show the image completed, then asserts that
+  one `step` publishes it. It fails on the previous code at frame 34.
+- **`Sprite::check` was never called by the bindings.** The shared leaf
+  predicates were shared, but the binding and the renderer's entry point were two
+  separate assemblies of them, and only `check`'s positive direction was
+  exercised. The binding now builds the `Sprite` and calls `check` before
+  appending, so every accepted command passes the same assembly Phase 3 will
+  apply to copied commands. The f64 checks stay where they are, because
+  validation has to precede narrowing; every range boundary is exact in f32, so
+  the added call rejects nothing that was accepted before.
+- **A request from a required submodule had no guard**, although the plan states
+  the bundle root applies "including when called from a required submodule".
+  `requests_from_a_required_submodule_resolve_against_the_bundle_root` requests
+  from `rooms/room.luau` with differently sized decoys at both the module
+  directory and the working-directory spelling, so a wrong root changes the
+  reported dimensions rather than passing silently.
+- **Sprites had no lifetime guard on the published list.** `tests/drawing.rs`
+  covers a rejected `draw(alpha)` for rectangles only.
+  `a_published_snapshot_survives_a_rejected_alpha_and_dies_with_an_uncaught_error`
+  covers both directions now that sprites share the list.
+
+The re-review ran three further probes, and the suite now owns the same checks
+rather than leaving them in a scratch file: the mixed-cadence case above, the
+slot-recycling count, and `size` staying refused for exactly as long as the
+status is withheld, which the zero-tick test now asserts on every frame. It also
+raised the `publish_now` invariant, recorded above as a latent coupling rather
+than a defect.
+
+Two review observations were checked and deliberately left as they are.
+
+- `plain`'s field-count refusal is a bound on iterations, not a second
+  diagnostic. Keys are unique, so the unknown-key check already stops the walk
+  within `fields.len() + 1` iterations, and which of the two refusals reports
+  first depends on the VM's iteration order: ten different extra-key names all
+  produced "unknown field" here. The counter is kept because it makes the bound
+  evident by inspection rather than by re-deriving uniqueness, and its comment
+  now says so instead of implying a distinct outcome.
+- Rollback detection and the worker join inside `fault` were confirmed correct
+  and unchanged.
+
+### Unresolved gaps for later phases
+
+- No renderer exists, so `GpuResidency` is still always `unavailable`,
+  `UploadAck` still has no producer, and the Player draws no sprite. Nothing here
+  proves rendered pixels, upload band progress, queued-frame pinning or GPU
+  eviction; those are Phase 3's exits.
+- Upload acknowledgements are not applied at the update boundary yet. `commit` is
+  where they belong, and Phase 3 adds them beside the worker results.
+- **`commit` discards ready transitions.** It refreshes the published view from
+  the store and then skips every non-terminal status in `take_settled`. Phase 2
+  needs nothing from them, but they are the only signal the store gives that an
+  image's CPU content just became available, and the renderer is the intended
+  consumer. Phase 3 must stop discarding them rather than re-deriving readiness
+  by scanning the registry.
+- `examples/games/loading/` is a Phase 2 driver bundle, not the Phase 4 authoring
+  sample. It has no room, no animation timing contract and no replay evidence.
+- Coalescing two distinct spellings onto one canonical path stays covered by the
+  Phase 1 store tests, since a portable second spelling for one file does not
+  exist: the path policy rejects dot segments, and case aliases are platform
+  behavior.
+- A script that unloads and re-requests more than the registry allows inside a
+  single callback is refused rather than served. That follows the frozen slot
+  rule and is recorded above as accepted behavior, not a defect to fix in Phase 3.
 
 ## Planning evidence
 

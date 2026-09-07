@@ -261,8 +261,8 @@ cargo run --example script_host --no-default-features --features scripting -- ex
 `GameRuntime::load` takes an absolute game-directory path and `ScriptLimits`.
 `main.luau` returns a plain table containing optional `init`, `update`, `draw`,
 and `shutdown` functions. Callbacks return no values. The host exposes
-`ctx.log(message)`, `ctx.data`, `ctx.fs`, `ctx.world`, `ctx.input`, and (during draw)
-`ctx.draw`, plus `ctx.native` with native support enabled. Stored context
+`ctx.log(message)`, `ctx.data`, `ctx.fs`, `ctx.assets`, `ctx.world`, `ctx.input`,
+and (during draw) `ctx.draw`, plus `ctx.native` with native support enabled. Stored context
 functions expire when their callback ends, while
 returned data values can be retained.
 Logs from the last call/frame can be retrieved in callback order with `take_logs()`.
@@ -277,9 +277,9 @@ a host only releases resources. Errors include a lifecycle phase and available
 Luau source context.
 
 The lower-level `protogine::scripting::ScriptHost` remains available for standalone
-VM/data work. Its `update()` invokes one fixed callback without kernel systems;
-it supplies log/data/filesystem/draw bindings, with no world, input, native calls,
-or clock.
+VM/data work. Its `update()` runs one asset service pass and invokes one fixed
+callback without kernel systems; it supplies log/data/filesystem/asset/draw
+bindings, with no world, input, native calls, or clock.
 
 Modules use extensionless relative paths, such as `require("./counter")` or
 `require("../shared")` within the bundle. Files must be UTF-8 `.luau` source.
@@ -382,21 +382,104 @@ receives a graphics handle or borrowed world storage.
 | --- | --- |
 | `ctx.draw.clear(r,g,b,a)` | Replace the background and discard preceding drawing |
 | `ctx.draw.rect(x,y,w,h,r,g,b,a)` | Draw a filled rectangle in pixel coordinates |
+| `ctx.draw.sprite(image,x,y,options?)` | Append a cropped draw of a ready image |
 
 Coordinates use a top-left origin with positive y downward. Colors are normalized
 RGBA in `[0,1]`; coordinates are in `[-1_000_000,1_000_000]`, and sizes are in
 `[0,1_000_000]`. All numbers must be finite and are converted to f32 after
-validation. Zero-size rectangles are allowed. Invalid arguments are catchable.
-Rectangles composite in insertion order with alpha blending.
+validation. Zero-size rectangles and sprites are allowed. Invalid arguments are
+catchable. Commands composite in insertion order with alpha blending.
+
+`sprite` takes an image handle from `ctx.assets` and optional
+`source = {x, y, width, height}`, `width`, `height`, `flip_x`, `flip_y`, and
+`tint = {r, g, b, a}`. Omitted options use the whole image at its natural size,
+no flips and an opaque white tint; with a source present, omitted destination
+sizes default to the source's own width and height. Source coordinates are image
+pixels, never tile indices: they are whole numbers, `width`/`height` are
+positive, and the half-open extents must fit the image. Negative sizes are
+errors, not flip shorthand; flips mirror the crop inside the same destination
+footprint. Option tables must be plain tables without metatables or unknown
+fields, values must have the stated type rather than being coerced, and they are
+copied during the call, so mutating them afterwards changes no published command.
+A sprite requires a live, CPU-ready image; pending, failed, unloaded and foreign
+handles are catchable refusals, and drawing never advances loading. At most
+10,000 sprite attempts per draw are allowed, counting refusals; drawing an image
+does not consume the `ctx.assets` budget.
 
 Each frame starts opaque black and each draw starts with an empty command list.
 Only a successful draw publishes its commands; fault/stop clears the list. A
 rejected `draw(alpha)` argument is recoverable and leaves the previously
 published list intact rather than blanking the accepted frame.
-Drawing nothing leaves a black frame. The 10,000-command cap counts clears too
-and faults the session even through `pcall`. Drawing tables are read-only and
+Drawing nothing leaves a black frame. The 10,000-command cap counts clears,
+rectangles and sprites together and faults the session even through `pcall`.
+Drawing tables are read-only and
 their functions expire with the callback. World writes remain prohibited in draw;
 keep gameplay changes in update, including changes to script upvalues.
+
+The Player renders clears and rectangles today. Uploading images and drawing
+sprites needs the shared renderer, which is the next phase of the
+[PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md); until then the
+Player skips sprite commands and the headless tools carry the coverage.
+
+## Bundle images
+
+`ctx.assets` exists in every callback and loads PNGs from the bundle root
+through a bounded staged service. A request returns immediately with an opaque
+handle; the file is read, decoded and converted across later service passes, so
+gameplay continues while an image loads.
+
+| Asset API | Behavior |
+| --- | --- |
+| `ctx.assets.request_png(path)` | Init/update: admit a bundle-relative `.png` and return its handle |
+| `ctx.assets.status(image)` | Any callback: an owned progress or failure snapshot |
+| `ctx.assets.size(image)` | Any callback: `{width, height}` once validated |
+| `ctx.assets.unload(image)` | Init/update: invalidate the image; true once, then false |
+
+Paths are relative `/`-separated portable names ending in `.png`, resolved
+against the canonical bundle root and never against the module, working or
+executable directory. Traversal, absolute, device and link paths are refused, as
+in `ctx.fs`. Repeat requests for one file return the same handle, so it works as
+a table key and satisfies `rawequal`; a request after unload or failure is a new
+identity instead.
+
+`status` returns `state` (`queued`, `loading`, `ready`, `failed`, `unloaded`),
+`stage` (`waiting`, `read`, `header`, `allocate`, `decode`, `complete`),
+`bytes_read`, `gpu` (`unavailable` without a renderer), `width`/`height` once
+known, and `error` with `code`, `path` and `message` when a job failed. Malformed
+paths, wrong phases and admission refusals are catchable errors that publish no
+handle; failures after admission are inspectable failed jobs with `io`,
+`format`, `unsupported`, `limit` or `capacity` codes and stop no gameplay.
+Terminal status stays readable on a handle the script kept.
+
+Accepted PNGs are static RGB/RGBA, grayscale or grayscale-alpha and indexed
+color, including palette transparency, 1/2/4-bit grayscale expansion and
+interlacing. APNG and 16-bit channels are refused rather than silently narrowed.
+Both dimensions must be in `1..=2048`, encoded files are capped at 17 MiB and
+decoded content at 16 MiB per image and 64 MiB per session, with at most 128
+images and 8 unfinished jobs. Dimensions are frozen once an image is ready and
+the 256-call `ctx.assets` budget is per callback, so read a size once and keep
+it rather than querying inside a per-tile draw loop.
+
+One CPU service pass runs per `frame` or `step`, whatever the catch-up tick
+count, and none during `init`, `draw` or a refused call. Loading progress becomes
+script-visible at the first update boundary of a frame, so a frame that runs no
+tick cannot reveal a completed image and `status` advances at the fixed tick rate
+rather than the presentation frame rate; a script's own request and unload are
+visible immediately. A large image therefore
+takes many frames; draw a loading state until its status is ready. Rust drivers
+can call `advance_assets(wait)` for one pass or `drain_assets(timeout)` to settle
+every admitted job under its own watchdog, without running callbacks or advancing
+simulation. The [loading sample](examples/games/loading/main.luau) requests during
+update and draws a progress bar until the sheet is ready:
+
+```text
+cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/loading
+cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/loading
+```
+
+The first form stages loading across ticks and prints the work each tick
+performed. `--preload` drains after init and after each step, which is the
+deterministic readiness schedule capture mode uses.
 
 ## Script data and filesystem utilities
 

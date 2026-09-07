@@ -12,8 +12,8 @@ root unless noted otherwise.
 - [PNG_SPRITE_PLAN.md](PNG_SPRITE_PLAN.md) — Staged bundle-local PNG loading,
   sprite drawing, headless asset support, shared rendering, and script-controlled
   eviction. P1-P8 accepted; [Phase 0](PNG_SPRITE_PHASE0.md) complete with contracts
-  and CPU/GPU evidence. Phase 1 delivered the headless asset service. Phases 2-4
-  have not started.
+  and CPU/GPU evidence. Phase 1 delivered the headless asset service and Phase 2
+  its Luau and runtime integration. Phases 3-4 have not started.
 
 ## Completed
 

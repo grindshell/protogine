@@ -1,5 +1,6 @@
 //! Headless Luau lifecycle, shared by the Player and development tools.
 
+mod assets;
 mod data;
 mod drawing;
 mod filesystem;
@@ -15,15 +16,15 @@ use mlua::{
     Function, Lua, MultiValue, StdLib, Value, VmState, state::LuaOptions, thread::ThreadStatus,
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, Ref, RefCell},
     fmt,
     path::Path,
     rc::Rc,
     time::{Duration, Instant},
 };
 
-use crate::drawing::DrawCommand;
 pub use crate::kernel::FIXED_DT;
+use crate::{assets::AssetStore, drawing::DrawCommand};
 const LOG_BYTES: usize = 64 * 1024;
 
 #[cfg(panic = "abort")]
@@ -154,6 +155,10 @@ pub struct ScriptHost {
     logs: Vec<String>,
     data: data::Data,
     filesystem: filesystem::FileSystem,
+    /// Rooted at the same canonical bundle as the filesystem API, so a
+    /// standalone host loads real PNGs without a window. Released on stop,
+    /// fault and drop; nothing it owns outlives this session.
+    images: assets::Images,
     entities: world::EntityCache,
     /// Built once from the immutable plugin registry, then shared by callbacks.
     #[cfg(feature = "native-plugins")]
@@ -251,6 +256,7 @@ impl ScriptHost {
         let data = data::Data::new(&lua).map_err(load_error)?;
         let entities = world::EntityCache::new(&lua).map_err(load_error)?;
         let filesystem = filesystem::FileSystem::new(root, data_root).map_err(load_error)?;
+        let images = assets::Images::new(&lua, root).map_err(load_error)?;
         globals
             .raw_set(
                 "require",
@@ -275,6 +281,7 @@ impl ScriptHost {
             logs: Vec::new(),
             data,
             filesystem,
+            images,
             entities,
             #[cfg(feature = "native-plugins")]
             native_metadata: None,
@@ -338,6 +345,58 @@ impl ScriptHost {
         &self.draw_commands
     }
 
+    /// Read-only access to this session's image service. Take it between
+    /// lifecycle calls: a callback's own bindings borrow the same store.
+    pub fn assets(&self) -> Ref<'_, AssetStore> {
+        self.images.store()
+    }
+
+    /// One bounded CPU service pass. Public update entry points call this
+    /// exactly once; a runtime's catch-up ticks do not grant again, so a busy
+    /// worker accumulates no credits.
+    pub(crate) fn service_assets(&mut self) -> Result<(), ScriptError> {
+        self.images.service();
+        self.check_asset_fault("assets.service")
+    }
+
+    /// Publish the settled transitions at an update boundary: terminal status
+    /// is copied onto retained handles and their canonical wrappers leave the
+    /// cache, which is also what releases the registry slots.
+    pub(crate) fn commit_assets(&mut self) -> Result<(), ScriptError> {
+        if let Err(error) = self.images.commit() {
+            return Err(self.fault("assets.publish", error.to_string()));
+        }
+        self.check_asset_fault("assets.publish")
+    }
+
+    /// One bounded pass that waits up to `wait` for the outstanding grant, then
+    /// publishes. It invokes no scripts, advances no simulation and resets no
+    /// script deadline; it uses the same service and limits as a frame does.
+    pub fn advance_assets(&mut self, wait: Duration) -> Result<(), ScriptError> {
+        self.images.advance(wait);
+        self.check_asset_fault("assets.service")?;
+        self.commit_assets()
+    }
+
+    /// Service passes until every admitted job settles, under a watchdog that
+    /// is separate from any script deadline, then publish. Returns whether the
+    /// queue emptied inside `timeout`.
+    pub fn drain_assets(&mut self, timeout: Duration) -> Result<bool, ScriptError> {
+        let settled = self.images.drain(timeout);
+        self.check_asset_fault("assets.service")?;
+        self.commit_assets()?;
+        Ok(settled)
+    }
+
+    /// A broken service invariant or a lost worker stops the session; an
+    /// ordinary failed job stays inspectable and never reaches here.
+    fn check_asset_fault(&mut self, phase: &'static str) -> Result<(), ScriptError> {
+        match self.images.service_fault() {
+            Some(message) => Err(self.fault(phase, message)),
+            None => Ok(()),
+        }
+    }
+
     pub fn init(&mut self) -> Result<(), ScriptError> {
         self.init_in(None)
     }
@@ -351,6 +410,10 @@ impl ScriptHost {
 
     /// Advance exactly one simulation tick. Frame accumulation belongs to the runtime.
     pub fn update(&mut self) -> Result<(), ScriptError> {
+        // The state check comes first so a refused call grants no work.
+        self.require_state("update", ScriptState::Running)?;
+        self.service_assets()?;
+        self.commit_assets()?;
         self.update_in(None)
     }
 
@@ -407,6 +470,9 @@ impl ScriptHost {
                 self.callback(3, "shutdown", None, self.limits.startup_timeout, engine)?
             }
         }
+        // The shutdown callback could inspect ready metadata; nothing may load
+        // or draw afterwards, so release the service after it returns.
+        self.images.shutdown();
         self.state = ScriptState::Stopped;
         Ok(())
     }
@@ -486,9 +552,20 @@ impl ScriptHost {
                 if phase == "draw" {
                     context.raw_set(
                         "draw",
-                        drawing::bind(&lua, scope, &utility_budget, &commands)?,
+                        drawing::bind(&lua, scope, &utility_budget, &self.images, &commands)?,
                     )?;
                 }
+                // Requests and eviction need init or update; metadata queries
+                // are available in every live callback, including shutdown.
+                context.raw_set(
+                    "assets",
+                    self.images.bind(
+                        &lua,
+                        scope,
+                        &utility_budget,
+                        matches!(phase, "init" | "update"),
+                    )?,
+                )?;
                 context.raw_set("data", self.data.bind(&lua, scope, &utility_budget)?)?;
                 context.raw_set(
                     "fs",
@@ -567,6 +644,9 @@ impl ScriptHost {
 
     pub(crate) fn fault(&mut self, phase: &'static str, message: String) -> ScriptError {
         self.draw_commands.clear();
+        // A fault invalidates immediately and runs no Luau shutdown, so cancel
+        // pending jobs and release CPU assets here rather than waiting for drop.
+        self.images.shutdown();
         let error = ScriptError { phase, message };
         self.state = ScriptState::Faulted;
         self.last_error = Some(error.clone());

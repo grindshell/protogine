@@ -195,6 +195,11 @@ fn render(commands: &[DrawCommand]) {
             } => {
                 draw_rectangle(x, y, width, height, Color::from(color));
             }
+            // The shared renderer that uploads and draws images is Phase 3 of
+            // the PNG/sprite plan. Until it exists the Player has no texture
+            // for an image, and skipping keeps the ordered rectangle path and
+            // every other command unchanged.
+            DrawCommand::Sprite(_) => {}
         }
     }
 }

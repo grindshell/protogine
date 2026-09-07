@@ -53,8 +53,12 @@ The optional `assets` feature, which `scripting` enables, adds the bundle-rooted
 [image service](src/assets.rs) with its [store](src/assets/store.rs) and
 [bounded worker](src/assets/worker.rs). Identity, status and bound types compile
 without a decoder, a VM or a window. [Rooted traversal](src/rooted_path.rs) is
-shared with `ctx.fs` and differs only in its final-node policy. No Luau image or
-sprite API exists yet.
+shared with `ctx.fs` and differs only in its final-node policy. The
+[asset bindings](src/scripting/assets.rs) expose that service as `ctx.assets`,
+and `ctx.draw.sprite` publishes owned `DrawCommand::Sprite` values. The
+[loading sample](examples/games/loading/main.luau) requests during update and
+draws a progress bar until its sheet is ready. No renderer consumes sprite
+commands yet, so the Player skips them.
 The optional [manifest](src/manifest.rs) and [native loader](src/plugins.rs) add
 trusted C plugin startup/cleanup before/after the VM. The [SDK](sdk/src/lib.rs)
 generates [the C header](include/protogine_plugin.h) with the separate
@@ -67,8 +71,8 @@ Accepted and completed plans are indexed in [docs/implementation/README.md](docs
 The [PNG and sprite plan](docs/implementation/PNG_SPRITE_PLAN.md) records the accepted
 next milestone. [Phase 0](docs/implementation/PNG_SPRITE_PHASE0.md) completed its
 contracts and CPU/GPU feasibility probes. Phase 1 implemented the headless asset
-service; the Luau bindings, runtime integration and shared renderer remain
-unimplemented.
+service and Phase 2 its Luau and runtime integration; the shared renderer, GPU
+residency and the authoring sample remain unimplemented.
 The [scripting and C API plan](docs/implementation/SCRIPTING_C_API_PLAN.md) records
 accepted decisions, completed phases, verification evidence, and deferred scope.
 
@@ -165,11 +169,21 @@ behavior that depends on them.
   kernel. See the Phase 2 contract for entity/operation limits and input timing.
 - `ctx.draw` exists only in draw and publishes a fresh owned list only after a
   successful callback. Validate finite coordinates/sizes/colors before f32
-  conversion; the 10,000-command cap latches. Fault/stop clears published commands,
-  while a rejected `alpha` is recoverable and preserves the published list.
+  conversion; the 10,000-command cap latches and counts sprites. Fault/stop clears
+  published commands, while a rejected `alpha` is recoverable and preserves the
+  published list.
   Keep renderer semantics (clear discards previous drawing, ordered alpha-blended
   rectangles, empty frame black) aligned with headless data and GPU tests.
   See Phase 3 for capture seeding, shutdown, input mappings and fault code 3.
+- `ctx.draw.sprite` takes an asset handle and appends an owned `Sprite` of an
+  `ImageId`, an integer half-open source rectangle, a destination rectangle,
+  flips and a tint. Keep the scalar range predicates in `src/drawing.rs` so the
+  bindings and the future renderer validate identically. Option tables must be
+  plain, typed rather than coerced, and copied during the call; key inspection is
+  bounded by the field count and stops at the first unexpected key. A sprite
+  needs a live CPU-ready image and never advances loading. Sprite attempts are
+  capped at 10,000 per draw, including refusals, and are counted separately from
+  the asset budget so internal dimension lookups cannot exhaust it.
 - `ctx.data` preserves integer text, null, and array/object identity; ordinary
   Luau numbers encode as finite floats. `data.array` checks only the keys of the
   table it marks, since the script may replace elements afterwards; element
@@ -194,6 +208,25 @@ behavior that depends on them.
   append-only per session and never reissued, including after a rolled back
   publication. Unload invalidates every alias but does not free pixels a caller
   still pins. See the Phase 1 record for limits and the frozen status schema.
+- `ScriptHost` owns the store, so a standalone host loads real PNGs without a
+  window. `ctx.assets` exists in every callback; `request_png` and `unload` need
+  init or update, and the 256-call budget counts hits, refusals and wrong-phase
+  calls before argument conversion. The canonical VM wrapper is published as the
+  last step of admission, so a failed allocation rolls the job back and burns its
+  identity. Wrappers live exactly as long as their registry entry: committing a
+  terminal transition copies its status onto the handle and drops the wrapper,
+  which is also what releases the slot. One service pass runs per valid `frame`
+  or `step` and none for catch-up ticks, `init`, `draw` or a refused call.
+  Scripts read a published view of the store, not the store, and worker progress
+  reaches that view only at the first update boundary of a frame, so a zero-tick
+  frame cannot reveal a completion and `bytes_read` advances at the tick rate. A
+  script's own request and unload publish immediately; the boundary governs
+  worker results. Rust callers read the live store through `assets()` instead.
+  `advance_assets`/`drain_assets` drive the same service
+  without running callbacks or advancing simulation. Stop, fault and drop release
+  the store and join its worker; a fault does so immediately and runs no Luau
+  shutdown. Worker loss and broken invariants become session faults, while a
+  failed job stays inspectable.
 - Save handling belongs to game scripts: schema, file layout, timing, restoration,
   and migrations. The engine may expose general filesystem access, tot parsing
   and formatting, and tot-export utilities for JSON, YAML, and TOML. Do not add
@@ -305,9 +338,15 @@ option; scheduling and mutation timing are separate contracts.
   cargo test --workspace --no-default-features --features scripting
   cargo check --workspace --all-targets --all-features
   cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets
+  cargo test --release --no-default-features --features scripting --lib --test kernel --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets
   cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
+  cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/loading
+  cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/loading
   ```
+
+  The last two are the staged and preloaded asset drivers. The three-tick
+  lifecycle run is not a completion check for staged loading: read the printed
+  `assets [...]` trace and confirm the sheet actually completed.
 
   Native/SDK changes also require:
 
@@ -349,6 +388,14 @@ option; scheduling and mutation timing are separate contracts.
   fixtures are built in the test from stored DEFLATE blocks. Both specify
   expected bytes independently of this engine's decoder, so regenerate rather
   than recording whatever an implementation produced.
+  `script_assets` verifies the Luau asset and sprite bindings: pending handles
+  and loading spread across callbacks, canonical wrappers, phase and budget
+  ceilings, failed jobs, eviction with retained terminal status, the
+  update-boundary publication, sprite defaults/options/refusals, command
+  ordering, and cleanup on stop, fault and drop. It reuses the committed Phase 1
+  PNG fixtures and needs no graphics context. Foreign handles and rolled back
+  publication need a harness the VM cannot reach and are unit tests in
+  `src/scripting/assets.rs`, as the world bindings do.
   `scripting_utilities` verifies conversions, rooted I/O, retained-value/stale-call
   behavior, limits, file replacement failure, and script-owned save/load.
   `kernel` and `runtime` cover handles, immediate writes, system ordering, scoped

@@ -1,13 +1,14 @@
 //! One headless game session: Luau, kernel systems, fixed clock, and input.
 
 use crate::{
+    assets::AssetStore,
     drawing::DrawCommand,
     input::{InputQueue, InputSnapshot},
     kernel::{FIXED_DT, Kernel},
     manifest::GameManifest,
     scripting::{EngineContext, ScriptError, ScriptHost, ScriptLimits, ScriptState},
 };
-use std::path::Path;
+use std::{cell::Ref, path::Path, time::Duration};
 
 const MAX_FRAME_SECONDS: f64 = 0.25;
 const MAX_FRAME_TICKS: u32 = 5;
@@ -154,6 +155,54 @@ impl GameRuntime {
         self.scripts.as_ref().map_or(&[], ScriptHost::draw_commands)
     }
 
+    /// Read-only access to the session's image service, or `None` once the host
+    /// has been released on stop or fault. Take it between lifecycle calls.
+    pub fn assets(&self) -> Option<Ref<'_, AssetStore>> {
+        self.scripts.as_ref().map(ScriptHost::assets)
+    }
+
+    /// One bounded service pass that waits up to `wait` for the outstanding
+    /// grant, then publishes. It invokes no scripts and advances no simulation,
+    /// so preload drivers can use it without consuming gameplay time.
+    pub fn advance_assets(&mut self, wait: Duration) -> Result<(), ScriptError> {
+        let Some(scripts) = self.scripts.as_mut() else {
+            return Ok(());
+        };
+        let result = scripts.advance_assets(wait);
+        self.finish_call(result)
+    }
+
+    /// Service passes until every admitted job settles, then publish. The
+    /// watchdog is separate from any script deadline.
+    pub fn drain_assets(&mut self, timeout: Duration) -> Result<bool, ScriptError> {
+        let Some(scripts) = self.scripts.as_mut() else {
+            return Ok(true);
+        };
+        let settled = scripts.drain_assets(timeout);
+        self.finish_call(settled.as_ref().map(|_| ()).map_err(Clone::clone))?;
+        settled
+    }
+
+    /// Start one CPU service pass. Every valid frame or step starts exactly
+    /// one, regardless of how many catch-up ticks follow.
+    fn service_assets(&mut self) -> Result<(), ScriptError> {
+        let Some(scripts) = self.scripts.as_mut() else {
+            return Ok(());
+        };
+        let result = scripts.service_assets();
+        self.finish_call(result)
+    }
+
+    /// Publish worker results at the first update boundary of a frame, before
+    /// update and the fixed systems run.
+    fn commit_assets(&mut self) -> Result<(), ScriptError> {
+        let Some(scripts) = self.scripts.as_mut() else {
+            return Ok(());
+        };
+        let result = scripts.commit_assets();
+        self.finish_call(result)
+    }
+
     pub fn completed_ticks(&self) -> u64 {
         self.completed_ticks
     }
@@ -188,6 +237,8 @@ impl GameRuntime {
         self.require_running("update")?;
         self.logs.clear();
         self.draw_input = self.input.sample(input);
+        self.service_assets()?;
+        self.commit_assets()?;
         self.tick()
     }
 
@@ -213,6 +264,9 @@ impl GameRuntime {
         }
         self.logs.clear();
         self.draw_input = self.input.sample(input);
+        // Exactly one pass per valid frame: an invalid frame grants no work,
+        // and catch-up ticks below do not grant again.
+        self.service_assets()?;
         let clamped = elapsed_seconds.min(MAX_FRAME_SECONDS);
         self.accumulator += clamped / FIXED_DT;
         let nearest = self.accumulator.round();
@@ -230,6 +284,11 @@ impl GameRuntime {
         };
         if report.dropped_ticks > 0 || report.clamped_seconds > 0.0 {
             self.overloads = self.overloads.saturating_add(1);
+        }
+        // A zero-tick frame may advance work, but holds its new script-visible
+        // snapshots until the next update boundary.
+        if ticks > 0 {
+            self.commit_assets()?;
         }
         for _ in 0..ticks {
             self.tick()?;
