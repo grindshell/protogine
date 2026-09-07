@@ -16,18 +16,16 @@
 # weaker evidence than a test catching the mistake, so they are labelled rather
 # than allowed to look like assertion controls.
 #
-# Source files are restored after every control and again on any failure or
-# interruption, and the run refuses to start on a dirty working tree so a
-# restore can never be mistaken for the author's own edit.
+# Every patch is written to an isolated copy of the tree under `target/`, never
+# to the working tree, so a build that overlaps this run cannot pick up a
+# deliberately broken source. The run proves that rather than asserting it: it
+# fingerprints the engine sources before and after and fails if either moved.
 param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 $controlRepo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'control_tree.ps1')
 $controlSources = @('src/tilemap.rs', 'src/kernel.rs')
-
-$controlDirty = & git -C $controlRepo status --porcelain -- $controlSources
-if ($controlDirty) {
-    throw "Uncommitted changes in $($controlSources -join ', '); commit or stash them so a restore cannot lose work."
-}
+$controlFingerprint = Get-SourceFingerprint -Repo $controlRepo -Files $controlSources
 
 $controls = @(
     @{ Name = 'stop-keeps-map'; File = 'src/kernel.rs'; Test = 'stopping_releases_map_storage'
@@ -105,38 +103,58 @@ $controls = @(
        Marker = 'one pixel past the geometry limit must be refused'
        Edits = @(@{ F = 'if origin < -GEOMETRY_LIMIT || far > GEOMETRY_LIMIT {'; R = 'if false {' }) }
 
+    # Two rules now refuse an out-of-bounds edit on the kernel path, so this has
+    # to remove both. Phase 2 gave `Kernel::set_tile` a read of the previous ID,
+    # to decide whether an edit turns a cell solid, and that read refuses the
+    # coordinates before `TileMap::set_tile` is ever reached.
     @{ Name = 'edit-skips-bounds'; File = 'src/tilemap.rs'; Test = 'single_cell_edits_apply_immediately'; Crash = $true
        Marker = if ($Release) { 'index out of bounds: the len is 15 but the index is 18446744073709551615' } else { 'assertion failed: self.contains(column, row)' }
+       Edits = @(
+           @{ F = "if !self.contains(column, row) {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()"; R = "if false {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()" }
+           @{ File = 'src/kernel.rs'; F = '        let previous = map.tile(column, row)?;'; R = '        let previous = map.tile(column, row).unwrap_or(0);' }) }
+
+    # Deliberately still passes: it records that the kernel's own precheck now
+    # covers the edit bounds by itself, which is why the control above removes
+    # both rules rather than only `TileMap::set_tile`'s.
+    @{ Name = 'kernel-precheck-covers-edit-bounds'; File = 'src/tilemap.rs'
+       Test = 'single_cell_edits_apply_immediately'; Marker = 'PASSES'
        Edits = @(@{ F = "if !self.contains(column, row) {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()"; R = "if false {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()" }) }
 )
 
+$controlTree = New-ControlTree -Repo $controlRepo -Name 'tilemap-controls'
+$controlManifest = Join-Path $controlTree 'Cargo.toml'
 $controlOriginals = @{}
 foreach ($file in $controlSources) {
     $controlOriginals[$file] = [IO.File]::ReadAllText((Join-Path $controlRepo $file))
 }
 function Restore-ControlSources {
     foreach ($file in $controlSources) {
-        [IO.File]::WriteAllText((Join-Path $controlRepo $file), $controlOriginals[$file], (New-Object Text.UTF8Encoding $false))
+        [IO.File]::WriteAllText((Join-Path $controlTree $file), $controlOriginals[$file], (New-Object Text.UTF8Encoding $false))
     }
 }
 
 $controlFailures = @()
 try {
     foreach ($control in $controls) {
-        $path = Join-Path $controlRepo $control.File
-        $patched = $controlOriginals[$control.File]
+        # An edit defaults to the control's own file but may name another, so a
+        # rule that two files now enforce jointly can be removed from both.
+        $patched = @{}
+        foreach ($file in $controlSources) { $patched[$file] = $controlOriginals[$file] }
         $missing = $false
         foreach ($edit in $control.Edits) {
-            if (-not $patched.Contains($edit.F)) { $missing = $true; break }
-            $patched = $patched.Replace($edit.F, $edit.R)
+            $file = if ($edit.File) { $edit.File } else { $control.File }
+            if (-not $patched[$file].Contains($edit.F)) { $missing = $true; break }
+            $patched[$file] = $patched[$file].Replace($edit.F, $edit.R)
         }
         if ($missing) {
             $controlFailures += "$($control.Name): anchor no longer matches $($control.File); the control is stale, not the code"
             continue
         }
 
-        [IO.File]::WriteAllText($path, $patched, (New-Object Text.UTF8Encoding $false))
-        $arguments = @('test')
+        foreach ($file in $controlSources) {
+            [IO.File]::WriteAllText((Join-Path $controlTree $file), $patched[$file], (New-Object Text.UTF8Encoding $false))
+        }
+        $arguments = @('test', '--manifest-path', $controlManifest)
         if ($Release) { $arguments += '--release' }
         $arguments += @('--test', 'tilemap', '--no-default-features', '--', $control.Test)
         $output = & cargo @arguments 2>&1 | Out-String
@@ -144,8 +162,16 @@ try {
         Restore-ControlSources
 
         $where = ($output -split "`r?`n" | Where-Object { $_ -match 'panicked at|assertion' } | Select-Object -First 2) -join ' | '
+        # A zero exit is not evidence on its own: a filter that selects no test
+        # also exits zero, and so does a stale binary cargo decided not to
+        # rebuild. Require the run to say it executed exactly one test, and a
+        # detecting control to say it failed.
         if ($output -match 'error\[E\d+\]|could not compile') {
             $controlFailures += "$($control.Name): did not compile, so it proves nothing"
+        } elseif ($output -notmatch 'running 1 test(?!s)') {
+            $controlFailures += "$($control.Name): the run did not execute exactly one test, so it proves nothing"
+        } elseif ($control.Marker -ne 'PASSES' -and $output -notmatch 'test result: FAILED') {
+            $controlFailures += "$($control.Name): $($control.Test) did not fail with the guard removed"
         } elseif ($control.Marker -eq 'PASSES') {
             if ($code -ne 0) { $controlFailures += "$($control.Name): expected to still pass, but failed at $where" }
             else { "REDUNDANT GUARD CONFIRMED: $($control.Name)" }
@@ -163,15 +189,16 @@ try {
     Restore-ControlSources
 }
 
-$arguments = @('test')
+$arguments = @('test', '--manifest-path', $controlManifest)
 if ($Release) { $arguments += '--release' }
 $arguments += @('--test', 'tilemap', '--no-default-features')
 $output = & cargo @arguments 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { $controlFailures += 'the suite did not return to green after restoring' }
 "`nrestored: " + (($output -split "`r?`n" | Where-Object { $_ -match 'test result' }) -join '')
 
-$controlDirty = & git -C $controlRepo status --porcelain -- $controlSources
-if ($controlDirty) { $controlFailures += "sources were not restored cleanly: $controlDirty" }
+if ((Get-SourceFingerprint -Repo $controlRepo -Files $controlSources) -ne $controlFingerprint) {
+    $controlFailures += 'the working tree changed during the run; controls must only ever patch the copy'
+}
 
 if ($controlFailures.Count -gt 0) {
     "`nUNCOVERED GUARDS:"

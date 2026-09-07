@@ -44,7 +44,7 @@ Exercise both the real headless runtime and the combined Player configuration:
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --lib --test kernel --test tilemap --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
+cargo test --release --no-default-features --features scripting --lib --test kernel --test tilemap --test collision --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
 cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
 cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/sprites
 cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/sprites
@@ -160,6 +160,7 @@ Keep subprocess watchdogs independent of the subsystem under test:
 | `scripting_utilities` | Value/export rules, rooted I/O, stale/retained values, limits, replacement failure, script-owned save/load |
 | `kernel`, `runtime` | Handles, immediate writes, systems, latched limits, fixed-input replay and catch-up edges |
 | `tilemap` | Checked map schema and storage, row-major IDs, rectangular tiles and negative origins, saturated world-to-cell conversion, region and edit bounds, refused replacement, and map release on stop; runs in the core configuration with no decoder, VM or window |
+| `collision` | Colliders and the swept solver: approach directions and flush contact, interior cells missed by corners, offsets, smallest and maximum boxes, multi-tile sweeps, nearest wall, boundary clamping, X-before-Y, teleport/attach/install/edit/clear guards, all-candidate atomicity and insertion-order independence. Face selection is checked against an independent 1/256-pixel integer oracle across the geometry domain, and clamp rounding against four batteries: both map boundaries, an interior face at the domain edge, and ordinary content, where about a third of random draws need the repair. Core configuration; the max-load stress is `#[ignore]`d and runs through its own harness |
 | `drawing` | Owned publication/validation, expired bindings, faults and seeded sample state without graphics |
 | `assets` | Rooting, coalescing, staged grants, independent pixels, storage/admission bounds, eviction/cancellation at each stage and worker teardown; adversarial decoders have a 10-second child watchdog because non-preemptible decode plus join can outlast an in-process drain deadline |
 | `script_assets` | Canonical wrappers, publication boundaries, budgets/phases, failed jobs, retained terminal status, sprite options/refusals/order, stop/fault/drop; foreign handles and failed wrapper publication use unit harnesses in `src/scripting/assets.rs` |
@@ -173,6 +174,95 @@ Inspect `cargo tree --no-default-features` and the `assets`, `scripting` and
 `graphics` variants when changing feature boundaries. Core needs no decoder,
 VM or graphics; assets needs no VM or graphics; scripting and graphics must not
 enable each other.
+
+## Mutation controls and stress
+
+These exercise shipped engine code rather than probing a contract ahead of it,
+so they are rerun whenever the guards they cover change. Each control removes one
+guard from the engine source, runs the single test meant to catch it, and
+requires that test to fail at a named assertion; a passing suite alone cannot
+tell a live guard from a dead one. A stale anchor is reported as a stale control
+rather than as a passing guard, and an edit may name a second file, so a rule
+that two files now enforce jointly can be removed from both.
+
+Patches are written to an isolated copy of the tree under `target/`, never to the
+working tree, through the shared `tools/control_tree.ps1`. Patching in place is
+safe for the author but not for a concurrent reader: any build that overlaps a
+run - another session's `cargo test`, an editor checking on save - would silently
+compile a deliberately broken source and report a result that was never about the
+code under review. Each run fingerprints the engine sources before and after and
+fails if either moved, so it proves it wrote nothing rather than asserting it.
+Runs may therefore overlap freely and may be run against uncommitted work.
+
+A zero exit is never read as evidence on its own. A filter that selects no test
+exits zero, and so does a stale binary cargo decided not to rebuild, so either
+could report a live guard as dead or a dead guard as live. Each run must state
+that it executed exactly one test, and a detecting control must state that the
+test failed. The copy also stamps every file it writes, because `Copy-Item`
+preserves source timestamps and the copy reuses its own `target/` between runs.
+
+Markers must never be a bare `assertion` or `panicked` substring: those match any
+failure at all, which would reduce a harness to "something broke" and silently
+absorb a control that moved to a different failure site. That rule is not
+precautionary. Tightening generic markers in the map harness immediately caught a
+wrong guess, and so did the first tightened marker in the collision harness,
+which named the assertion text without the word the message actually printed.
+
+### Tilemap map guards
+
+```text
+pwsh -NoProfile -File tools/run_tilemap_controls.ps1
+pwsh -NoProfile -File tools/run_tilemap_controls.ps1 -Release
+```
+
+Eighteen controls over `src/tilemap.rs` and `src/kernel.rs`. Run both profiles:
+several fail at different sites once `debug_assert` is compiled out, and each
+marker names the exact assertion for its profile. Three are labelled crash
+controls, where removing the guard panics inside the library before a test
+assertion is reached; that is weaker evidence than a test catching the mistake,
+so it is labelled rather than hidden. Two are expected to *pass*, recording that
+mathematical floor and the exact-face correction are redundant by design, and
+that `Kernel::set_tile`'s read of the previous ID now refuses out-of-bounds
+coordinates before `TileMap::set_tile` is reached.
+
+### Collision guards
+
+```text
+pwsh -NoProfile -File tools/run_collision_controls.ps1
+pwsh -NoProfile -File tools/run_collision_controls.ps1 -Release
+```
+
+Twenty-eight controls over `src/collision.rs` and `src/kernel.rs`, covering the
+four the tilemap plan names for this phase - endpoint-only movement, four-corner
+overlap, Y-before-X and a partial integration commit - plus the numerical rules,
+the work accounting and every T5/T6 placement guard. One is expected to *pass*
+and says what makes it redundant: the body sort cannot change a result, because
+bodies never affect one another and no refusal names an entity, so it buys
+internal reproducibility rather than behaviour. A second differs by profile - the
+`overlaps_cell` bounds guard is a crash control in debug, where removing it
+overflows `index + 1`, and a recorded redundancy in release, where the wrap still
+answers correctly - which is why both profiles are run.
+
+Treat a recorded redundancy as a question about a missing test, not a settled
+fact. `check_placement`'s extent check was recorded as redundant with saturation
+plus "outside the map is solid" until the test its own comment described got
+written; it turned out to be the only thing refusing a NaN edge, and writing that
+case then exposed a second gap in the same predicate.
+
+### Collision max-load stress
+
+```text
+pwsh -NoProfile -File tools/run_collision_stress.ps1
+```
+
+The configuration the tilemap plan requires as evidence: the 1,024 x 256 map,
+1,024 maximum-footprint colliders and the full 16,384-entity population, in both
+a long-sweep and a sparse short-motion arrangement. It builds release, applies an
+independent 300-second child watchdog because a hang is not a slow pass, and
+requires both arrangements to report a measurement line, since a zero exit does
+not prove they ran. The long-sweep arrangement must complete inside the
+fixed-pass ceiling rather than fault: a fault there would mean the ceiling is
+wrong, not that the workload is unreasonable.
 
 ## Phase 0 feasibility probes
 
@@ -195,30 +285,6 @@ and a 10-second child watchdog; GPU modes use 30 seconds. Negative controls must
 fail at their named assertions. Generated files live under
 `target/png-sprite-probe/`; durable receipts are linked from the
 [Phase 0 record](implementation/PNG_SPRITE_PHASE0.md).
-
-### Tilemap map guards
-
-Mutation controls for the kernel map. Each removes one guard from the engine
-source, runs the single `tilemap` test meant to catch it, and requires that test
-to fail at a named assertion; a passing suite alone cannot tell a live guard from
-a dead one. Sources are restored after every control and on any failure, and the
-run refuses to start on a dirty `src/tilemap.rs` or `src/kernel.rs`.
-
-```text
-pwsh -NoProfile -File tools/run_tilemap_controls.ps1
-pwsh -NoProfile -File tools/run_tilemap_controls.ps1 -Release
-```
-
-Run both profiles: several controls fail at different sites once `debug_assert`
-is compiled out, and each marker names the exact assertion for its profile.
-Markers must never be a bare `assertion` or `panicked` substring, which would
-match any failure and reduce the harness to "something broke". Three controls are
-labelled crash controls, where removing the guard panics inside the library
-before a test assertion is reached; that is weaker evidence than a test catching
-the mistake, so it is labelled rather than hidden. One control is expected to
-*pass*, recording that mathematical floor and the exact-face correction are
-redundant by design. Rerun after editing either file; a stale anchor is reported
-as a stale control rather than a passing guard.
 
 ### Tilemaps and collision
 

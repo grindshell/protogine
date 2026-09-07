@@ -5,9 +5,12 @@ M1 Phase 0 completed 2026-09-07: its API/schema, numerical and refusal contracts
 are frozen with feasibility receipts in the
 [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md), which is
 authoritative wherever this plan left a proposal open. M1 Phase 1 completed
-2026-09-07: the kernel owns a checked map with bounded reads and cell edits, and
-no collider, sweep or script binding exists yet. Phases 2-4 are unstarted. Later
-milestone designs remain to be frozen. Acceptance is not execution evidence.
+2026-09-07: the kernel owns a checked map with bounded reads and cell edits. M1
+Phase 2 completed 2026-09-07: entities may carry a tile collider, the swept
+solver and every T5/T6 placement guard are in place, and the fixed pass resolves
+all candidates before committing any. No script binding exists yet; Phases 3-4
+are unstarted. Later milestone designs remain to be frozen. Acceptance is not
+execution evidence.
 **Date:** 2026-09-07. **Inspected baseline:** `e87a243`; Phase 0 ran against `508266c`.
 **Backlog:** [TODO.md](TODO.md). Completed predecessor contracts:
 [scripting/C API](docs/implementation/SCRIPTING_C_API_PLAN.md) and
@@ -316,8 +319,8 @@ log anchor. Keep a separate headless assertion of post-step kernel position.
 | Phase | Work | Required exit evidence |
 | --- | --- | --- |
 | 0. Contract and feasibility **(complete)** | Apply accepted T1-T8; freeze M1 API/schema, rounding and refusal semantics. Capture current sprite expectations. Prototype the numerical cases and count worst-case work/storage without adding production APIs. | Met on 2026-09-07; see the [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md). Contracts reflect the accepted decisions; the adjacent-f64 clamp rule holds over 889,145 domain-wide cases with at most two repair steps, no fallbacks and a 2^-28 pixel maximum gap; huge-velocity and maximum-footprint fixtures clamp exactly at the finite boundary; `120 * FIXED_DT` was verified to be exactly 2.0 rather than assumed; measured storage and work fit the caps, with the max-load long-sweep costing 11,386,880 of the 16,777,216 fixed-pass units. Overlap, transition and budget semantics are defined, so no stop gate remains. |
-| 1. Kernel map ownership **(complete)** | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Met on 2026-09-07 by `src/tilemap.rs`, its kernel integration and `tests/tilemap.rs`. Rectangular maps and tiles, negative-origin conversion, malformed size/ID/array input by reason, owned reads and snapshots, region and edit bounds, and a refused replacement leaving the installed map whole are all proven; the suite runs in the core configuration. `tools/run_tilemap_controls.ps1` carries seventeen mutation controls: thirteen fail at a named assertion, three are labelled crash controls because the library panics on its own bounds check before a test assertion is reached, and one is expected to keep passing because the rule it removes is redundant with another. |
-| 2. Colliders and fixed systems | Optional hecs collider, placement guards, pure axis solver and bounded all-candidate commit. Extend all Phase 1 mutations to enforce collider invariants. | Sweeps/teleports/edits obey T3-T6; no-collider integration is unchanged; late failure moves no entity; max-load/watchdog and entity-order checks pass. |
+| 1. Kernel map ownership **(complete)** | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Met on 2026-09-07 by `src/tilemap.rs`, its kernel integration and `tests/tilemap.rs`. Rectangular maps and tiles, negative-origin conversion, malformed size/ID/array input by reason, owned reads and snapshots, region and edit bounds, and a refused replacement leaving the installed map whole are all proven; the suite runs in the core configuration. `tools/run_tilemap_controls.ps1` carries eighteen mutation controls: thirteen fail at a named assertion, three are labelled crash controls because the library panics on its own bounds check before a test assertion is reached, and two are expected to keep passing because the rules they remove are redundant with others. Phase 2 grew that harness by one: `Kernel::set_tile`'s new read of the previous ID refuses out-of-bounds coordinates on its own, so `edit-skips-bounds` now removes both rules and a companion control records the redundancy. |
+| 2. Colliders and fixed systems **(complete)** | Optional hecs collider, placement guards, pure axis solver and bounded all-candidate commit. Extend all Phase 1 mutations to enforce collider invariants. | Met on 2026-09-07 by `src/collision.rs`, its kernel integration and `tests/collision.rs`. Sweeps, teleports, attachment, map replacement, cell edits and clearing obey T3-T6; a session with no collider keeps today's allocation-free integration; a late refusal moves no entity; replay is independent of insertion order. `tools/run_collision_controls.ps1` carries twenty-eight mutation controls: twenty-six fail at a named assertion, one is recorded as redundant, and one is a crash control in debug and a recorded redundancy in release. `tools/run_collision_stress.ps1` runs the mandated max-load configuration under an independent watchdog: the long-sweep arrangement charges 11,386,880 of 16,777,216 units, the Phase 0 probe's figure to the unit, and completes rather than faulting. |
 | 3. Luau integration | Scoped world extensions, raw validation/copying, shared attempts and new work/output budgets; real runtime fixtures. | Phase/expiry/foreign/reused handles, malformed calls, `pcall` latching, allocation rollback, callback ordering, restart/fault and zero-tick/catch-up behavior pass headlessly. |
 | 4. Sample and release proof | Replace sample collision, adapt its probe, add tile-edit/high-speed fixtures, update authoring docs and development checks. | Original room/art/control expectations preserved; collision during loading/unload, same-tick edits, 30/60/144 FPS replay, copied Player captures and injected-input probe pass. Record M1 completion and limits; leave the plan active for M2-M4. |
 
@@ -507,7 +510,290 @@ through collider revalidation, and that test needs teeth at the same moment.
 8 KiB will not fail on any machine this runs on. It stays as defensive code
 covering the fallible-reservation rule, with no claim of coverage.
 
-The next unmet gate is Phase 2.
+Phase 2 exit, 2026-09-07, against baseline `aa75ff1`: `src/collision.rs` owns the
+collider schema, the canonical edge reconstruction, the placement predicates and
+the axis-separated swept solver, depending on `crate::tilemap` and nothing else;
+`src/kernel.rs` owns the collider component, the T5/T6 guards on every mutation
+and the all-candidate fixed pass. Added paths: `src/collision.rs`,
+`tests/collision.rs`, `tools/run_collision_controls.ps1`,
+`tools/run_collision_stress.ps1`, `tools/control_tree.ps1`; modified:
+`src/kernel.rs`, `src/lib.rs`, `tools/run_tilemap_controls.ps1`,
+`docs/DEVELOPMENT.md` and this plan. No scripting, asset, renderer or Player code
+changed, and `ctx.world` still gains nothing until Phase 3.
+
+Commands and results: `cargo fmt --all -- --check`, and `cargo clippy --workspace
+--all-targets -- -D warnings` with and without default features, all clean.
+`cargo test --workspace` reports 226 passing and 6 ignored across 23 targets, up
+from 187 and 5 across 22; the core `--no-default-features` run reports 76 passing
+and 1 ignored across 22 targets, up from 37. The one added ignored test is the
+max-load stress, which runs through its own release harness. `pwsh -NoProfile -File
+tools/run_collision_controls.ps1` reports all twenty-eight guards behaving as
+specified in both debug and `-Release`, and the map harness reports eighteen.
+The review session independently reproduced the control run with the shipped
+script on a separately committed copy of the tree, 28 of 28 in both profiles,
+along with the gate counts and the stress unit counts.
+
+Named control assertions: `high-speed wall stop: the body must stop at 256, not
+tunnel past 288`, `the interior solid cell at column 3 must stop the body at face
+96`, `placement must see the interior solid column, not only the outer two`,
+`x-before-y corner: X resolves fully, then Y is blocked from the resolved X`, `an
+entity validated before the refusal must not have been committed`, `clamped box
+on the free side: reconstructed 16777216.000000004 past 16777216`, `clamped box
+on the free side: -16777215.000000002 below -16777215`, `a body flush against the
+cell's face does not overlap it`, `edge contact is free: a flush box must not
+overlap the cell beyond it`, `moving into a touching face yields zero
+displacement, never a push`, `teleporting to (64.0, 64.0) must be refused`,
+`installation must revalidate every live collider before the swap`, `T6 refuses
+to clear the map beneath a body`, `an edit that would trap the body must refuse`,
+`a solid cell that stays solid must skip the collider scan`, `attaching must
+refuse an extent beyond eight tiles`, `attaching must check every cell the box
+covers`, `the live collider limit must refuse the next attachment`, `despawn
+must release collider capacity`, `a start beyond the blocking face must fault,
+never retreat to itself`, `travel (NaN, 0.0) must be refused`, `all three
+accounting accessors must agree that a stopped session holds nothing`, `a NaN
+edge must be refused, not converted to a cell index`, `a -inf edge must be
+refused, not converted to a cell index`, `a 32-pixel box offset by one pixel
+covers four 32-pixel cells` and `the work performed is charged before the
+refusal`.
+
+The last two close a gap the review found: twenty-five controls and none of them
+touched `WorkBudget::charge`, which is both the termination guard and the
+anti-probing guard the plan argues for by name. Dropping the charge from
+`solid_across`, and reordering `charge` to check before charging, are now
+separate controls.
+
+The strict-marker rule earned itself again here. The first tightened marker in
+this harness named the assertion as `clamped box on the free side: 16777216.000000004
+past 16777216`, and the assertion actually prints `reconstructed` before the
+value, so the control reported a mismatch rather than success. That is the same
+failure mode Phase 1 recorded, on the first control it could have affected.
+
+Both control harnesses now patch an isolated copy of the tree under `target/`
+rather than the working tree, through the shared `tools/control_tree.ps1`. The
+old design restored sources in a `finally` and refused to start on a dirty tree,
+which protected the author's own edits but not a concurrent reader: a build that
+overlapped a run - another session's `cargo test`, an editor checking on save -
+would silently compile a deliberately broken source and report a result that was
+never about the code under review. That happened during this phase's review and
+was caught only because the stray build emitted an `unused variable` warning
+naming a control's own anchor. Each run now fingerprints the engine sources
+before and after and fails if either moved, so the harness proves it wrote
+nothing to the working tree instead of asserting it. The dirty-tree refusal is
+gone with the hazard it guarded, which also lets the harness run against
+uncommitted work.
+
+That change introduced a defect of its own, which is recorded because a flaky
+control harness is worse than none. Two controls reported uncovered in one debug
+run and passed in the two either side of it. The copy reuses its own `target/`
+between runs, and `Copy-Item` preserves the source's modification time, so a
+freshly copied file can look older than the fingerprint cargo recorded on a
+previous run and leave it reusing a binary built from different code. The copy
+now stamps every file it writes. The deeper problem was that a zero exit was
+being read as evidence at all: a filter that selects no test exits zero, and so
+does a stale binary, so either could have reported a live guard as dead or a dead
+guard as live. Both harnesses now require the run to state that it executed
+exactly one test, and require a detecting control to state that the test failed,
+rather than inferring both from an exit code.
+
+One control is recorded as redundant in both profiles and one in release only.
+Removing the body sort changes nothing, because bodies never affect one another,
+and the difference is not observable through the API at all: a work or invariant
+refusal carries no entity, so the sort buys internal reproducibility while
+debugging rather than a behavioural guarantee. It is kept because it is free and
+correct, and recorded rather than claimed. The release-only one is
+`overlaps_cell`'s bounds guard: without it `index + 1` overflows at `i32::MAX`,
+which debug catches and release wraps onto a face far enough outside the map that
+the comparison still answers correctly, so that control is a crash control in one
+profile and a redundancy in the other.
+
+A third started as a recorded redundancy and stopped being one, which is the
+better outcome and worth the note. `check_placement`'s extent check looked
+redundant with saturation plus "outside the map is solid", and for a merely
+out-of-range box it is. What those two accept and it does not is a **NaN** edge,
+whose comparisons are all false, and that mattered because `check_placement` is
+public and enforces neither `finite` nor `TileCollider::check`, so an external
+caller can produce one. Writing the test its own comment already described turned
+the redundancy into coverage; writing it then found a second gap, an inverted box
+whose high edge sits below its low, which the check now refuses too. Each clause
+has its own control. A recorded redundancy is worth re-reading as a question
+about a missing test rather than filed as a settled fact.
+
+Two mutation controls in the map harness also changed, and the change is a
+finding rather than maintenance. Phase 2 gave `Kernel::set_tile` a read of the
+previous ID, to decide whether an edit turns a cell solid, and that read refuses
+out-of-bounds coordinates before `TileMap::set_tile` is ever reached. The
+`edit-skips-bounds` control therefore started passing with the guard removed. It
+now removes both rules, with `kernel-precheck-covers-edit-bounds` recording the
+new redundancy, and the harnesses learned to express a control that spans two
+files. Nothing was wrong with either rule; a harness that could not see the
+overlap would simply have kept reporting a covered guard.
+
+Four Phase 0 obligations are discharged. A clamp repair that cannot satisfy its
+postcondition now faults the systems pass instead of silently returning `start`,
+and the two ways it can fail are separate errors rather than one. `Embedded`
+means the body did not start clear of the face that blocked it, so the premise
+`(start + offset) + size <= face` failed and retreating to `start` would publish
+an overlap; `Unconverged` means only that the repair ran out of steps, where
+`start` is still provably free. Collapsing them would make a log unable to
+distinguish "the world is broken" from "this took longer than the bound allows",
+which is the entire value of the first one. The committed integer oracle is
+widened to the geometry limit:
+`tests/collision.rs` restates the sweep in exact 1/256-pixel i64 arithmetic
+phrased on box edges, and agrees with the solver over roughly 24,000 generated
+cases on grids pinned to +/-2^24 with tiles 1..1,024 and offsets +/-4,096. Every
+body-versus-grid comparison goes through one `TileCollider::aabb`, whose `Aabb`
+fields are private so no caller can assemble a reassociated equivalent. And the
+20 ms figure is re-measured against the production solver rather than carried
+forward.
+
+The premise every one of those guards reasons from is now asserted rather than
+argued: **a position the solver commits is a position the placement check
+accepts.** `set_tile`'s solidity short-circuit, `set_tilemap`'s revalidation and
+N5's own fallback argument are each unsound without it, and nothing in the suite
+would have noticed it failing. The oracle battery and all three clamp batteries
+now assert it on every case they generate.
+
+Rounding coverage is split across four batteries, not one. The oracle pins *which
+face blocks* using exact integers; the batteries pin *how the clamped position
+rounds* against N5's postcondition.
+
+**The repair is bread-and-butter, not a geometry-limit curiosity, and the record
+says so because a first attempt at this said the opposite.** The mechanism is
+that the repair bites when the reconstruction lands in a coarser binade than the
+intermediate `face - size`. The wrong inference drawn from it was that this
+depends on the face's position relative to a power of two. It does not:
+ordinarily the coarseness comes from the *offset* being large next to the face,
+so `(face - size) - offset` sits in a binade far coarser than the face and
+reconstructing loses bits significant at the face's own scale. That is plain
+cancellation with no power of two involved. On the most ordinary map this engine
+holds - 20 x 15 cells of 32-pixel tiles at the origin, character-sized fractional
+boxes and sprite-anchor offsets of 256 to 4,096 pixels - **6,432 of 20,000
+random draws need the repair, 32%**, with no searching at all. The review session
+measured the same effect independently and found the rate monotone in `|offset|`
+and exactly zero at offset zero, with its worst faces at 544, 608 and 416, none
+near a power of two.
+
+That case is now its own battery. The domain-edge interior battery keeps its
+binade faces and its 2^-31 offset grid, but is labelled as the awkward corner it
+is: there `|offset|` is at most 4,096 against a face near 2^23, a ratio of about
+1/2000, so the ordinary source of coarseness is unavailable and only the face's
+own alignment is left. The two boundary batteries walk the map's own edges, and
+the low-boundary mirror needed its own treatment for the opposite reason: at a
+face of exactly -2^24, `face - offset` and `position + offset` are exact
+inverses, so the second rounding undoes the first and no repair is ever needed
+there. Every battery asserts that some case actually required a repair, and the
+ordinary one asserts a rate rather than a bare "some", so none can quietly become
+a test of nothing.
+
+`src/collision.rs` is public, so its entry points owe the same bounded answer
+`TileMap::cell_at` owes. Two did not. `solve` with a non-finite displacement
+asserted in debug and returned a NaN position in release; `overlaps_cell`
+overflowed `index + 1` at `i32::MAX` in debug and wrapped in release. Both now
+answer: a non-finite position or displacement is `CollisionError::Nonfinite`, and
+a coordinate outside the grid names no cell, so nothing overlaps it. Neither was
+a live defect, because the kernel validates before both; both were a public
+surface with unstated preconditions and profile-dependent behaviour.
+
+That re-measurement: the mandated long-sweep arrangement charges **11,386,880**
+of 16,777,216 units, 67.9% of the ceiling, which is the Phase 0 probe's figure to
+the unit. The stress fixture now asserts that constant rather than reporting it.
+
+Getting there produced a checked result rather than a soft one. The first
+fixture charged 11,377,664, exactly 9,216 fewer, which is exactly 1,024 x 9: one
+nine-cell face visit per body. The cause is the fixture's starting alignment, not
+a difference between the prototype and the solver. Starting on an integral X puts
+the leading edge exactly on a tile face, and N4 includes a face already touching
+the leading edge when moving into it, so an integral start enumerates one more
+face than a fractional one. Aligning the fixture with the probe's makes the two
+counts identical, so the production solver is now known to enumerate the same
+faces as the prototype rather than merely a similar number of them.
+
+Live storage is 598,017 bytes: 524,288 cells, one solid flag and 73,728 bytes of
+sweep scratch. The sparse short-motion arrangement charges 18,432 units, also
+pinned, at p50 0.14 ms. Timing is reported as a range across five separate
+release runs of fifteen repetitions each, because a single run's p50 is not far
+enough from the tick period to read as a verdict: p50 16.5 to 17.4 ms, p95 16.7
+to 20.2 ms, max 16.9 to 23.1 ms, against the probe's p50 of 20.6 ms and a
+16.67 ms tick period. An independent run by the review session reproduced the
+unit counts and storage bit-exactly and the timings within that range, which is
+the right shape: the deterministic half reproduces exactly and the
+machine-dependent half does not.
+
+**Accepted M1 limitation: the fixed pass is bounded in cells, not in time, and
+no phase currently owns latency.** This is recorded as a limitation rather than a
+caveat because it is reachable soft degradation, not a theoretical note. At the
+mandated maximum load the collision pass alone costs about 104% of a 16.67 ms
+frame, before rendering, scripting or input, and nothing faults: a script holding
+that configuration produces an indefinite per-tick stall while `MAX_FRAME_TICKS`
+catch-up drops ticks and `overloads` increments. Three clauses, all deliberate.
+The ceiling is a termination and determinism guard, not a latency guard. Lowering
+it is not the lever, because the plan requires this configuration to complete
+rather than fault, so a lower ceiling would fault on the plan's own mandated
+evidence. And a time-based budget would be the wrong fix if it is ever proposed:
+it would make the pass depend on wall-clock, breaking determinism and
+`replay_is_independent_of_insertion_order`, which is a harder requirement than
+frame pacing. Bounding latency would have to be admission control - a body count
+or velocity cap - which is a design decision for a later milestone, not a tuning
+change. No ceiling is changed on this evidence.
+
+Measuring ordinary content is therefore a real task rather than a formality, and
+this phase already found one place where ordinary content differs from the
+mandated worst case **in kind rather than degree**: the clamp repair is reached
+by a third of ordinary draws and by essentially none of the domain-edge ones. The
+sparse arrangement's 18,432 units against the long sweep's 11,386,880 is a
+four-order-of-magnitude gap in the same direction. Whoever takes that measurement
+should expect it to change what is believed here, not confirm it.
+
+Two deviations from recorded figures, both deliberate. The candidate buffer is
+sized by the collider limit rather than the entity limit: 1,024 entries of 72
+bytes is 73,728, against the 393,216 Phase 0 recorded for a 16,384-entity
+`(Entity, Position)` buffer. Only a swept body needs its result remembered,
+because a free-flight entity recomputes `position + velocity * FIXED_DT`
+bit-identically in the commit pass, which is what today's allocation-free
+two-pass integration already relies on; atomicity is unchanged. It supersedes the
+Phase 0 record's integration-scratch row, which sized the buffer against the
+entity limit. Second, bodies are sorted into entity-identifier order before
+sweeping while the free-flight commit stays in archetype order, because each
+entity writes only its own position and every candidate is validated before any
+commit, so commit order is unobservable. What that does not cover: with two
+non-finite candidates, *which* `Nonfinite` surfaces still depends on archetype
+order. Nothing commits either way, so the committed state is order-independent
+while error attribution is not, and only the first is claimed.
+
+The fixed-pass ceiling is unreachable at the frozen limits, and this phase says
+so rather than implying the budget is a live guard. At most 1,024 bodies, each
+enumerating at most nine cells on at most `columns + rows` candidate faces with
+`columns + rows` capped at 1,280, cost at most 11,796,480 units against a
+16,777,216 ceiling. The two map boundary faces are deliberately not in that
+count: reaching the boundary index clamps before any cell is inspected, so a body
+pressed against the far edge charges nothing at all, which
+`a_body_flush_with_the_map_boundary_neither_moves_nor_visits_a_cell` asserts
+directly. A unit test pins the arithmetic so a later limit change that closes the
+gap fails loudly. The consequence is a recorded coverage gap: the kernel's
+tick-work overflow path cannot be reached, so `CollisionError::Work` is exercised
+directly against `collision::solve` with a small budget instead, and the
+reachable late-failure fixture uses a non-finite candidate.
+`CollisionError::Unconverged` is likewise unreachable by construction and carries
+no coverage claim; `Embedded` is reachable through `collision::solve`, which does
+not check that its starting box is legal, and is pinned by fixture.
+
+Limits unchanged from the Phase 0 record. The Phase 1 coverage gap on
+`a_refused_replacement_leaves_the_installed_map_whole` is closed by its Phase 2
+counterpart: `set_tilemap` is now genuinely fallible through collider
+revalidation, `a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map`
+has teeth, and the `install-unrevalidated` control proves it.
+`TileMapError::Capacity` and `KernelError::Capacity` remain defensive code with
+no coverage claim.
+
+Deliberately not in this phase, and still Phase 3's: every `ctx.world` binding,
+raw table validation and copying, the shared attempt budget, and the aggregate
+per-callback work ceiling. `Kernel::callback_work` accumulates what map and
+collider calls charge and `reset_callback_work` begins a new callback, but
+nothing enforces the 1,048,576 aggregate yet, because the callback boundary is
+Phase 3's to own. Single calls are individually bounded: the largest, a map
+install under the full collider limit, charges at most 82,944 units here.
+
+The next unmet gate is Phase 3.
 
 Decision update, 2026-09-07: the owner accepted T2-T8, explicitly required the
 collider to be a hecs component, accepted T1's first milestone while making

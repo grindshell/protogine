@@ -6,6 +6,7 @@ mod rooted_path;
 
 pub mod assets;
 pub mod bundle;
+pub mod collision;
 pub mod drawing;
 pub mod input;
 pub mod kernel;

@@ -311,7 +311,7 @@ the callback deadline under their own deterministic work cap.
 | Live colliders | 1,024, inside the existing 16,384 entity limit | - |
 | Map storage | u16 cells, at most 512 KiB, plus 1,024 solid flags | 524,288 + 1,024 bytes |
 | Replacement peak | One old map plus one candidate | 1,050,624 bytes |
-| Integration scratch | One reusable candidate buffer for 16,384 entities, reserved only once a map or collider exists | `(hecs::Entity, Position)` is 24 bytes, so 393,216 bytes; a session with neither keeps today's allocation-free integration |
+| Integration scratch | One reusable candidate buffer for 16,384 entities, reserved only once a map or collider exists | `(hecs::Entity, Position)` is 24 bytes, so 393,216 bytes; a session with neither keeps today's allocation-free integration. **Superseded by Phase 2**, which sizes the buffer against the collider limit instead: only a swept body needs its result remembered, because a free-flight entity recomputes `position + velocity * FIXED_DT` bit-identically in the commit pass, so 1,024 entries of 72 bytes is 73,728. Atomicity is unchanged; the reservation still waits for a collider to exist |
 | Worst single body | Analytic ceiling `9 * (columns + rows)` = 11,520 units | 11,120 units, at 1-pixel tiles with an 8-tile body |
 | Fixed-pass tile work | 16,777,216 units per tick, no per-entity reset | Long-sweep stress: 11,386,880 units, 67.9% of the ceiling |
 | Callback tile work | 1,048,576 units | Largest map install: 346,112 units, leaving room for 685 further solid edits under 1,024 colliders |
@@ -543,9 +543,13 @@ Obligations carried forward:
 - Phase 1: saturate the cell-index correction and `debug_assert` its bound rather
   than relying on callers clipping first; route every body-versus-grid comparison
   through one edge-reconstruction helper.
-- Phase 2: make an exhausted clamp repair a systems fault rather than a silent
-  fallback; re-measure the 20 ms worst case against the production solver before
-  anyone reads it as a cost; restate the fixed-pass figure if a post-sweep
-  re-check is added; widen the committed integer oracle to the geometry limit.
+- Phase 2 **(discharged 2026-09-07)**: make an exhausted clamp repair a systems
+  fault rather than a silent fallback; re-measure the 20 ms worst case against
+  the production solver before anyone reads it as a cost; restate the fixed-pass
+  figure if a post-sweep re-check is added; widen the committed integer oracle to
+  the geometry limit. No post-sweep re-check was added, so the measured
+  fixed-pass figure stands. See the plan's Phase 2 exit for what each discharge
+  actually produced, including the split of the clamp fault into `Embedded` and
+  `Unconverged` and the re-measured timings.
 - Phase 4: apply the `Get-ProbeStates` and probe-log changes specified in the
   migration section before touching the live probe.
