@@ -21,15 +21,31 @@
 # deliberately broken source. The run proves that rather than asserting it: it
 # fingerprints the engine sources before and after and fails if either moved.
 #
-# Isolation from the working tree is proven; isolation from concurrent `cargo`
-# is not. See the header of `run_collision_controls.ps1`: re-run serially before
-# believing a red result.
+# The one real concurrency hazard is now identified and closed, and it was never
+# cargo. The copy's path derives from the harness name, so two concurrent runs of
+# *this* harness shared one patched tree: each wrote its own control's patch and
+# each restored the originals in its own loop, overwriting the other mid-control,
+# while each cleared the other's saved cargo output at startup.
+# `Enter-ControlLock` now refuses the second run by name instead of accommodating
+# it. Sharing the build cache between runs is fine; sharing patched sources never
+# was, and the copy alone only ever protected the working tree.
+#
+# Every observed instance was in the safe direction - the harness cried wolf
+# rather than passing a control that had not applied - because each conclusion is
+# separately gated on the patch surviving the run, the crate actually
+# recompiling, exactly one test executing, and a detecting control's test
+# reporting failure. Those gates are what caught this, twice. Read the saved
+# cargo output for any control that fails.
 param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 $controlRepo = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'control_tree.ps1')
 $controlSources = @('src/tilemap.rs', 'src/kernel.rs')
 $controlFingerprint = Get-SourceFingerprint -Repo $controlRepo -Files $controlSources
+# Claimed before the copy exists, because the copy is what two runs would share.
+# Released after the fingerprint check below, so both exits pass through it; a
+# run that dies before then leaves a lock its own dead process identifies.
+$controlLock = Enter-ControlLock -Repo $controlRepo -Name 'tilemap-controls'
 
 $controls = @(
     @{ Name = 'stop-keeps-map'; File = 'src/kernel.rs'; Test = 'stopping_releases_map_storage'
@@ -250,7 +266,7 @@ try {
             # Every control edits a source file, so a correct run must rebuild.
             # If cargo decided the crate was up to date, it ran a binary built
             # from different code and the result is about that binary, not this
-            # control. Observed under concurrent `cargo` load.
+            # control. Observed when two runs of this harness overlapped.
             $verdict = "$($control.Name): cargo did not rebuild, so the run is about a stale binary"
         } elseif ($output -notmatch 'running 1 test(?!s)') {
             $verdict = "$($control.Name): the run did not execute exactly one test, so it proves nothing"
@@ -295,6 +311,8 @@ $arguments += @('--test', 'tilemap', '--no-default-features')
 $output = & cargo @arguments 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { $controlFailures += 'the suite did not return to green after restoring' }
 "`nrestored: " + (($output -split "`r?`n" | Where-Object { $_ -match 'test result' }) -join '')
+
+Exit-ControlLock -Path $controlLock
 
 if ((Get-SourceFingerprint -Repo $controlRepo -Files $controlSources) -ne $controlFingerprint) {
     $controlFailures += 'the working tree changed during the run; controls must only ever patch the copy'
