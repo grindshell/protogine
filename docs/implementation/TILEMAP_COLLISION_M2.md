@@ -57,7 +57,19 @@ Rules, all inherited from how entity handles already behave:
 - A handle from another `Kernel` refuses, by `Rc::ptr_eq` on the session.
 - A handle to a removed map refuses, by generation, including after its slot has
   been reused by a different map.
-- `Kernel::stop` releases every map and invalidates every handle.
+- `Kernel::stop` releases every map and invalidates every handle - by making the
+  session inactive, not by touching generations. **The mechanism matters and an
+  earlier draft stated only the outcome.** `require_active` already runs first
+  in `validate` (`src/kernel.rs:192`) and in `map` (`:319`), so after `stop`
+  every entry point refuses with `Inactive` *before* any slot or generation is
+  examined. Generations are not bumped and the table is dropped only to release
+  storage, exactly as M1 drops `tilemap` for that reason alone. So the two
+  candidate mechanisms a reader might infer - bump every live generation, or
+  empty the table - are both wrong, and the distinction is observable: after
+  `stop` a handle refuses `Inactive`, where the same handle to a removed map in
+  a live session refuses `InvalidTileMap`. Phase 1 asserts both errors by name
+  rather than asserting that two different situations both refuse. The question
+  is the review session's.
 - Handles are opaque userdata in Luau, never numbers, so a script cannot forge
   one - the same reason `EntityHandle` is userdata.
 
@@ -566,7 +578,20 @@ time at all, and the plan has treated the two as unrelated on purpose since Phas
 whose input varies 8.5% between runs on one machine is an observation, and
 reading anything finer out of it is reading the noise. The spread is the review
 session's finding; they measured 1.8226 where this had recorded 1.7794 and asked
-what that did to the sequence. That is a single point of comparison
+what that did to the sequence.
+
+**The data looks tighter than that claim, and the claim stays loose anyway.**
+Anyone who checks will find the unit ratio is 9.94 against an observed time ratio
+of 9.2 to 9.9 - agreement within about 8%, visibly better than "order of
+magnitude" - and be tempted to write that the charged unit tracks time to within
+ten percent. It does not support that. It is one point of comparison across two
+milestones, different map shapes, different arrangements and a machine whose own
+spread is 8.5%, and the derived figure has already moved 17.7, 18.8, 17.7 on
+arrangement changes that had nothing to do with the relationship being tested.
+The closeness is a coincidence of this arrangement until something establishes
+otherwise, and establishing it would need a deliberate sweep across shapes and
+loads rather than a second data point. Recorded here so the temptation arrives
+pre-answered; the caution is the review session's. That is a single point of comparison
 across different map shapes, different arrangements and different runs, so it is
 an observation and not a model - but it is the first evidence in this plan that
 the charged work unit tracks time at all, and the plan has been treating the two
