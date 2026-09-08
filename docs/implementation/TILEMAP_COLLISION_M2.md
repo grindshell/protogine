@@ -52,7 +52,18 @@ would be a smaller violation of the same idea, but it would make maps appear in
 table reimplements the small part of hecs this needs - free-list reuse and a
 generation per slot - and nothing else.
 
-Rules, all inherited from how entity handles already behave:
+Rules. Three are inherited from how entity handles already behave; the fourth
+is new, and **an earlier draft said "all inherited" because it was true when
+written and stopped being true three commits later**, when freezing the
+slot-reuse policy added a rule with no M1 counterpart. `EntityHandle` is
+`{ session: Rc<()>, entity: Entity }` and `validate` is `Rc::ptr_eq` plus
+`world.contains` (`src/kernel.rs:191-197`): protogine holds no generation of its
+own, the one that exists lives inside hecs' `Entity`, and the reuse order is
+hecs' business and unspecified here. So the generation bullet inherits nothing -
+which is exactly why M2 had to freeze a policy rather than point at one. This is
+the freeze pass's third clause again, in its other form: not a constant whose
+referent moved, but a *new rule* falsifying a summary sentence about the old
+ones. The finding is the review session's.
 
 - A handle from another `Kernel` refuses, by `Rc::ptr_eq` on the session.
 - A handle to a removed map refuses, by generation, including after its slot has
@@ -92,6 +103,27 @@ allocator is free to hand B a fresh index, that fixture silently degrades into
 the easy case it was written to avoid. So the policy is frozen here and Phase 1
 asserts the landing rather than assuming it. The requirement is the review
 session's.
+
+**Freezing "most recently freed" also picks the policy that concentrates
+generation churn, so the bound is stated rather than left to be inferred.** A
+create-and-remove loop hammers one slot's counter where a first-in-first-out
+free list would spread it across the whole list, and M4's streaming is exactly
+that loop. At `u32` a slot survives 4,294,967,296 reuses, which at one create
+and one remove per 60 Hz tick is **828 days of continuous churn**, so it is
+unreachable and carries no coverage claim - the same treatment M1 gives
+`KernelError::Capacity` and `CollisionError::Unconverged`, which are recorded as
+defensive with their arithmetic attached. If M4 ever makes that loop real at a
+higher rate, this is the paragraph to revisit.
+
+**The entity side has no equivalent guarantee, and the symmetry is inviting
+enough to say so.** hecs owns entity slot reuse, so an M1-style fixture -
+despawn, respawn, assert the stale handle refuses - rests on a dependency's
+behaviour rather than on a contract of ours. M1 already handles that correctly:
+`reused_slots_replace_their_stale_wrapper_without_growing_the_cache`
+(`src/scripting/world.rs:535`) asserts `first.slot() == second.slot()` before
+relying on the reuse, so it fails loudly if hecs ever stops recycling. The
+*pattern* is therefore already in the repository; the *guarantee* is not, and
+only maps have one. Nobody should write a new entity fixture believing otherwise.
 
 ## M2-2. Membership
 
