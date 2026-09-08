@@ -478,6 +478,9 @@ if ($controlFailures.Count -gt 0) {
     "re-running serially before it is believed; see the header."
     exit 1
 }
-$guards = ($controls | Where-Object { -not $_.Expect }).Count
-$selfTests = $controls.Count - $guards
+# `@(...)`: a filter matching exactly one control returns that hashtable, and
+# `.Count` on a hashtable is its number of keys, not one. Neither count here can
+# reach one today, but the sample harness added in Phase 4 did.
+$guards = @($controls | Where-Object { -not $_.Expect }).Count
+$selfTests = @($controls).Count - $guards
 "`nAll $guards collision guards behaved as specified, and the harness refused all $selfTests self-tests."

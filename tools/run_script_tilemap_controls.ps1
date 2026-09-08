@@ -550,8 +550,14 @@ if ($controlFailures.Count -gt 0) {
 # Reported as its three parts rather than one total. A single number invites a
 # doc to say "N controls, M of them redundancies" and get the arithmetic between
 # them wrong, which is exactly what happened once here.
-$guards = ($controls | Where-Object { -not $_.Expect }).Count
-$redundant = ($controls | Where-Object { $_.Passes }).Count
-$selfTests = $controls.Count - $guards
+#
+# `@(...)` around every filter: a pipeline that matches exactly one control
+# returns that hashtable rather than a one-element array, and `.Count` on a
+# hashtable is its number of keys. These three all match more than one today, so
+# nothing here has ever misreported; the sample harness added in Phase 4 has a
+# single redundancy and printed its field count instead.
+$guards = @($controls | Where-Object { -not $_.Expect }).Count
+$redundant = @($controls | Where-Object { $_.Passes }).Count
+$selfTests = @($controls).Count - $guards
 "`nAll $guards binding guards behaved as specified: $($guards - $redundant) detected with the" `
     + " rule removed and $redundant confirmed redundant. The harness refused all $selfTests self-tests."
