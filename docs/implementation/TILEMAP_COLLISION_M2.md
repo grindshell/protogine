@@ -1,12 +1,17 @@
 # M2 contract: simultaneous maps
 
-**Status:** proposed, 2026-09-08, against `7d7c3ad`. **Nothing here is frozen and
-nothing is implemented.** This document exists to be argued with before any code
-depends on it, which is the one point in this plan where the claims are still
-cheap to change. Every number below is a proposal awaiting the Phase 0 probe;
-every rule is a proposal awaiting review. Where a decision is genuinely open it
-is marked **[OPEN]** with the alternatives, rather than written as settled and
-quietly revisited later.
+**Status:** frozen 2026-09-08 against `7d7c3ad`, after three review rounds.
+**Nothing is implemented.** Every rule below is settled and Phase 1 may be built
+against it; every *number* remains a proposal for the Phase 0 probe to confirm
+or move, and the probe's job is to make some of them wrong. Four decisions stay
+marked **[OPEN]** with their alternatives, because none of them blocks the probe
+and pretending they were settled is how the last three rounds' findings got
+written in the first place.
+
+Frozen means the claims have been read against the M1 *code* rather than against
+M1's documents, twice by a second session; it does not mean they are true. The
+review found two blocking contradictions, four smaller errors and an impossible
+worked example, none of which were in the parts marked uncertain.
 
 Inherits [M1](../../TILEMAP_COLLISION_PLAN.md), whose
 [Phase 0 record](TILEMAP_COLLISION_PHASE0.md) owns every numerical and refusal

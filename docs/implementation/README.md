@@ -11,7 +11,7 @@ describes current behavior; [AGENTS](../../AGENTS.md) owns contribution rules an
 | Plan | Status |
 | --- | --- |
 | [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required. M1 complete through Phase 4, including the migrated sprite sample |
-| [M2 contract: simultaneous maps](TILEMAP_COLLISION_M2.md) | **Proposed, not frozen, nothing implemented.** Map identity, membership, transfer, per-map coordinates, the T6 revision, budgets and the migration off M1's implicit-map calls, with five decisions marked open |
+| [M2 contract: simultaneous maps](TILEMAP_COLLISION_M2.md) | **Rules frozen after three review rounds; numbers await the Phase 0 probe; nothing implemented.** Map identity, membership, transfer, per-map coordinates, the T6 and T5 revisions, budgets and the migration off M1's implicit-map calls, with four decisions marked open |
 
 Active plans live at the repository root and move here when complete. A closed
 phase of an active plan is filed under Completed below, as the PNG/sprite Phase 0
