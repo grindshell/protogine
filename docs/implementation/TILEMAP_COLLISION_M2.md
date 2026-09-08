@@ -71,9 +71,16 @@ atomically with `TileCollider`.
 Separate rather than a field on `TileCollider`, because `src/collision.rs`
 depends on `crate::tilemap` and nothing else, and a slot index into a kernel
 registry is not a geometry concept. Every predicate there already takes its map
-as an argument, so the module needs no change at all. The cost is that "collider
-without membership" becomes representable and the kernel must keep the pair in
-step - the same obligation it already carries for the `colliders` counter.
+as an argument, so the module needs no change at all.
+
+**The cost is that "collider without membership" becomes representable, and it
+is larger than the `colliders` counter's.** An earlier draft called the two
+obligations equivalent; they are not. The counter is one integer with one update
+site. Membership is per entity and has to stay in step with `TileCollider` at
+four: attach, transfer, `remove_tilemap`, and entity despawn. That is the
+specific risk this choice buys, so the control list carries a control for it -
+a collider that can exist without membership, or that survives its map's
+removal, must fail a named fixture.
 
 **[OPEN]** The alternative is a `map` field inside `TileCollider`, which makes
 the invariant structural instead of enforced. It pushes a kernel identity into
@@ -126,15 +133,30 @@ everything, replace, reposition, reattach. That global restriction becomes
 map-local:
 
 > A map may be removed only when no collider is a member of *it*. Replacing a
-> map's contents revalidates only its own members. Colliders on other maps are
-> neither checked nor detached, and no operation on one map can refuse because
-> of a body on another.
+> map's contents revalidates only its own members. **A cell edit scans only the
+> edited map's members.** Colliders on other maps are neither checked nor
+> detached, and no operation on one map can refuse because of a body on another.
 
-Everything else in T6 survives unchanged: replacement, cell edits and collider
-attachment still preserve non-overlap or refuse atomically, and a refusal still
-leaves the old map, cell, collider and position exactly as they were. M4 will
-need a further revision for regions retired under a live body; this one does not
-anticipate it.
+**The cell-edit clause is the one that has to be written down, and an earlier
+draft of this section said the opposite by calling cell edits "unchanged".**
+`Kernel::set_tile` (`src/kernel.rs:423`) queries every live collider in the
+world and tests each against `overlaps_cell`, which compares a body's world-space
+box against a cell rectangle derived from the map it is passed. In M1 that global
+query was exactly right, because there was one map and every collider was on it.
+Under M2-3 - one shared coordinate space, maps free to overlap - it becomes
+wrong in a way that contradicts the sentence three lines above it: a body that is
+a member of map B, standing at world coordinates that happen to fall inside a
+cell of map A, would make a non-solid-to-solid edit to **map A** refuse. So
+"unchanged" was the wrong word for the one entry point whose map argument no
+longer implies its collider set.
+
+What does survive unchanged is the guarantee rather than the implementation:
+replacement, cell edits and collider attachment still preserve non-overlap or
+refuse atomically, and a refusal still leaves the old map, cell, collider and
+position exactly as they were.
+
+M4 will need a further revision for regions retired under a live body; this one
+does not anticipate it.
 
 Removal is not deferred and there is no reference counting: a map with members
 refuses removal, so a handle is invalidated only by an operation that had
@@ -192,7 +214,13 @@ message. Leaning to the table, unsure.
 ## M2-6. API migration
 
 Every M1 map call addressed an implicit current map. All of them gain an
-explicit handle, and two are renamed because their meaning changed:
+explicit handle or resolve one from the body, and two are renamed because their
+meaning changed.
+
+**The scripted calls are not all of them, and an earlier draft's "all of them"
+covered only these nine.** The Rust entry points that address the implicit map
+are listed after the table; one of them is a T5 semantic change of exactly the
+kind M2-3 spells out for T3, and it was missing.
 
 | M1 | M2 |
 | --- | --- |
@@ -204,7 +232,33 @@ explicit handle, and two are renamed because their meaning changed:
 | `tiles_region(c, r, w, h)` | `tiles_region(map, c, r, w, h)` |
 | `set_tile(c, r, id)` | `set_tile(map, c, r, id)` |
 | `set_tile_collider(e, options)` | `set_tile_collider(e, placement)` |
-| `tile_collider(e)` | `tile_collider(e)`, now returning the map alongside the box |
+| `tile_collider(e)` | `tile_collider(e)`, returning the map alongside the box, because M2-2 makes membership unobservable any other way |
+
+Four Rust entry points also address the implicit map and are not scripted, so
+they are not in the table above:
+
+| M1 | M2 |
+| --- | --- |
+| `set_position(entity, position)` | unchanged signature; resolves the body's **member** map, not a session-wide one - see M2-R2 |
+| `tile_face(axis, index)` | `tile_face(map, axis, index)` |
+| `tile_at(axis, world)` | `tile_at(map, axis, world)` |
+| `tilemap_storage_bytes()` | becomes the aggregate accessor M2-7's budgets and the stress runs read |
+
+**T5 revision (M2-R2).** T5 reads "For a collider, reject an overlapping or
+out-of-map destination", and that sentence is identical before and after M2 while
+meaning something different - the same trap M2-3 defuses for "outside the map is
+solid" and which an earlier draft of this document walked into here:
+
+> A teleport is validated against the map the body is a **member** of, never
+> against any other live map. `set_position` remains a teleport, is still never
+> swept, and still refuses an overlapping or out-of-map destination; "the map"
+> in that rule now means the body's own. A body with no collider is unvalidated
+> as before, and a body whose destination is legal on a different map is still
+> refused, because changing maps is M2-5's transfer and nothing else.
+
+`set_position` keeps its signature. Adding a map argument would give it two ways
+to say which map applies - the argument and the membership - and one of them
+would have to lose.
 
 This is a breaking change to every script that uses a map, which the plan
 anticipates: "M2 must define their API migration and map-local replacements".
@@ -223,11 +277,11 @@ move.** M1's ceilings are explicitly not aggregate multi-map limits.
 | Resource | Proposed bound | Reasoning |
 | --- | --- | --- |
 | Maps per session | 32 | Enough for a screen of rooms plus staging; small enough that a linear scan over maps is never a cost worth optimising |
-| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance. Deliberately below `MAX_CALLBACK_WORK`, so a session can install its entire map budget inside one callback rather than being forced to spread installs across ticks |
+| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance, and it fits inside one callback with the arithmetic stated rather than asserted. A Luau install charges exactly once per cell - `src/scripting/world.rs:333` wires `charge_callback_work` into `solid_flags` and `cell_ids`, and `Kernel::set_tilemap` charges only for revalidating existing members, which is why Phase 4's install-cost test lands on 510 + 5 + 1 rather than about 1,027. So filling the whole budget costs 524,288 cells plus at most 32 x 1,024 solid flags = **557,056 of 1,048,576**, leaving 47% spare |
 | Per-map dimensions and cells | unchanged: 1..1,024 per axis, at most 262,144 cells | A single map is no larger than M1's |
 | Staging | at most one candidate map in flight | Peak storage is the aggregate plus one map: about 1.5 MiB |
 | Live colliders | unchanged: 1,024 across all maps | The limit that bounds the fixed pass is global, so it stays global |
-| Fixed-pass work | unchanged: 16,777,216 | The derivation is per body against its own map, and per-map dimensions are unchanged, so 1,024 bodies x 9 cells x 1,280 faces = 11,796,480 still fits. The probe must re-verify this with bodies spread across many maps rather than assume the arithmetic transfers |
+| Fixed-pass work | unchanged: 16,777,216 | Not a fresh derivation: 1,280 faces x 9 cells x 1,024 bodies = 11,796,480 is what `the_fixed_pass_ceiling_cannot_be_reached_under_the_frozen_limits` (`src/collision.rs:590`) already computes and asserts. The bound is insensitive to how bodies are distributed **by construction**, given four inputs M2 leaves alone: `MAX_LIVE_COLLIDERS` stays global, `MAX_SPAN_CELLS` is unchanged, per-map `columns + rows` is still capped at 1,280, and the pass still iterates colliders rather than maps. See the Phase 0 probe for what is actually at risk |
 | Callback work | unchanged: 1,048,576 | Now shared across every map a callback touches |
 | Region output | unchanged: 4,096 per call, 262,144 per callback | Now aggregate across maps |
 
@@ -239,9 +293,11 @@ before a candidate is built, not after.
 
 Unchanged from M1's split, extended to the new refusals. Catchable through
 `pcall`: schema, geometry, bounds, missing or stale map handle, foreign handle,
-bad entity handle, wrong phase, illegal placement and illegal transfer. Latching
-outside `pcall`: the map count, the aggregate cell budget, the collider limit,
-callback tile work and region output.
+bad entity handle, wrong phase, illegal placement, illegal transfer, and
+**removing a map that still has members** - the map-local successor to M1's
+`KernelError::CollidersAttached` (`src/kernel.rs:368`), which is catchable
+today and stays so. Latching outside `pcall`: the map count, the aggregate cell
+budget, the collider limit, callback tile work and region output.
 
 A new `KernelError::InvalidTileMap` covers stale, foreign and removed handles,
 distinct from `NoTileMap`, which M2 retires along with the implicit map.
@@ -253,11 +309,25 @@ built around it.
 
 | Phase | Work | Exit evidence |
 | --- | --- | --- |
-| 0. Contract and feasibility | This document, reviewed and frozen. A probe measuring aggregate storage and per-tick cost at the maximum configuration, and re-deriving the fixed-pass bound with bodies spread across maps | Contract frozen with no open item; probe receipts; every proposed number either confirmed or revised with its measurement |
+| 0. Contract and feasibility | This document, reviewed and frozen. A probe measuring aggregate storage and per-tick cost at the maximum configuration, and asserting the fixed-pass **equality** below | Contract frozen with no open item; probe receipts; every proposed number either confirmed or revised with its measurement |
 | 1. Kernel map registry | Slot table, handles, generations, create/replace/remove/info, `stop` release, storage and count accounting | Foreign, stale and reused-slot handles refuse; removal and replacement are map-local; storage accounting agrees with the budget; core configuration |
-| 2. Membership, transfer and the fixed pass | Membership component, atomic transfer, per-map sweeping, the M2-R1 revision on every mutation | Two overlapping maps give independent collision; transfer is atomic in both directions; removing one map preserves unrelated maps and bodies; insertion-order independence survives |
+| 2. Membership, transfer and the fixed pass | Membership component, atomic transfer, per-map sweeping, M2-R1 on removal, replacement and cell edits, and M2-R2 on `set_position` | Two overlapping maps give independent collision; transfer is atomic in both directions; removing one map preserves unrelated maps and bodies; a cell edit ignores bodies on other maps; a teleport validates against the member map; insertion-order independence survives |
 | 3. Luau migration | The map-addressed calls, handle refusals, shared budgets | Every refusal reaches Lua unchanged; aggregate ceilings latch; schema battery over the new placement shape |
 | 4. Sample and release proof | Migrate the sprite sample to a named map, add a two-map fixture, update docs and checks | Sample behaviour unchanged again; two-map evidence headlessly and in a copied Player; M2 completion recorded |
+
+**The Phase 0 probe must assert an equality, not re-derive the bound.** An
+earlier draft asked it to "re-verify the arithmetic with bodies spread across
+many maps", which tests something that is not at risk: the bound cannot depend on
+distribution, for the four structural reasons in the budget table. What is at
+risk is the M2 *implementation* growing a per-map term the M1 one did not have -
+resolving members by scanning maps, revalidating on the pass, anything carrying a
+factor of 32. So the probe asserts:
+
+> A fixed pass with 1,024 bodies spread across 32 maps charges **exactly** what
+> the same 1,024 bodies charge on one map.
+
+That has a single right answer, fails loudly the moment a per-map cost appears,
+and is the check the ceiling actually needs. The framing is the review session's.
 
 ## Required behavioural evidence
 
@@ -268,14 +338,29 @@ built around it.
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
 | Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; the fixed pass still fits with bodies spread across the maximum map count |
-| Migration | Every renamed call refuses its M1 argument shape rather than guessing |
+| Migration | Every renamed call refuses its M1 argument shape rather than guessing; `set_position` on a body validates against its member map and refuses a destination that is legal only on another |
+| Membership integrity | A collider and its membership are attached, transferred, removed and despawned together, with no observable state where one exists without the other |
 
 Required negative controls, in the harness style the earlier phases established:
-membership read from position rather than from the component must fail the
-overlapping-maps fixture; a generation check removed must fail the reused-slot
-fixture; transfer that writes membership before validating placement must fail
-the atomicity fixture; and removal that scans all colliders rather than the
-map's own must fail the unrelated-bodies fixture.
+
+- Membership read from position rather than from the component must fail the
+  overlapping-maps fixture.
+- A generation check removed must fail the reused-slot fixture.
+- Transfer that writes membership before validating placement must fail the
+  atomicity fixture.
+- Removal that scans all colliders rather than the map's own must fail the
+  unrelated-bodies fixture.
+- **A cell edit that scans all colliders rather than the edited map's own must
+  fail a fixture with a body of map B standing over a cell of map A.** This one
+  matters more than its siblings because the mistake is *inherited* rather than
+  newly written: `set_tile`'s global query is correct M1 code, so a Phase 2
+  implementer reading it has no local reason to touch it.
+- **A collider that can exist without membership, or that survives its map's
+  removal, must fail a named fixture.** This is the control that pays for M2-2's
+  choice of a representable invalid state, and none of the four above covers the
+  pair coming apart.
+
+The last two are the review session's.
 
 ## What I am least sure of
 
@@ -294,5 +379,10 @@ most confidence are the ones that have needed correcting.
 4. **Whether 32 maps is a limit anyone will feel**, and whether the map count
    needs to be separate from the aggregate cell budget at all, given the cell
    budget already bounds storage.
-5. **Whether `tile_collider` returning the map alongside the box is the right
-   shape**, or whether membership deserves its own read.
+
+**Resolved, and no longer open: `tile_collider` must return the map.** It was
+listed here as a question of shape. It is not - M2-2 makes membership
+uninferable from position, so a read that omits it leaves a script with no way
+to observe which map a body is on at all. That is not ergonomics, it is whether
+the state this document just made authoritative is readable. The argument is the
+review session's.
