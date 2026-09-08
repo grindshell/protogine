@@ -1,0 +1,234 @@
+Phase 3 binding guards and the harness lock
+Windows MSVC x64, rustc 1.95.0 (59807616e 2026-04-14), commit a7cf862
+
+pwsh -NoProfile -File tools/run_control_lock_selftest.ps1
+note: taking over a control-lock-selftest lock left by process 999999, which is no longer running
+note: taking over a control-lock-selftest lock left by process 7344, which is no longer running
+note: taking over a malformed control-lock-selftest lock
+
+All five control-lock cases behave as specified.
+
+pwsh -NoProfile -File tools/run_script_tilemap_controls.ps1
+CONTROL DETECTED: description-unvalidated
+CONTROL DETECTED: collider-options-unvalidated
+CONTROL DETECTED: array-metatable-accepted
+CONTROL DETECTED: array-holes-accepted
+CONTROL DETECTED: dimensions-narrowed
+CONTROL DETECTED: origins-narrowed
+CONTROL DETECTED: ids-narrowed
+CONTROL DETECTED: solids-truthy-accepted
+CONTROL DETECTED: indices-narrowed
+CONTROL DETECTED: extents-narrowed
+CONTROL DETECTED: tile-ids-narrowed
+CONTROL DETECTED: mutation-phase-ungated
+CONTROL DETECTED: map-calls-uncounted
+CONTROL DETECTED: region-output-uncharged
+CONTROL DETECTED: region-charges-what-was-asked-for
+CONTROL DETECTED: region-refusal-uncharged
+CONTROL DETECTED: callback-work-unenforced
+CONTROL DETECTED: work-limit-catchable
+CONTROL DETECTED: collider-limit-catchable
+CONTROL DETECTED: callback-work-never-reset
+CONTROL DETECTED: call-budget-is-the-whole-ceiling
+CONTROL DETECTED: set-tile-budgeted-against-the-ceiling
+CONTROL DETECTED: set-position-budgeted-against-the-ceiling
+CONTROL DETECTED: attach-budgeted-against-the-ceiling
+CONTROL DETECTED: install-budgeted-against-the-ceiling
+CONTROL DETECTED: set-tile-charges-after-refusing
+CONTROL DETECTED: set-position-charges-after-refusing
+CONTROL DETECTED: attach-charges-after-refusing
+CONTROL DETECTED: install-charges-after-refusing
+CONTROL DETECTED: charge-after-the-refusal
+CONTROL DETECTED: conversion-skips-the-deadline
+REDUNDANT RULE CONFIRMED: dense-early-exit
+REDUNDANT RULE CONFIRMED: whole-without-the-finite-test
+CONTROL DETECTED: plain-unknown-names-in-sprite-options
+REDUNDANT RULE CONFIRMED: plain-unknown-names-in-map-schemas
+REDUNDANT RULE CONFIRMED: plain-unknown-names-in-collider-options
+SELF-TEST REFUSED AS EXPECTED: self-test-clobbered-source
+SELF-TEST REFUSED AS EXPECTED: self-test-stale-binary
+SELF-TEST REFUSED AS EXPECTED: self-test-missing-test
+SELF-TEST REFUSED AS EXPECTED: self-test-inert-edit
+
+restored: test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.60s
+
+All 36 binding guards behaved as specified: 32 detected with the rule removed and 4 confirmed redundant. The harness refused all 4 self-tests.
+
+pwsh -NoProfile -File tools/run_script_tilemap_controls.ps1 -Release
+CONTROL DETECTED: description-unvalidated
+CONTROL DETECTED: collider-options-unvalidated
+CONTROL DETECTED: array-metatable-accepted
+CONTROL DETECTED: array-holes-accepted
+CONTROL DETECTED: dimensions-narrowed
+CONTROL DETECTED: origins-narrowed
+CONTROL DETECTED: ids-narrowed
+CONTROL DETECTED: solids-truthy-accepted
+CONTROL DETECTED: indices-narrowed
+CONTROL DETECTED: extents-narrowed
+CONTROL DETECTED: tile-ids-narrowed
+CONTROL DETECTED: mutation-phase-ungated
+CONTROL DETECTED: map-calls-uncounted
+CONTROL DETECTED: region-output-uncharged
+CONTROL DETECTED: region-charges-what-was-asked-for
+CONTROL DETECTED: region-refusal-uncharged
+CONTROL DETECTED: callback-work-unenforced
+CONTROL DETECTED: work-limit-catchable
+CONTROL DETECTED: collider-limit-catchable
+CONTROL DETECTED: callback-work-never-reset
+CONTROL DETECTED: call-budget-is-the-whole-ceiling
+CONTROL DETECTED: set-tile-budgeted-against-the-ceiling
+CONTROL DETECTED: set-position-budgeted-against-the-ceiling
+CONTROL DETECTED: attach-budgeted-against-the-ceiling
+CONTROL DETECTED: install-budgeted-against-the-ceiling
+CONTROL DETECTED: set-tile-charges-after-refusing
+CONTROL DETECTED: set-position-charges-after-refusing
+CONTROL DETECTED: attach-charges-after-refusing
+CONTROL DETECTED: install-charges-after-refusing
+CONTROL DETECTED: charge-after-the-refusal
+CONTROL DETECTED: conversion-skips-the-deadline
+REDUNDANT RULE CONFIRMED: dense-early-exit
+REDUNDANT RULE CONFIRMED: whole-without-the-finite-test
+CONTROL DETECTED: plain-unknown-names-in-sprite-options
+REDUNDANT RULE CONFIRMED: plain-unknown-names-in-map-schemas
+REDUNDANT RULE CONFIRMED: plain-unknown-names-in-collider-options
+SELF-TEST REFUSED AS EXPECTED: self-test-clobbered-source
+SELF-TEST REFUSED AS EXPECTED: self-test-stale-binary
+SELF-TEST REFUSED AS EXPECTED: self-test-missing-test
+SELF-TEST REFUSED AS EXPECTED: self-test-inert-edit
+
+restored: test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.86s
+
+All 36 binding guards behaved as specified: 32 detected with the rule removed and 4 confirmed redundant. The harness refused all 4 self-tests.
+
+pwsh -NoProfile -File tools/run_tilemap_controls.ps1
+CONTROL DETECTED: stop-keeps-map -> thread 'stopping_releases_map_storage_and_refuses_every_map_call' (19380) panicked at tests\tilemap.rs:545:5: | assertion `left == right` failed: stop must release map storage, not merely deny access to it
+CONTROL DETECTED: no-saturation -> thread 'cell_lookup_saturates_instead_of_scanning_toward_a_far_coordinate' (16644) panicked at tests\tilemap.rs:165:5: | assertion `left == right` failed: a far coordinate must saturate one cell out
+CONTROL DETECTED: truncate-without-correction -> thread 'rectangular_tiles_and_negative_origins_convert_both_ways' (33536) panicked at src\tilemap.rs:351:9:
+REDUNDANT GUARD CONFIRMED: correction-covers-truncation
+CONTROL DETECTED: transposed-offset -> thread 'row_major_ids_and_solidity_survive_a_rectangular_grid' (35828) panicked at tests\tilemap.rs:72:13: | assertion `left == right` failed: tile ID at 1,0
+CONTROL DETECTED: outside-not-solid -> thread 'outside_the_map_is_solid_and_refuses_every_other_read' (27384) panicked at tests\tilemap.rs:113:9:
+CONTROL DETECTED: nonzero-is-solid -> thread 'row_major_ids_and_solidity_survive_a_rectangular_grid' (29524) panicked at tests\tilemap.rs:78:13: | assertion `left == right` failed: solidity at 3,0
+CRASH CONTROL DETECTED: unbounded-region -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (24252) panicked at src\tilemap.rs:283:46:
+CRASH CONTROL DETECTED: region-negative-origin -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (22600) panicked at src\tilemap.rs:219:9: | assertion failed: self.contains(column, row)
+CONTROL DETECTED: empty-region-allowed -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (15124) panicked at tests\tilemap.rs:381:9: | assertion `left == right` failed: region must refuse an empty width
+CONTROL DETECTED: uncapped-region -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (38632) panicked at tests\tilemap.rs:402:5: | assertion `left == right` failed: only the per-call cap can refuse a region this map contains
+CONTROL DETECTED: unchecked-tile-id -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (18472) panicked at tests\tilemap.rs:329:9: | assertion `left == right` failed: bad ID at 0
+CONTROL DETECTED: unchecked-cell-product -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (35484) panicked at tests\tilemap.rs:284:5: | assertion `left == right` failed: the cell product bound must refuse a 1024x1024 map
+CONTROL DETECTED: unchecked-dimension -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (32048) panicked at tests\tilemap.rs:265:9: | assertion `left == right` failed: schema must refuse zero columns
+CONTROL DETECTED: unchecked-tile-size -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (20896) panicked at tests\tilemap.rs:265:9: | assertion `left == right` failed: schema must refuse zero tile width
+CONTROL DETECTED: no-geometry-limit -> thread 'faces_stay_exact_against_the_geometry_limit' (38784) panicked at tests\tilemap.rs:210:5: | assertion `left == right` failed: one pixel past the geometry limit must be refused
+CRASH CONTROL DETECTED: edit-skips-bounds -> thread 'single_cell_edits_apply_immediately_and_refuse_bad_input' (24376) panicked at src\tilemap.rs:219:9: | assertion failed: self.contains(column, row)
+REDUNDANT GUARD CONFIRMED: kernel-precheck-covers-edit-bounds
+SELF-TEST REFUSED AS EXPECTED: self-test-clobbered-source
+SELF-TEST REFUSED AS EXPECTED: self-test-stale-binary
+SELF-TEST REFUSED AS EXPECTED: self-test-missing-test
+SELF-TEST REFUSED AS EXPECTED: self-test-inert-edit
+
+restored: test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+All 18 map guards behaved as specified, and the harness refused all 4 self-tests.
+
+pwsh -NoProfile -File tools/run_tilemap_controls.ps1 -Release
+CONTROL DETECTED: stop-keeps-map -> thread 'stopping_releases_map_storage_and_refuses_every_map_call' (28876) panicked at tests\tilemap.rs:545:5: | assertion `left == right` failed: stop must release map storage, not merely deny access to it
+CONTROL DETECTED: no-saturation -> thread 'cell_lookup_saturates_instead_of_scanning_toward_a_far_coordinate' (22168) panicked at tests\tilemap.rs:165:5: | assertion `left == right` failed: a far coordinate must saturate one cell out
+CONTROL DETECTED: truncate-without-correction -> thread 'rectangular_tiles_and_negative_origins_convert_both_ways' (17008) panicked at tests\tilemap.rs:142:5: | assertion `left == right` failed: the cell left of a negative origin is -1, not 0
+REDUNDANT GUARD CONFIRMED: correction-covers-truncation
+CONTROL DETECTED: transposed-offset -> thread 'row_major_ids_and_solidity_survive_a_rectangular_grid' (37660) panicked at tests\tilemap.rs:72:13: | assertion `left == right` failed: tile ID at 1,0
+CONTROL DETECTED: outside-not-solid -> thread 'outside_the_map_is_solid_and_refuses_every_other_read' (18596) panicked at tests\tilemap.rs:113:9:
+CONTROL DETECTED: nonzero-is-solid -> thread 'row_major_ids_and_solidity_survive_a_rectangular_grid' (25948) panicked at tests\tilemap.rs:78:13: | assertion `left == right` failed: solidity at 3,0
+CRASH CONTROL DETECTED: unbounded-region -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (28864) panicked at src\tilemap.rs:283:46:
+CRASH CONTROL DETECTED: region-negative-origin -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (21108) panicked at src\tilemap.rs:283:46:
+CONTROL DETECTED: empty-region-allowed -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (4444) panicked at tests\tilemap.rs:381:9: | assertion `left == right` failed: region must refuse an empty width
+CONTROL DETECTED: uncapped-region -> thread 'regions_copy_a_bounded_rectangle_and_refuse_everything_else' (16024) panicked at tests\tilemap.rs:402:5: | assertion `left == right` failed: only the per-call cap can refuse a region this map contains
+CONTROL DETECTED: unchecked-tile-id -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (16472) panicked at tests\tilemap.rs:329:9: | assertion `left == right` failed: bad ID at 0
+CONTROL DETECTED: unchecked-cell-product -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (29292) panicked at tests\tilemap.rs:284:5: | assertion `left == right` failed: the cell product bound must refuse a 1024x1024 map
+CONTROL DETECTED: unchecked-dimension -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (27924) panicked at tests\tilemap.rs:265:9: | assertion `left == right` failed: schema must refuse zero columns
+CONTROL DETECTED: unchecked-tile-size -> thread 'malformed_dimensions_ids_and_arrays_are_refused_by_reason' (7452) panicked at tests\tilemap.rs:265:9: | assertion `left == right` failed: schema must refuse zero tile width
+CONTROL DETECTED: no-geometry-limit -> thread 'faces_stay_exact_against_the_geometry_limit' (26848) panicked at tests\tilemap.rs:210:5: | assertion `left == right` failed: one pixel past the geometry limit must be refused
+CRASH CONTROL DETECTED: edit-skips-bounds -> thread 'single_cell_edits_apply_immediately_and_refuse_bad_input' (17396) panicked at src\tilemap.rs:297:19:
+REDUNDANT GUARD CONFIRMED: kernel-precheck-covers-edit-bounds
+SELF-TEST REFUSED AS EXPECTED: self-test-clobbered-source
+SELF-TEST REFUSED AS EXPECTED: self-test-stale-binary
+SELF-TEST REFUSED AS EXPECTED: self-test-missing-test
+SELF-TEST REFUSED AS EXPECTED: self-test-inert-edit
+
+restored: test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+All 18 map guards behaved as specified, and the harness refused all 4 self-tests.
+
+pwsh -NoProfile -File tools/run_collision_controls.ps1
+CONTROL DETECTED: endpoint-only
+CONTROL DETECTED: corner-only-sweep
+CONTROL DETECTED: corner-only-placement
+CONTROL DETECTED: y-before-x
+CONTROL DETECTED: partial-integration-commit
+CONTROL DETECTED: cells-visited-uncharged
+CONTROL DETECTED: charge-after-the-refusal
+CONTROL DETECTED: naive-clamp
+CONTROL DETECTED: naive-clamp-mirror
+CONTROL DETECTED: closed-interval-overlap
+CONTROL DETECTED: span-past-the-far-face
+CONTROL DETECTED: skip-the-touching-face
+CONTROL DETECTED: embedded-start-retreats
+CONTROL DETECTED: placement-skips-the-extent-check
+CONTROL DETECTED: placement-accepts-an-inverted-box
+CONTROL DETECTED: nonfinite-travel-accepted
+CRASH CONTROL DETECTED: cell-overlap-skips-bounds -> thread 'public_geometry_entry_points_answer_rather_than_diverging_by_profile' (20744) panicked at src\collision.rs:321:46:
+CONTROL DETECTED: teleport-unchecked
+CONTROL DETECTED: install-unrevalidated
+CONTROL DETECTED: clear-ignores-colliders
+CONTROL DETECTED: edit-ignores-bodies
+CONTROL DETECTED: edit-scans-every-change
+CONTROL DETECTED: attach-unchecked-extent
+CONTROL DETECTED: attach-unchecked-placement
+CONTROL DETECTED: collider-limit-ignored
+CONTROL DETECTED: stop-keeps-collider-count
+CONTROL DETECTED: despawn-leaks-capacity
+REDUNDANT RULE CONFIRMED: unsorted-bodies
+SELF-TEST REFUSED AS EXPECTED: self-test-clobbered-source
+SELF-TEST REFUSED AS EXPECTED: self-test-stale-binary
+SELF-TEST REFUSED AS EXPECTED: self-test-missing-test
+SELF-TEST REFUSED AS EXPECTED: self-test-inert-edit
+
+restored: test result: ok. 37 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+All 28 collision guards behaved as specified, and the harness refused all 4 self-tests.
+
+pwsh -NoProfile -File tools/run_collision_controls.ps1 -Release
+CONTROL DETECTED: endpoint-only
+CONTROL DETECTED: corner-only-sweep
+CONTROL DETECTED: corner-only-placement
+CONTROL DETECTED: y-before-x
+CONTROL DETECTED: partial-integration-commit
+CONTROL DETECTED: cells-visited-uncharged
+CONTROL DETECTED: charge-after-the-refusal
+CONTROL DETECTED: naive-clamp
+CONTROL DETECTED: naive-clamp-mirror
+CONTROL DETECTED: closed-interval-overlap
+CONTROL DETECTED: span-past-the-far-face
+CONTROL DETECTED: skip-the-touching-face
+CONTROL DETECTED: embedded-start-retreats
+CONTROL DETECTED: placement-skips-the-extent-check
+CONTROL DETECTED: placement-accepts-an-inverted-box
+CONTROL DETECTED: nonfinite-travel-accepted
+REDUNDANT RULE CONFIRMED: cell-overlap-skips-bounds
+CONTROL DETECTED: teleport-unchecked
+CONTROL DETECTED: install-unrevalidated
+CONTROL DETECTED: clear-ignores-colliders
+CONTROL DETECTED: edit-ignores-bodies
+CONTROL DETECTED: edit-scans-every-change
+CONTROL DETECTED: attach-unchecked-extent
+CONTROL DETECTED: attach-unchecked-placement
+CONTROL DETECTED: collider-limit-ignored
+CONTROL DETECTED: stop-keeps-collider-count
+CONTROL DETECTED: despawn-leaks-capacity
+REDUNDANT RULE CONFIRMED: unsorted-bodies
+SELF-TEST REFUSED AS EXPECTED: self-test-clobbered-source
+SELF-TEST REFUSED AS EXPECTED: self-test-stale-binary
+SELF-TEST REFUSED AS EXPECTED: self-test-missing-test
+SELF-TEST REFUSED AS EXPECTED: self-test-inert-edit
+
+restored: test result: ok. 37 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+All 28 collision guards behaved as specified, and the harness refused all 4 self-tests.
+
