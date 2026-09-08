@@ -799,9 +799,36 @@ halves, because the first half alone missed something both sessions ran it over:
    disagreements indistinguishable from findings, which is worse than missing a
    seam: it costs the other reader a verification cycle over nothing.
 
+   **The phrase half needs its own method, or the clause silently becomes half a
+   clause.** Grepping `8.5%` is obviously scriptable; noticing a repeated
+   sentence is not, so "count figures *and phrases*" degrades to "count figures"
+   in anyone's hands - it did here, twice, over the very section that was
+   carrying a duplicate. The method is four lines: split on sentence boundaries,
+   normalise whitespace, keep sentences over about sixty characters, group, and
+   report collisions. Run as a negative control against the commits that carried
+   the duplicated paragraph, it names both offending sentences and clears once
+   they are gone:
+
+   ```text
+   1c980cc  137 sentences, 2 duplicate groups   <- the commit that introduced it
+   e4dea28  253 sentences, 2 duplicate groups   <- three passes later, still there
+   061c83d  259 sentences, 0                    <- removed
+   ```
+
+   It would have caught this at the commit that made it. The method is the review
+   session's, demonstrated rather than asserted, and reproduced here before being
+   written down.
+
    Mechanical detection of the seam, human judgement on the damage - a narrower
    and more honest claim than either "no pass finds this" or a pretence that
    reading can be automated.
+
+   **The four instances this section has hosted are not a discredit to it.** A
+   paragraph about duplication that contained a duplicate, a caution that ended
+   on the temptation it disowned, a tally that went stale as it was written and a
+   commit count that incremented itself are where the clauses came from: close
+   enough to the failure to describe it accurately is the same position as close
+   enough to commit it. The reading is the review session's.
 
    All three clauses are the review session's, each from a second occurrence.
 
