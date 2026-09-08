@@ -1074,11 +1074,32 @@ thing the comment above it describes; the review session found it by reintroduci
 `Write-Output` and counting which cases spoke. `-InformationVariable` captures the
 note without displacing the return value, and both assertions now hold.
 
-The general rule that falls out is narrower and more useful than "write better
-tests": **when a test's subject moves from what the code returned to anything the
-test constructs, the assertion has changed meaning even if its text has not.**
-That substitution is invisible in review because the line still reads the same,
-and it is exactly the motion a small convenience edit encourages.
+**And the fix for that had the same defect, in the other assertion, which is what
+finally names the shape.** The repair handed over was
+`if ($note -notmatch 'malformed')`. Under the defect it exists to catch, the note
+goes to the output stream, so `-InformationVariable` captures nothing and `$note`
+is an empty collection - and `-notmatch` against an empty collection returns an
+empty collection, which is falsy, so the branch never runs. The shipped line
+coerces first, `if ("$note" -notmatch 'malformed')`, because
+`-InformationVariable` yields a collection rather than a string; that the
+coercion was also load-bearing was established by the review session counting
+failure lines, four against five, not by anyone reasoning about it beforehand.
+Verified here: an empty `ArrayList` under `-notmatch` yields `Object[]` of length
+zero and the `if` does not fire, while the coerced form yields `True`.
+
+So of the four instances, three share a shape sharper than "guards need guards":
+**the assertion you are not currently thinking about is the one that goes inert.**
+In `Assert-SinglePath` it was the acquisition, while attention was on the note;
+in the repair it was the note, while attention was on the acquisition. Both edits
+were small, obviously correct, and made by someone concentrating on the other
+half of the same line.
+
+The mechanism behind it is worth stating separately, because it is what makes
+this invisible in review: **when a test's subject moves from what the code
+returned to anything the test constructs, the assertion has changed meaning even
+if its text has not.** The line still reads the same. The practical rule is to
+re-run the negative control after changing any assertion and count which
+assertions speak, rather than checking that the suite is still green.
 
 `region_table`'s deadline check is the one observation in the new code with no
 witness at all, and it cannot have one. It runs after the kernel call, on a read
@@ -1153,6 +1174,14 @@ guard that fires for the wrong reason still shows green, which is the failure
 mode an empty battery does not warn you about - and its commonest cause is a test
 whose subject quietly moved from what the code returned to something the test
 builds itself.
+
+A fourth is worth carrying because of where the defects landed. **Every defect
+this phase produced was in a check, not in the engine.** The bindings were right
+on the first pass; the region cliff was a contract sentence contradicting itself,
+and everything found after it was a test or a harness that could not fail. Phase
+4's checking apparatus is a probe script and a capture comparison rather than a
+control harness, so that is where to look first, before the sample code. The
+observation is the review session's.
 
 Deliberately not in this phase, and still Phase 4's: the sample migration itself,
 the probe adaptation and its `Get-ProbeStates` change, the update-time tile-edit
