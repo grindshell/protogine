@@ -73,13 +73,17 @@ of 1,769,472 against a measured 1,145,600.
 --- Cross-check against M1 -----------------------------------------------------
 
   M1 Phase 2 long sweep : 11,386,880 units, p50 16.5-17.8 ms
-  M2 Phase 0 arrangement:  1,145,600 units, p50 1.7794 ms
-  ratio of units 9.94; 1.7794 x 9.94 = 17.7 ms, inside M1's range.
-  The arrangement changed twice while settling this and the derived figure
-  moved 17.7, 18.8, 17.7 against a fixed M1 range. An observation, not a model.
+  M2 Phase 0 arrangement:  1,145,600 units, p50 1.783-1.934 ms over nine runs
+  ratio of units 9.94; that p50 range gives 17.7-19.2 ms, median 17.8 - at the
+  top of M1's range rather than inside it, and above it on a slow run.
+
+  The run-to-run spread is 8.5%, the same order as the movement between the
+  three arrangements this was measured against, so the claim holds only at the
+  order of magnitude: a tenth of the units takes roughly a tenth of the time.
+  An observation, not a model. Measuring it properly made it weaker.
 
 --- SHA-256 of the probe and its runner, as shipped ----------------------------
 
   D7D20B1C073B30FE52E3399011DEAEA5FB3C92C17572E4C6F68C37AEDEF21180  examples/tilemap_m2_probe.rs
   D0865F0BC1C8E7894D409F4692ED8F790039515B7D2DEB0860B53A7F39076930  tools/run_tilemap_m2_probe.ps1
-  32866D33AFEB606E0CE28EA38BDE26151C26F1810C83D5927AB3A159833C6A8C  docs/implementation/TILEMAP_COLLISION_M2.md
+  183FD0B03A95AEA70BE0F7846C0ECEE95BCEFB1733A6C5288EBA5BBAB8EE7AF2  docs/implementation/TILEMAP_COLLISION_M2.md

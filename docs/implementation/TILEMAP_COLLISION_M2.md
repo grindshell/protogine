@@ -441,7 +441,7 @@ the second half of the freeze pass, on the same edit that introduced it.)
 | Independence | Two maps with overlapping coordinate ranges and different walls; a body on each; each stops at its own wall and neither sees the other's |
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
-| Budgets | The 65th map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 identical 128x128 maps charges **exactly** what the closed form above predicts, body by body, **and** the same as those bodies charge on one 128x128 map - the prediction because an equality alone cannot see a uniformly added per-body term, the equality because it is the cheaper cross-check; both Phase 2's to assert, and neither is "still fits" |
+| Budgets | The 65th map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 64 identical 128x64 maps charges **exactly** what the closed form above predicts, body by body, **and** the same as those bodies charge on one 128x64 map - the prediction because an equality alone cannot see a uniformly added per-body term, the equality because it is the cheaper cross-check; both Phase 2's to assert, and neither is "still fits" |
 | Migration | Every renamed call refuses its M1 argument shape rather than guessing; `set_position` on a body validates against its member map and refuses a destination that is legal only on another |
 | Membership integrity | A collider and its membership are attached, transferred, removed and despawned together, with no observable state where one exists without the other |
 
@@ -521,7 +521,7 @@ such**: the probe was built to make some of them wrong and did not.
 | `storage` | 64 maps of 128x64 filling the aggregate exactly measure **1,114,112** bytes live and **1,639,424** at peak with the largest staging candidate, matching the contract's arithmetic to the byte |
 | `work` | 1,024 bodies of maximum footprint sweeping a 128x64 map charge **1,145,600** units - 64.7% of that arrangement's own worst case of 1,769,472, and 6.8% of the 16,777,216 fixed-pass ceiling. Every body charges exactly what its geometry predicts, in both arms |
 | `shapes` | All six arrangements behave as the contract claims; the cross-over is confirmed at 8,192 cells per map, which 128x64 achieves exactly and no square achieves at all - 90x90 is the largest, with 5,888 cells spare |
-| `timing` | p50 **1.7794 ms**, p95 1.9007, max 1.9563, against a 16.667 ms tick |
+| `timing` | p50 **1.783 to 1.934 ms across nine runs**, median 1.794, against a 16.667 ms tick. Reported as a range because a single run understates it by 8.5% and the first figure recorded here was below all nine |
 
 **The storage figure is measured rather than derived, and the distinction was
 the reason to build it that way.** The probe allocates through the production
@@ -531,14 +531,28 @@ measurement confirm its own prediction. `try_reserve_exact` is documented as not
 deliberately over-allocating without being guaranteed exact; on this allocator it
 is exact, and that is now observed instead of assumed.
 
-**One cross-check worth more than any single figure.** M1's Phase 2 stress
-charged 11,386,880 units at a p50 of 16.5 to 17.8 ms. This arrangement charges
-1,145,600 at 1.7794 ms. The ratio of units is 9.94, and 1.7794 x 9.94 = 17.7 ms,
-which lands inside M1's recorded p50 range. The arrangement changed twice between
-first measuring this and settling it - the start column started varying, then the
-map count rose to 64 - and the derived figure moved 17.7, 18.8, 17.7 while M1's
-range stayed put, which is about as much as one point of comparison can be asked
-to survive. That is a single point of comparison
+**One cross-check, and measuring it properly made it weaker.** M1's Phase 2
+stress charged 11,386,880 units at a p50 of 16.5 to 17.8 ms. This arrangement
+charges 1,145,600, a ratio of 9.94, so its p50 times 9.94 should land in that
+range if charged work tracks time.
+
+It roughly does, and the honest version is less tidy than the first draft of this
+paragraph. **Nine runs of the timing mode on one machine give p50 between 1.783
+and 1.934 ms, a spread of 8.5%**, which is the same order as the movement between
+the three arrangements this was measured against. Feeding those through gives
+**17.7 to 19.2 ms, median 17.8** - sitting at the top of M1's range rather than
+inside it, and above it on a slow run. The single figure first recorded here,
+1.7794, was below all nine.
+
+So the claim survives as a claim about order of magnitude and nothing finer: an
+arrangement charging a tenth of M1's units takes roughly a tenth of its time.
+That is still the first evidence in this plan that the charged work unit tracks
+time at all, and the plan has treated the two as unrelated on purpose since Phase
+2 recorded that the ceiling bounds cells and not latency - but a derived figure
+whose input varies 8.5% between runs on one machine is an observation, and
+reading anything finer out of it is reading the noise. The spread is the review
+session's finding; they measured 1.8226 where this had recorded 1.7794 and asked
+what that did to the sequence. That is a single point of comparison
 across different map shapes, different arrangements and different runs, so it is
 an observation and not a model - but it is the first evidence in this plan that
 the charged work unit tracks time at all, and the plan has been treating the two
@@ -643,6 +657,17 @@ halves, because the first half alone missed something both sessions ran it over:
    the stronger argument, because *one* cell elsewhere is enough to make the
    replacement refuse, not 262,145. The other quoted a double-charged install as
    "about 1,027" where the arithmetic gives 1,026.
+3. **After a constant moves, every token whose *meaning* moved while its value
+   stayed.** A scan for retired values cannot see these: when the map count rose
+   from 32 to 64, the retired tokens were `32` and `128x128`, and 32 is still a
+   number in this document while 128x128 is still a live `shapes` case. Neither
+   stands out beside `2,359,296`, whose value genuinely died. **The Budgets
+   evidence row survived two passes this way** - it kept "32 identical 128x128
+   maps" while the paragraph six lines above recorded the move - and it is the
+   same row that kept "still fits" through an earlier round, which makes it the
+   one to check first. Run this clause over `32`, `64`, `128`, `128x128` and
+   `8,192` after any change to a count. The clause is the review session's,
+   from the second occurrence.
 
 **Do both halves again after any edit that changes a number or a rule**, in
 preference to re-reading the prose around them. The method, the second half, and
