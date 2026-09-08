@@ -338,33 +338,61 @@ built around it.
 
 | Phase | Work | Exit evidence |
 | --- | --- | --- |
-| 0. Contract and feasibility | This document, reviewed and frozen. A probe measuring aggregate storage and per-tick cost at the maximum configuration, and asserting the fixed-pass **equality** below | Contract frozen with no open item; probe receipts; every proposed number either confirmed or revised with its measurement |
+| 0. Contract and feasibility | This document, reviewed and frozen. A probe measuring aggregate storage through the production allocation path, ordinary content against both budget limits, per-tick cost, and the fixed-pass baseline pair below | Contract frozen with no open item; probe receipts; every proposed number either confirmed or revised with its measurement; each mode asserting its own configuration was exercised, not only its result |
 | 1. Kernel map registry | Slot table, handles, generations, create/replace/remove/info, `stop` release, storage and count accounting | Foreign, stale and reused-slot handles refuse; removal and replacement are map-local; storage accounting agrees with the budget; core configuration |
 | 2. Membership, transfer and the fixed pass | Membership component, atomic transfer, per-map sweeping, M2-R1 on removal, replacement and cell edits, and M2-R2 on `set_position` | Two overlapping maps give independent collision; transfer is atomic in both directions; removing one map preserves unrelated maps and bodies; a cell edit ignores bodies on other maps; a teleport validates against the member map; insertion-order independence survives |
 | 3. Luau migration | The map-addressed calls, handle refusals, shared budgets | Every refusal reaches Lua unchanged; aggregate ceilings latch; schema battery over the new placement shape |
 | 4. Sample and release proof | Migrate the sprite sample to a named map, add a two-map fixture, update docs and checks | Sample behaviour unchanged again; two-map evidence headlessly and in a copied Player; M2 completion recorded |
 
-**The Phase 0 probe must assert an equality, not re-derive the bound.** An
-earlier draft asked it to "re-verify the arithmetic with bodies spread across
-many maps", which tests something that is not at risk: the bound cannot depend on
-distribution, for the four structural reasons in the budget table. What is at
-risk is the M2 *implementation* growing a per-map term the M1 one did not have -
-resolving members by scanning maps, revalidating on the pass, anything carrying a
-factor of 32. So the probe asserts:
+**The fixed-pass check is an equality, not "still fits", and it belongs to
+Phase 2.** What is at risk is not the bound - which cannot depend on distribution,
+for the four structural reasons in the budget table - but the M2 *implementation*
+growing a per-map term the M1 one did not have: resolving members by scanning
+maps, revalidating on the pass, anything carrying a factor of 32. The check is:
 
-> A fixed pass with 1,024 bodies spread across 32 maps charges **exactly** what
-> the same 1,024 bodies charge on one map.
+> A fixed pass with 1,024 bodies on **one 128x128 map** charges **exactly** what
+> the same 1,024 bodies charge spread across **32 identical 128x128 maps**, from
+> the same start positions and velocities relative to each map.
 
-That has a single right answer, fails loudly the moment a per-map cost appears,
-and is the check the ceiling actually needs. The framing is the review session's.
+**Both arms must have identical map geometry, and two earlier drafts of this
+paragraph did not.** Sweep cost is proportional to the map, not only to the body:
+`sweep` enumerates faces until the boundary index clamps, so a smaller map ends
+the walk sooner and charges less. "Spread across 32 maps" under a fixed aggregate
+*necessarily means smaller maps*, so comparing 1,024 bodies on one 1,024x256 map
+against 1,024 bodies on 32 128x128 maps compares 11,796,480 against 2,359,296 - a
+ratio of 0.2, varying geometry and distribution together. Phase 2 would have
+asserted that, watched it fail for an entirely legitimate reason, and someone
+would have weakened it back to "still fits" with a failing test as the
+justification. Holding geometry constant leaves distribution as the only
+difference, which is what the check was always for.
+
+128x128 is not an arbitrary choice: `524,288 / 32 = 16,384 = 128²`, so it is the
+largest shape whose 32 copies fit the aggregate at all - 32 copies of 129x129 is
+532,512 and overflows. The point where the two budget limits bind together is
+therefore also the maximum-stress form of the constant-geometry comparison.
+
+The check has a single right answer, fails the moment a per-map cost appears, and
+**cannot fail at Phase 0**, where a prototype holding `Vec<TileMap>` and indexing
+it has no per-map term to grow. Phase 0 produces the baseline pair as reference
+values and says they are a property of the prototype rather than evidence; the
+assertion is Phase 2's. The check, the correction and the constant-geometry form
+are all the review session's.
 
 **"Still fits" is not an acceptable restatement of it anywhere**, and an earlier
 draft left that older phrasing in the evidence table where Phase 2's exit gate
-reads it. The two differ exactly where it matters: one accidental unit per map
-per body is 1,024 x 32 = 32,768, landing at 11,829,248 against a 16,777,216
-ceiling. "Still fits" passes. The equality fails. A small accidental per-map cost
-is the realistic shape of the mistake, not a 32-fold one, so the weaker phrasing
-would have been satisfied by precisely the defect the check exists to catch.
+reads it. Under the constant-geometry arms above, both charge 2,359,296 against a
+16,777,216 ceiling, so "still fits" is satisfied with 86% of the ceiling unused
+and would go on being satisfied by any per-map term smaller than a six-fold one -
+an accidental unit per map per body adds 1,024 x 32 = 32,768 and lands at
+2,392,064, which is not close to anything. "Still fits" passes. The equality
+fails. A small accidental per-map cost is the realistic shape of the mistake, so
+the weaker phrasing would have been satisfied by precisely the defect the check
+exists to catch, and the smaller the maps the more room it has to hide in.
+
+(An earlier version of this paragraph made the same point against 11,796,480 and
+11,829,248, which are the *rejected* arm's figures - a derived example left
+pointing at a configuration the paragraph above it had just replaced. Caught by
+the second half of the freeze pass, on the same edit that introduced it.)
 
 ## Required behavioural evidence
 
@@ -374,7 +402,7 @@ would have been satisfied by precisely the defect the check exists to catch.
 | Independence | Two maps with overlapping coordinate ranges and different walls; a body on each; each stops at its own wall and neither sees the other's |
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
-| Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 maps charges **exactly** what the same bodies charge on one map, which is the Phase 0 equality and not "still fits" |
+| Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 identical 128x128 maps charges **exactly** what the same bodies charge on one 128x128 map - a constant-geometry equality, not "still fits", and Phase 2's to assert |
 | Migration | Every renamed call refuses its M1 argument shape rather than guessing; `set_position` on a body validates against its member map and refuses a destination that is legal only on another |
 | Membership integrity | A collider and its membership are attached, transferred, removed and despawned together, with no observable state where one exists without the other |
 
@@ -416,6 +444,15 @@ most confidence are the ones that have needed correcting.
 4. **Whether 32 maps is a limit anyone will feel**, and whether the map count
    needs to be separate from the aggregate cell budget at all, given the cell
    budget already bounds storage.
+
+   The shape of that question is settled even though the answer is not.
+   `524,288 / 32 = 16,384 = 128²`, so the two limits bind at exactly the same
+   point for 128x128 rooms: **below that size the map count binds first, above
+   it the cell budget does.** So the count is not redundant - it constrains
+   precisely one kind of game, the one with many small rooms - and the open
+   question is whether that game is worth constraining, which is a judgement
+   about intended content rather than about storage. Noticed while designing the
+   Phase 0 measurement, which is an argument for designing measurements.
 
 **Resolved, and no longer open: `tile_collider` must return the map.** It was
 listed here as a question of shape. It is not - M2-2 makes membership
