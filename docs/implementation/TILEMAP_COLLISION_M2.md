@@ -569,7 +569,20 @@ review session's.
 
 `examples/tilemap_m2_probe.rs` and `tools/run_tilemap_m2_probe.ps1`, built with
 `--no-default-features` because prototype geometry needs no decoder, VM or
-window. Receipts in
+window.
+
+**Across the whole of M2 so far, `src/` and `tests/` are untouched.** Seventeen
+commits from the contract's first draft, and the diff against M1's final state is
+four documents, one probe and one runner. Every finding the review produced -
+two blocking contradictions, a T5 revision, an admission rule, a fixed-pass check
+that would have entered a gate false, a per-body window nothing could see, a
+timing claim that weakened under measurement, a free-list policy, a `stop`
+mechanism, an inheritance claim a later commit invalidated, and a structural
+defect no mechanical clause would find - was in a document or in a probe built
+to measure one. That is what "the contract before the code" was meant to buy, and
+it is the first time this plan has been able to say it rather than intend it.
+
+Receipts in
 [evidence](evidence/tilemap-m2-phase0-probe.txt). **Every proposed number
 survived, which is the least interesting outcome available and is reported as
 such**: the probe was built to make some of them wrong and did not.
