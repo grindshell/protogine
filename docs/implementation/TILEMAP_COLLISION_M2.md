@@ -277,7 +277,7 @@ move.** M1's ceilings are explicitly not aggregate multi-map limits.
 | Resource | Proposed bound | Reasoning |
 | --- | --- | --- |
 | Maps per session | 32 | Enough for a screen of rooms plus staging; small enough that a linear scan over maps is never a cost worth optimising |
-| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance, and it fits inside one callback with the arithmetic stated rather than asserted. A Luau install charges exactly once per cell - `src/scripting/world.rs:333` wires `charge_callback_work` into `solid_flags` and `cell_ids`, and `Kernel::set_tilemap` charges only for revalidating existing members, which is why Phase 4's install-cost test lands on 510 + 5 + 1 rather than about 1,027. So filling the whole budget costs 524,288 cells plus at most 32 x 1,024 solid flags = **557,056 of 1,048,576**, leaving 47% spare |
+| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance, and it fits inside one callback with the arithmetic stated rather than asserted. A Luau install charges exactly once per cell - `src/scripting/world.rs:333` wires `charge_callback_work` into `solid_flags` and `cell_ids`, and `Kernel::set_tilemap` charges only for revalidating existing members, which is why Phase 4's install-cost test lands on 510 + 5 + 1 = 516 rather than the 1,026 a second charge per cell would add. So filling the whole budget costs 524,288 cells plus at most 32 x 1,024 solid flags = **557,056 of 1,048,576**, leaving 47% spare |
 | Per-map dimensions and cells | unchanged: 1..1,024 per axis, at most 262,144 cells | A single map is no larger than M1's |
 | Staging | at most one candidate map in flight | Peak storage is the aggregate plus one map: about 1.5 MiB |
 | Live colliders | unchanged: 1,024 across all maps | The limit that bounds the fixed pass is global, so it stays global |
@@ -300,8 +300,10 @@ staging row's "peak storage is the aggregate plus one map" only makes sense if
 the candidate is *not* counted in the aggregate. Charging `live + candidate`
 would mean **a session using the budget it was granted could never replace any
 map, including with an identical one** - a game holding 524,288 cells could not
-swap a room, and a game holding one full-size map plus 262,145 cells elsewhere
-could not replace that map at all. The cliff appears only at full utilisation,
+swap a room, and a game holding one full-size map plus **a single cell anywhere
+else** could not replace that map at all: replacing it would need
+`live <= 524,288 - 262,144`, and `live` already contains the map's own 262,144.
+The cliff appears only at full utilisation,
 which is the same shape as M1's region-charging cliff: a contract that
 contradicts itself exactly for the games that use what it offers. Found by the
 review session.
@@ -432,13 +434,33 @@ right about the case their author had in mind. Not one was a reasoning error,
 and reading harder would not have found them, because each is only wrong
 relative to a sentence somewhere else.
 
-So the freeze got a mechanical pass rather than another reading: every number in
-this document was located in every place that restates it, and the restatements
-checked against each other. Two disagreed - the admission rule against the
-staging row, and the equality against the evidence table - and both are fixed
-above. Everything else agreed. **Do that pass again after any edit that changes a
-number or a rule**, in preference to re-reading the prose around it. The
-suggestion is the review session's.
+So the freeze got a mechanical pass rather than another reading, and it has two
+halves, because the first half alone missed something both sessions ran it over:
+
+1. **Every number is located in every place that restates it, and the
+   restatements are checked against each other.** Two disagreed - the admission
+   rule against the staging row, and the equality against the evidence table -
+   and both are fixed above.
+2. **Every derived example is recomputed against the constraint it sits
+   inside.** A worked example is not a restatement of anything; it appears once,
+   matches nothing, and is wrong relative to a different number. Two failed. One
+   illustrated the rejected admission rule with a game that cannot exist, since
+   it held 524,289 cells against a 524,288 budget - and the corrected version is
+   the stronger argument, because *one* cell elsewhere is enough to make the
+   replacement refuse, not 262,145. The other quoted a double-charged install as
+   "about 1,027" where the arithmetic gives 1,026.
+
+**Do both halves again after any edit that changes a number or a rule**, in
+preference to re-reading the prose around them. The method, the second half, and
+the impossible game are all the review session's; the arithmetic slip in the
+example is theirs and travelled into this document verbatim through a message,
+which is its own small lesson about quoting a number rather than recomputing it.
+
+A first draft of this paragraph listed how many times each number appears, and
+the counts were stale before the edit finished, because adding the paragraph
+added occurrences. Recording a count here creates one more restatement to keep
+in step, which is the failure mode this section is about - so the method is
+written down and the tally deliberately is not.
 
 A first draft of this paragraph listed how many times each number appears, and
 the counts were stale before the edit finished, because adding the paragraph
