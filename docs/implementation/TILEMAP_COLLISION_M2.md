@@ -57,7 +57,7 @@ is new, and **an earlier draft said "all inherited" because it was true when
 written and stopped being true three commits later**, when freezing the
 slot-reuse policy added a rule with no M1 counterpart. `EntityHandle` is
 `{ session: Rc<()>, entity: Entity }` and `validate` is `Rc::ptr_eq` plus
-`world.contains` (`src/kernel.rs:191-197`): protogine holds no generation of its
+`world.contains` (`Kernel::validate`): protogine holds no generation of its
 own, the one that exists lives inside hecs' `Entity`, and the reuse order is
 hecs' business and unspecified here. So the generation bullet inherits nothing -
 which is exactly why M2 had to freeze a policy rather than point at one. This is
@@ -71,7 +71,7 @@ ones. The finding is the review session's.
 - `Kernel::stop` releases every map and invalidates every handle - by making the
   session inactive, not by touching generations. **The mechanism matters and an
   earlier draft stated only the outcome.** `require_active` already runs first
-  in `validate` (`src/kernel.rs:192`) and in `map` (`:319`), so after `stop`
+  at the head of both `Kernel::validate` and `Kernel::map`, so after `stop`
   every entry point refuses with `Inactive` *before* any slot or generation is
   examined. Generations are not bumped and the table is dropped only to release
   storage, exactly as M1 drops `tilemap` for that reason alone. So the two
@@ -120,7 +120,7 @@ enough to say so.** hecs owns entity slot reuse, so an M1-style fixture -
 despawn, respawn, assert the stale handle refuses - rests on a dependency's
 behaviour rather than on a contract of ours. M1 already handles that correctly:
 `reused_slots_replace_their_stale_wrapper_without_growing_the_cache`
-(`src/scripting/world.rs:535`) asserts `first.slot() == second.slot()` before
+in `src/scripting/world.rs` asserts `first.slot() == second.slot()` before
 relying on the reuse, so it fails loudly if hecs ever stops recycling. The
 *pattern* is therefore already in the repository; the *guarantee* is not, and
 only maps have one. Nobody should write a new entity fixture believing otherwise.
@@ -202,7 +202,7 @@ map-local:
 
 **The cell-edit clause is the one that has to be written down, and an earlier
 draft of this section said the opposite by calling cell edits "unchanged".**
-`Kernel::set_tile` (`src/kernel.rs:423`) queries every live collider in the
+`Kernel::set_tile` queries every live collider in the
 world and tests each against `overlaps_cell`, which compares a body's world-space
 box against a cell rectangle derived from the map it is passed. In M1 that global
 query was exactly right, because there was one map and every collider was on it.
@@ -340,11 +340,11 @@ move.** M1's ceilings are explicitly not aggregate multi-map limits.
 | Resource | Proposed bound | Reasoning |
 | --- | --- | --- |
 | Maps per session | 64 | Raised from a proposed 32 by the owner on the Phase 0 probe's evidence, recorded under [OPEN] 4 below. Still small enough that a linear scan over maps is never a cost worth optimising |
-| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance, and it fits inside one callback with the arithmetic stated rather than asserted. A Luau install charges exactly once per cell - `src/scripting/world.rs:333` wires `charge_callback_work` into `solid_flags` and `cell_ids`, and `Kernel::set_tilemap` charges only for revalidating existing members, which is why Phase 4's install-cost test lands on 510 + 5 + 1 = 516 rather than the 1,026 a second charge per cell would add. So filling the whole budget costs 524,288 cells plus at most 64 x 1,024 solid flags = **589,824 of 1,048,576**, leaving 44% spare |
+| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance, and it fits inside one callback with the arithmetic stated rather than asserted. A Luau install charges exactly once per cell - `EngineContext::bind_tilemap`'s `set_tilemap` closure wires `charge_callback_work` into `solid_flags` and `cell_ids`, and `Kernel::set_tilemap` charges only for revalidating existing members, which is why Phase 4's install-cost test lands on 510 + 5 + 1 = 516 rather than the 1,026 a second charge per cell would add. So filling the whole budget costs 524,288 cells plus at most 64 x 1,024 solid flags = **589,824 of 1,048,576**, leaving 44% spare |
 | Per-map dimensions and cells | unchanged: 1..1,024 per axis, at most 262,144 cells | A single map is no larger than M1's |
 | Staging | at most one candidate map in flight | Peak cell storage is the aggregate plus one map: `(524,288 + 262,144) x 2` = 1,572,864 bytes, exactly 1.5 MiB. Adding the solid flags from the row above - 64 x 1,024 live plus the candidate's 1,024 - makes the peak 1,639,424 bytes, 1.563 MiB. The unqualified "about 1.5 MiB" an earlier draft carried was true of cells and not of the total, in a table where the row above counts flags explicitly |
 | Live colliders | unchanged: 1,024 across all maps | The limit that bounds the fixed pass is global, so it stays global |
-| Fixed-pass work | unchanged: 16,777,216 | Not a fresh derivation: 1,280 faces x 9 cells x 1,024 bodies = 11,796,480 is what `the_fixed_pass_ceiling_cannot_be_reached_under_the_frozen_limits` (`src/collision.rs:590`) already computes and asserts. The bound is insensitive to how bodies are distributed **by construction**, given four inputs M2 leaves alone: `MAX_LIVE_COLLIDERS` stays global, `MAX_SPAN_CELLS` is unchanged, per-map `columns + rows` is still capped at 1,280, and the pass still iterates colliders rather than maps. See the Phase 0 probe for what is actually at risk |
+| Fixed-pass work | unchanged: 16,777,216 | Not a fresh derivation: 1,280 faces x 9 cells x 1,024 bodies = 11,796,480 is what `the_fixed_pass_ceiling_cannot_be_reached_under_the_frozen_limits` in `src/collision.rs` already computes and asserts. The bound is insensitive to how bodies are distributed **by construction**, given four inputs M2 leaves alone: `MAX_LIVE_COLLIDERS` stays global, `MAX_SPAN_CELLS` is unchanged, per-map `columns + rows` is still capped at 1,280, and the pass still iterates colliders rather than maps. See the Phase 0 probe for what is actually at risk |
 | Callback work | unchanged: 1,048,576 | Now shared across every map a callback touches |
 | Region output | unchanged: 4,096 per call, 262,144 per callback | Now aggregate across maps |
 
@@ -382,7 +382,7 @@ Unchanged from M1's split, extended to the new refusals. Catchable through
 `pcall`: schema, geometry, bounds, missing or stale map handle, foreign handle,
 bad entity handle, wrong phase, illegal placement, illegal transfer, and
 **removing a map that still has members** - the map-local successor to M1's
-`KernelError::CollidersAttached` (`src/kernel.rs:368`), which is catchable
+`KernelError::CollidersAttached` in `Kernel::clear_tilemap`, which is catchable
 today and stays so. Latching outside `pcall`: the map count, the aggregate cell
 budget, the collider limit, callback tile work and region output.
 
@@ -787,7 +787,13 @@ halves, because the first half alone missed something both sessions ran it over:
    document grows: this section began at line 696 one commit ago and at 709 now.
    So **take the window from the document's own structure - heading to heading -
    never from line numbers or a heuristic, and when two readers' counts disagree,
-   suspect the boundary before the content.** Three count disagreements in this
+   suspect the boundary before the content.** The same rule reaches one file
+   over: this document cited seven source lines by number, all of which resolved
+   *because `src/` was untouched*, and Phase 1 edits `src/kernel.rs` heavily -
+   four of the seven pointed into it. They are now cited by symbol
+   (`Kernel::validate`, `Kernel::set_tile`, the test's own name), which survives
+   an edit above them without anyone remembering to re-check. A citation that
+   needs a maintenance step is a citation that will be wrong. Three count disagreements in this
    milestone's review all resolved to differently chosen windows rather than to
    anything wrong in the text. Without that rule the locator manufactures
    disagreements indistinguishable from findings, which is worse than missing a
