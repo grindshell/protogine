@@ -23,7 +23,7 @@ the shared library also builds with `--no-default-features`.
 | --- | --- |
 | Startup | [Bundle discovery](src/bundle.rs) finds readable `game/main.luau` beside the executable, independent of cwd; [Player](src/bin/player.rs) owns window, input, startup/error screens and [capture](src/bin/player/capture.rs) |
 | Simulation | [Kernel](src/kernel.rs), [tile maps](src/tilemap.rs), [collision](src/collision.rs), [input](src/input.rs), [GameRuntime](src/runtime.rs): entities, one optional checked map, optional tile colliders, fixed ticks, immediate script writes, then swept or free-flight integration |
-| Luau | [ScriptHost](src/scripting.rs), [modules](src/scripting/modules.rs), [data](src/scripting/data.rs), [filesystem](src/scripting/filesystem.rs), [world](src/scripting/world.rs) and [draw bindings](src/scripting/drawing.rs) |
+| Luau | [ScriptHost](src/scripting.rs), [modules](src/scripting/modules.rs), [data](src/scripting/data.rs), [filesystem](src/scripting/filesystem.rs), [world](src/scripting/world.rs) with its [map schema](src/scripting/tilemap.rs), and [draw bindings](src/scripting/drawing.rs) |
 | Assets | [Types](src/assets.rs) compile without a decoder; `assets` enables the [store](src/assets/store.rs)/[worker](src/assets/worker.rs); [rooted traversal](src/rooted_path.rs) is shared with filesystem utilities |
 | Drawing | [Owned commands](src/drawing.rs) contain clear/rectangle/sprite data; [asset bindings](src/scripting/assets.rs) work headlessly; `graphics` enables the [shared renderer](src/rendering.rs) without a VM |
 | Native | [Manifest](src/manifest.rs), [loader](src/plugins.rs), [buffer bridge](src/scripting/native.rs), [SDK](sdk/src/lib.rs), generated [C header](include/protogine_plugin.h) and [headergen](tools/headergen/src/main.rs) |
@@ -33,9 +33,10 @@ the shared library also builds with `--no-default-features`.
 [tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) records accepted T1-T8 and
 its [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md) freezes the
 M1 API/schema, numerical and refusal contracts. Phase 1 delivered the kernel's
-checked map and Phase 2 the colliders, swept solver and placement guards; the
-Luau bindings and sample migration remain unstarted, so no script can reach any
-of it yet. Single-map collision is the first milestone;
+checked map, Phase 2 the colliders, swept solver and placement guards, and
+Phase 3 the nine scoped `ctx.world` calls that reach them; the sample migration
+remains unstarted, so the sprite sample still runs its own collision.
+Single-map collision is the first milestone;
 simultaneous maps, independent layers and streaming are required before full
 plan completion. Colliders are hecs components; T6's first-milestone lifecycle
 must be revised for later scope. Read the Phase 0 record before touching kernel

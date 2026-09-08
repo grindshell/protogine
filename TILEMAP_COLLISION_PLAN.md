@@ -8,9 +8,11 @@ authoritative wherever this plan left a proposal open. M1 Phase 1 completed
 2026-09-07: the kernel owns a checked map with bounded reads and cell edits. M1
 Phase 2 completed 2026-09-07: entities may carry a tile collider, the swept
 solver and every T5/T6 placement guard are in place, and the fixed pass resolves
-all candidates before committing any. No script binding exists yet; Phases 3-4
-are unstarted. Later milestone designs remain to be frozen. Acceptance is not
-execution evidence.
+all candidates before committing any. M1 Phase 3 completed 2026-09-07: a Luau
+game reaches all of it through nine scoped `ctx.world` calls with copied input,
+owned reads and three enforced aggregate ceilings. Phase 4 is unstarted, so the
+sprite sample still runs its own collision. Later milestone designs remain to be
+frozen. Acceptance is not execution evidence.
 **Date:** 2026-09-07. **Inspected baseline:** `e87a243`; Phase 0 ran against `508266c`.
 **Backlog:** [TODO.md](TODO.md). Completed predecessor contracts:
 [scripting/C API](docs/implementation/SCRIPTING_C_API_PLAN.md) and
@@ -321,7 +323,7 @@ log anchor. Keep a separate headless assertion of post-step kernel position.
 | 0. Contract and feasibility **(complete)** | Apply accepted T1-T8; freeze M1 API/schema, rounding and refusal semantics. Capture current sprite expectations. Prototype the numerical cases and count worst-case work/storage without adding production APIs. | Met on 2026-09-07; see the [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md). Contracts reflect the accepted decisions; the adjacent-f64 clamp rule holds over 889,145 domain-wide cases with at most two repair steps, no fallbacks and a 2^-28 pixel maximum gap; huge-velocity and maximum-footprint fixtures clamp exactly at the finite boundary; `120 * FIXED_DT` was verified to be exactly 2.0 rather than assumed; measured storage and work fit the caps, with the max-load long-sweep costing 11,386,880 of the 16,777,216 fixed-pass units. Overlap, transition and budget semantics are defined, so no stop gate remains. |
 | 1. Kernel map ownership **(complete)** | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Met on 2026-09-07 by `src/tilemap.rs`, its kernel integration and `tests/tilemap.rs`. Rectangular maps and tiles, negative-origin conversion, malformed size/ID/array input by reason, owned reads and snapshots, region and edit bounds, and a refused replacement leaving the installed map whole are all proven; the suite runs in the core configuration. `tools/run_tilemap_controls.ps1` carries eighteen mutation controls: thirteen fail at a named assertion, three are labelled crash controls because the library panics on its own bounds check before a test assertion is reached, and two are expected to keep passing because the rules they remove are redundant with others. Phase 2 grew that harness by one: `Kernel::set_tile`'s new read of the previous ID refuses out-of-bounds coordinates on its own, so `edit-skips-bounds` now removes both rules and a companion control records the redundancy. |
 | 2. Colliders and fixed systems **(complete)** | Optional hecs collider, placement guards, pure axis solver and bounded all-candidate commit. Extend all Phase 1 mutations to enforce collider invariants. | Met on 2026-09-07 by `src/collision.rs`, its kernel integration and `tests/collision.rs`. Sweeps, teleports, attachment, map replacement, cell edits and clearing obey T3-T6; a session with no collider keeps today's allocation-free integration; a late refusal moves no entity; replay is independent of insertion order. `tools/run_collision_controls.ps1` carries twenty-eight mutation controls: twenty-six fail at a named assertion, one is recorded as redundant, and one is a crash control in debug and a recorded redundancy in release. `tools/run_collision_stress.ps1` runs the mandated max-load configuration under an independent watchdog: the long-sweep arrangement charges 11,386,880 of 16,777,216 units, the Phase 0 probe's figure to the unit, and completes rather than faulting. |
-| 3. Luau integration | Scoped world extensions, raw validation/copying, shared attempts and new work/output budgets; real runtime fixtures. | Phase/expiry/foreign/reused handles, malformed calls, `pcall` latching, allocation rollback, callback ordering, restart/fault and zero-tick/catch-up behavior pass headlessly. |
+| 3. Luau integration **(complete)** | Scoped world extensions, raw validation/copying, shared attempts and new work/output budgets; real runtime fixtures. | Met on 2026-09-07 by `src/scripting/tilemap.rs`, the nine `ctx.world` calls in `src/scripting/world.rs` and `tests/script_tilemap.rs`. Phase, expiry and slot-reuse refusals, malformed calls of every schema shape, the three aggregate ceilings latching outside `pcall`, callback ordering, systems faults and zero-tick/catch-up frames all pass headlessly; a foreign-session handle is refused by the unit harness beside the bindings, which is the only place one can be produced. `tools/run_script_tilemap_controls.ps1` carries thirty-two mutation controls, all detected in both profiles, plus four recorded redundancies and four self-tests the harness must refuse. |
 | 4. Sample and release proof | Replace sample collision, adapt its probe, add tile-edit/high-speed fixtures, update authoring docs and development checks. | Original room/art/control expectations preserved; collision during loading/unload, same-tick edits, 30/60/144 FPS replay, copied Player captures and injected-input probe pass. Record M1 completion and limits; leave the plan active for M2-M4. |
 
 Do not start the next phase with an unmet exit gate. Keep implementation slices
@@ -608,6 +610,10 @@ disagreement can be diagnosed rather than re-guessed. The headers say to re-run
 serially before believing a red result. This is recorded as an open limitation
 rather than a fixed defect, because it has not been reproduced on demand and no
 mechanism has been established.
+(Closed in Phase 3, and the mechanism was not concurrent cargo: two concurrent
+runs of one harness shared its own copy under `target/` and overwrote each
+other's patches. This paragraph describes what was known at `88455fe`; the Phase
+3 exit below has the identification and the lock that closes it.)
 
 Those gates are themselves controlled, and getting there took the phase's own
 rule applied to the harness. The first two self-tests covered the two older
@@ -838,8 +844,301 @@ collider calls charge and `reset_callback_work` begins a new callback, but
 nothing enforces the 1,048,576 aggregate yet, because the callback boundary is
 Phase 3's to own. Single calls are individually bounded: the largest, a map
 install under the full collider limit, charges at most 82,944 units here.
+(Phase 3 renamed `reset_callback_work` to `begin_callback` and made the aggregate
+enforced; this paragraph describes the tree at `88455fe`.)
 
 The next unmet gate is Phase 3.
+
+Phase 3 exit, 2026-09-07, against baseline `c801db1`: `src/scripting/tilemap.rs`
+owns the raw validation and copying for the description and collider schemas,
+and `src/scripting/world.rs` owns the nine `ctx.world` calls beneath the same
+table and the same attempt budget. Added paths: `src/scripting/tilemap.rs`,
+`tests/script_tilemap.rs`, `tools/run_script_tilemap_controls.ps1` and its
+[receipt](docs/implementation/evidence/tilemap-phase3-controls.txt); modified:
+`src/scripting/world.rs`, `src/scripting.rs`, `src/scripting/utilities.rs`,
+`src/scripting/drawing.rs`, `src/kernel.rs`, `tests/collision.rs`,
+`docs/DEVELOPMENT.md` and this plan. No asset, renderer, input or Player code
+changed, and the sprite sample still runs its own collision until Phase 4.
+
+Commands and results: `cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings` with and without default features, and
+`--all-features`, all clean. `cargo test --workspace` reports 249 passing and 6
+ignored across 24 targets, up from 226 and 6 across 23; the core
+`--no-default-features` run reports 78 passing and 1 ignored across 23 targets,
+up from 76 across 22. Only two of the twenty-three new tests are in that core
+count: the binding suite needs a VM, and what runs without one is the kernel's
+own budgeting and charging rules in `tests/collision.rs`. `pwsh -NoProfile -File
+tools/run_script_tilemap_controls.ps1` reports thirty-two guards detected with
+their rule removed, four confirmed redundant and four self-tests refused,
+identically in debug and `-Release`. The harness reports those three counts
+separately rather than as one total, because a single number is what let an
+earlier draft of this record say `thirty-six guards, three redundancies` and be
+wrong twice in one sentence.
+
+Named control assertions: `an unknown field is refused`, `an unknown option`, `a
+cells metatable is refused`, `a hole in cells`, `a fractional dimension is
+refused`, `a fractional origin is refused`, `a fractional ID is refused`, `a
+truthy substitute is not a boolean`, `tile column`, `region width`, `tile ID`,
+`draw: set_tilemap must refuse`, `map calls must share the 4096 world attempts,
+not have their own`, `the region output ceiling must refuse the 65th read,
+uncatchably`, `64 refused requests must exhaust the region output ceiling`, `the
+aggregate tile-work ceiling must refuse the 64th install, uncatchably`, `the
+collider limit must refuse the 1025th attachment, uncatchably`, `tile-work
+accounting must restart each callback`, `a call must be budgeted against what the
+callback has left, not the whole ceiling`, `a refused charge is still charged`
+and `the copy stopped at a batch boundary rather than publishing a map`.
+
+**The three aggregate ceilings are split between the kernel and the binding, and
+the split is a decision rather than an accident.** Tile work is enforced *inside*
+the kernel: `begin_callback` starts a callback's accounting, `charge_callback_work`
+lets the binding charge the description elements it copies, and every kernel entry
+point now budgets itself against `MAX_CALLBACK_WORK` minus what the callback has
+already spent rather than against the whole ceiling. That last part is what makes
+the ceiling an aggregate instead of a per-call limit with a reset: budgeted
+against the whole ceiling, the call that crosses the line would be allowed to
+finish, so a callback could overrun by up to one full call's worth of work.
+Region output and world attempts go the other way and live in `EngineContext`,
+because they bound what crosses into the VM rather than what the map costs, and a
+Rust caller is not inside a callback at all. The existing 4,096-attempt counter is
+the precedent, and the new calls share it rather than opening a second one.
+
+`Kernel::reset_callback_work` is renamed `begin_callback` in the same change,
+because it now begins something rather than clearing a counter, and
+`EngineContext::new` is the one caller: exactly one context is built per callback,
+which is what makes it the boundary. A session whose driver never calls it
+accumulates across its whole life and eventually refuses, which is the safe
+direction for a caller that forgot.
+
+Charging arithmetic is pinned rather than reported. A description charges one unit
+per copied and validated element and a placement one per covered cell, so the
+sample-sized room in `tests/script_tilemap.rs` costs exactly 26 units to install
+and attach one body to, and the 128x128 grid in the ceiling fixture costs 16,385,
+which is why 63 installs fit inside 1,048,576 and the 64th does not. Scaling that
+to the largest map the schema admits gives 262,144 cells plus 1,024 solid flags
+plus at most 81 units for each of 1,024 colliders, or 346,112 units - the figure
+the Phase 0 record predicted for the largest install, now that the copying half of
+it is real. That last number is arithmetic, not a measurement; only the first two
+are asserted.
+
+**A refused region read is charged for what it could have returned, and the
+first draft of that rule was wrong in a way the review caught.** A refusal must
+cost something, because the output budget is charged before output allocation and
+a refused request has already been counted as an attempt, so 64 refused
+maximum-size requests exhaust the callback's output ceiling exactly as 64 served
+ones do. But the charge was the *requested* count, and no region read can return
+more than 4,096 IDs, so `tiles_region(0, 0, 600, 600)` charged 360,000 for output
+that was never possible and exhausted the whole 262,144 ceiling by itself. One
+out-of-range argument therefore latched the session - contradicting, in the same
+change, the README sentence saying bounds errors stay catchable. The charge is
+now `min(requested, MAX_REGION_CELLS)`, and both fixtures still hold because
+4,096 is exactly the per-call cap. Two controls cover the two halves:
+`region-refusal-uncharged` moves the charge after the kernel call, and
+`region-charges-what-was-asked-for` removes the clamp.
+
+That second control also earned the strict-marker rule its third phase in a row.
+The obvious marker was the Luau assertion beside the oversized request, and the
+control fails somewhere else entirely: a latch escapes `pcall` at the next VM
+interrupt, so the callback dies before `assert` can report anything. The fixture
+now carries a named Rust assertion for exactly that - every argument refusal must
+stay catchable rather than latch - which is both the right marker and a clearer
+statement of the rule than the Luau line was.
+
+**Both halves of the work-accounting rule are witnessed at every entry point, not
+once at the shared helper.** The review reverted `set_position`,
+`set_tile_collider` and `set_tilemap` individually to the whole-ceiling budget and
+found the suite green each time; only `set_tile` was pinned, and the one control
+edited the shared helper, so all four lost the subtraction together and the
+coverage read as "every entry point uses it" when it only said "the helper
+matters". The same was true of "charged whether or not it succeeds": moving the
+charge after the refusal was invisible at three of the four. `set_tilemap`'s is
+the one with teeth - a replacement 1,023 colliders pass and the 1,024th fails
+walks about 82,000 cells, and uncharged it would cost two units against an
+attempt budget that allows 4,096 calls per callback, so a script could spend
+hundreds of millions of cell visits under a 1,048,576-unit ceiling. There is now
+one assertion and one control per entry point per half, eight in total, and the
+shared-helper control is kept beside them as its own rule.
+
+That is the same shape as Phase 2's four harness gates with two witnesses: a
+check that guards N conclusions needs N witnesses, and one witness on the thing
+they have in common proves only that the common thing exists.
+
+`plain` moved from `src/scripting/drawing.rs` to `src/scripting/utilities.rs`,
+which was already the home for the per-callback helpers the bindings share. The
+sprite path is unchanged; it now imports what it used to own.
+
+Three rules are recorded as redundant across four controls - the third rule
+carries two, because it is dead in two different places - and two of the three
+say something.
+`whole`'s `is_finite` test is redundant because `f64::fract` is NaN for infinity
+as well as for NaN, so the `fract` test beside it already refuses every
+non-finite value; it stays because the intent should not rest on that. The
+second, `dense`'s early exit on one element too many, is redundant with the index
+range check beside it, because keys are unique and an array part is traversed in
+index order.
+
+The third is `plain`'s unknown-name branch, and **a redundancy control on a
+shared helper needs a wider target than one on a private function** - which is
+the general lesson, and the first draft did not follow it. That branch is dead
+for both schemas here, because every description and collider field is required,
+so a table carrying an unknown name either holds too many keys, which the count
+refuses, or displaces a required one, which the field read refuses. It is
+load-bearing for sprite options, whose six fields are optional, so
+`{width = 8, bogus = 1}` is two keys under the count limit with nothing else to
+refuse it. The first draft said so and named the wrong file: `tests/drawing.rs`
+stays green with the branch removed, and the actual witness is
+`sprite_options_reject_metatables_unknown_fields_and_coercions` in
+`tests/script_assets.rs`. Pointing at where the other half of the coverage lives
+is that note's entire job, so getting the file wrong made it worse than no note.
+The same edit now runs three times - detected against `script_assets`, confirmed
+redundant against each of this phase's two schemas - because a control that ran
+only against this suite would have printed a confirmed redundancy whether or not
+anything covered the branch anywhere.
+
+**One contract clause is witnessed only from beside the bindings, and the reason
+is structural.** The plan requires the host deadline to be checked between
+conversion batches of at most 256 elements. Through `GameRuntime` that check is
+unobservable: a latched deadline is terminal, so the session faults and its kernel
+is stopped whether the copy stopped at a batch boundary or ran to completion and
+installed a map first. The witness therefore lives in `src/scripting/world.rs` as
+a unit test, where the kernel outlives the failed callback and those two outcomes
+are different observable states. Its timing is a premise rather than the
+conclusion, and it is asserted: the fixture requires the fault to actually be the
+deadline, so a machine that ever copies a quarter of a million elements inside a
+2 ms budget fails loudly instead of passing without having tested anything. Its
+work assertion is bounded on both sides, `1 < charged < 262_145`, because the
+solids array alone charges one before the cells begin and a completed copy of
+512 x 512 charges 262,145: a bare `> 0` would have held with zero cells copied,
+which is not what the sentence beside it claims. Observed value 20,737, batch 81
+of 1,024.
+
+**Phase 2's open concurrency limitation is closed, and the mechanism was not the
+one that record guessed at.** It was never cargo. Each harness derives its copy's
+path from its own name, so two concurrent runs of *one* harness share a single
+patched tree: each writes its control's patch and each calls the restore in its
+own loop, overwriting the other mid-control, while each clears the other's saved
+cargo output at startup. Nothing about a concurrent `cargo test` does that - an
+unrelated build reads the working tree, which the copy already protects - so the
+Phase 2 header was watching the wrong thing.
+
+It surfaced twice in one afternoon. First when a receipt regeneration was still
+running here and a second run was started in the foreground; then when the review
+session ran the same harness against a run already in flight, saw twenty-six
+controls refused, and checked the copy's modification times against the clock
+rather than re-running and moving on. That second observation is what identified
+it, and it belongs to them.
+
+Both times every affected conclusion was refused rather than reported - "the
+patched source changed under the run, so it proves nothing" - which is the
+patch-survival gate from `1a9b710` doing exactly what it was added for, on the
+class of thing it was added for, twice. The five spurious controls recorded in
+Phase 2 fit this mechanism; no second harness was known to be running for those,
+so the fit is recorded and the explanation is not claimed.
+
+`tools/control_tree.ps1` now carries `Enter-ControlLock`, and all three harnesses
+take it before the copy exists and release it after the fingerprint check, so
+both exits pass through. A second run refuses by name and touches nothing - not
+the tree, not the saved output - rather than being quietly accommodated with a
+per-run path: sharing a build cache is fine, sharing patched sources is not, and
+unique paths would have cost every run a from-scratch build of the whole
+dependency graph to make a mistake cheaper. A lock whose process is gone is taken
+over with a note, comparing recorded start time as well as identifier because the
+operating system reuses them. `tools/run_control_lock_selftest.ps1` exercises
+five cases in about a second with no cargo, and the refusal was then witnessed on
+a genuine instance: a second run against a live one refused immediately, named
+the holding process, and left the first run's evidence intact.
+
+**The first version of that lock was broken, and the way it was broken is worth
+more than the fix.** The takeover note was written with `Write-Output`, so a
+PowerShell function returned the note *and* the path; the caller stored both in
+one variable, handed it to a `[string]` release parameter that matched nothing,
+and the first takeover left a lock every later run took over and never released -
+a defect that sustains itself once it happens. **The first self-test asserted the
+acquisition was truthy, which an array is, so it fired and passed.** That is a
+sharper form of the rule this project keeps rediscovering, and worth stating on
+its own: a check that never fires is one failure mode, and a check that fires for
+the wrong reason is the other, and only the first is visible as an empty battery.
+It now asserts exactly one usable path on every path through the function, and
+reintroducing `Write-Output` makes it fail by name. The instance was inside the
+guard added to fix the previous instance.
+
+`region_table`'s deadline check is the one observation in the new code with no
+witness at all, and it cannot have one. It runs after the kernel call, on a read
+that mutates nothing, so a deadline expiring during output conversion leaves no
+state that differs from one expiring after it - there is no equivalent of "the
+map was not installed" to look at. It is also close to unreachable: a region is
+capped at 4,096 IDs and `begin` sampled the clock microseconds earlier, so 16
+batches of `raw_set` are unlikely to cross a deadline that was live when the call
+started. That is the better reason to keep it than "we could not test it" - it is
+a contract obligation with almost no operational reach, which is exactly the kind
+of check that should be present and honest about being unwitnessed rather than
+dressed up with a fixture that proves nothing.
+
+Two more coverage boundaries are recorded rather than closed. A handle from another
+session cannot be produced by a game at all, so that refusal is pinned by the unit
+harness beside the bindings, which can inject one, and the integration suite
+covers only what a script can reach: despawned handles, reused slots and expired
+callback functions. And atomicity after a runtime fault is not observable through
+`GameRuntime`, because the fault stops the kernel before anything can read it;
+what the runtime fixture asserts is that the failed tick did not count, while "no
+candidate is committed" stays pinned directly against the kernel in
+`tests/collision.rs`.
+
+The `pcall` boundary is where the plan's failure classification becomes visible,
+so each half has its own fixture. Schema, geometry, bounds, missing map, bad
+handle, wrong phase and overlapping placement are ordinary catchable errors, and
+the schema battery catches thirty-one of them in a row and then reads the map back
+unchanged. The three aggregate ceilings are not catchable: each fixture wraps the
+call that crosses the line in `pcall`, logs a line after it, and asserts that the
+line was never reached. `work-limit-catchable` and `collider-limit-catchable`
+remove the latch and are detected, so "uncatchable" is a covered property rather
+than an assumed one.
+
+Limits unchanged from the Phase 0 record. `KernelError::Capacity`,
+`TileMapError::Capacity` and `CollisionError::Unconverged` remain defensive code
+with no coverage claim.
+
+**One measurement worth carrying into Phase 4, engine-wide and pre-existing
+rather than anything this phase introduced.** The review session measured a
+refused world binding call at roughly 645 microseconds against 0.3 microseconds
+for an accepted one and 3 microseconds for a `pcall` of an erroring Lua function,
+identically for `spawn` and `position` as for the calls added here, with
+`RUST_BACKTRACE` unset. The 4,096-attempt ceiling therefore does not bound
+refusal cost to anything frame-like; the 100 ms callback deadline does, at about
+155 refusals. That is why
+`malformed_and_wrong_phase_calls_count_against_the_attempt_budget` needs a raised
+timeout and costs a couple of seconds of suite time, and it is worth knowing
+before Phase 4 adds more fixtures of that shape. Nothing is changed on this
+evidence: it is a property of the existing error path, not of the new bindings.
+
+**This phase changed two closed phases' evidence, which is worth saying out
+loud.** The lock lives in the shared `tools/control_tree.ps1` and had to be taken
+by all three harnesses, so `run_tilemap_controls.ps1` and
+`run_collision_controls.ps1` moved after Phase 1 and Phase 2 were signed off, and
+their receipts describe scripts that no longer exist byte for byte. Both were
+therefore re-run here in both profiles and produce their recorded conclusions
+unchanged: eighteen map guards and four self-tests, and twenty-eight collision
+guards and four self-tests, with Phase 2's exact profile split - one redundancy
+plus one crash control in debug becoming two redundancies in release. The
+[Phase 3 receipt](docs/implementation/evidence/tilemap-phase3-controls.txt)
+carries those four runs alongside its own, so the re-check is recorded where
+someone in Phase 4 will find it rather than left to be re-derived. The review
+session ran the same four independently and reported the same counts.
+
+Three rules are worth carrying into Phase 4, all of them earned rather than
+assumed here. A check guarding N conclusions needs N witnesses, and the mapping
+has to be verified by removing each in turn, because one witness on what they
+share proves only that the shared thing exists. A redundancy control on a shared
+helper needs a wider target than one on a private function, or it reports a
+confirmed redundancy whether or not anything covers the rule anywhere. And a
+guard that fires for the wrong reason still shows green, which is the failure
+mode an empty battery does not warn you about.
+
+Deliberately not in this phase, and still Phase 4's: the sample migration itself,
+the probe adaptation and its `Get-ProbeStates` change, the update-time tile-edit
+fixture and its stale-grid negative control, and the 30/60/144 FPS replay and
+copied-Player evidence.
+
+The next unmet gate is Phase 4.
 
 Decision update, 2026-09-07: the owner accepted T2-T8, explicitly required the
 collider to be a hecs component, accepted T1's first milestone while making

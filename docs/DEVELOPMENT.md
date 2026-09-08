@@ -44,7 +44,7 @@ Exercise both the real headless runtime and the combined Player configuration:
 cargo test --workspace --no-default-features --features scripting
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --release --no-default-features --features scripting --lib --test kernel --test tilemap --test collision --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test sprites_sample
+cargo test --release --no-default-features --features scripting --lib --test kernel --test tilemap --test collision --test runtime --test drawing --test scripting --test scripting_feasibility --test scripting_utilities --test assets --test script_assets --test script_tilemap --test sprites_sample
 cargo run --example script_host --no-default-features --features scripting -- examples/games/lifecycle
 cargo run --example script_host --no-default-features --features scripting -- --ticks 200 examples/games/sprites
 cargo run --example script_host --no-default-features --features scripting -- --preload --ticks 4 examples/games/sprites
@@ -161,6 +161,7 @@ Keep subprocess watchdogs independent of the subsystem under test:
 | `kernel`, `runtime` | Handles, immediate writes, systems, latched limits, fixed-input replay and catch-up edges |
 | `tilemap` | Checked map schema and storage, row-major IDs, rectangular tiles and negative origins, saturated world-to-cell conversion, region and edit bounds, refused replacement, and map release on stop; runs in the core configuration with no decoder, VM or window |
 | `collision` | Colliders and the swept solver: approach directions and flush contact, interior cells missed by corners, offsets, smallest and maximum boxes, multi-tile sweeps, nearest wall, boundary clamping, X-before-Y, teleport/attach/install/edit/clear guards, all-candidate atomicity and insertion-order independence. Face selection is checked against an independent 1/256-pixel integer oracle across the geometry domain, and clamp rounding against four batteries: both map boundaries, an interior face at the domain edge, and ordinary content, where about a third of random draws need the repair. Core configuration; the max-load stress is `#[ignore]`d and runs through its own harness |
+| `script_tilemap` | The `ctx.world` map and collider calls through the real runtime: schema refusals and copying, owned snapshots, phase gating, handle expiry and slot reuse, T5/T6 guards reaching Lua unchanged, the shared attempt budget and the three aggregate ceilings, systems faults and zero-tick/catch-up frames |
 | `drawing` | Owned publication/validation, expired bindings, faults and seeded sample state without graphics |
 | `assets` | Rooting, coalescing, staged grants, independent pixels, storage/admission bounds, eviction/cancellation at each stage and worker teardown; adversarial decoders have a 10-second child watchdog because non-preemptible decode plus join can outlast an in-process drain deadline |
 | `script_assets` | Canonical wrappers, publication boundaries, budgets/phases, failed jobs, retained terminal status, sprite options/refusals/order, stop/fault/drop; foreign handles and failed wrapper publication use unit harnesses in `src/scripting/assets.rs` |
@@ -216,12 +217,44 @@ what its gate catches rather than a synthetic stand-in, and each fails naming th
 gate if one is removed, so the gates are themselves controlled. They run last,
 because the backdated one needs a previous build in the copy's target directory.
 
-**Re-run serially before believing a red result.** Isolation from the working
-tree is proven by the fingerprint; isolation from concurrent `cargo` is not.
-Under heavy parallel cargo load a control has been seen reporting uncovered where
-a serial run on the same tree passes all of them. The mechanism is unidentified,
-every observed instance has been in the safe direction, and the gates above exist
-so that a wrong answer is loud rather than silent.
+**One harness run at a time; a second refuses by name.** Isolation from the
+working tree is proven by the fingerprint, and the concurrency hazard that used
+to sit beside it is now identified and closed. It was never cargo. Each harness
+derives its copy's path from its own name, so two concurrent runs of one harness
+shared a single patched tree: each wrote its control's patch and each restored
+the originals in its own loop, overwriting the other mid-control, while each
+cleared the other's saved cargo output at startup. `Enter-ControlLock` in
+[control_tree.ps1](../tools/control_tree.ps1) now refuses the second run and
+names the process holding the lock, taking over only a lock whose process is
+gone. Sharing a build cache between runs is fine; sharing patched sources never
+was, and the copy alone only ever protected the working tree.
+
+Both times this happened, every affected conclusion was refused rather than
+reported - once during a Phase 3 receipt regeneration, once when the review
+session ran the same harness against a run already in flight, which is what
+identified it. That is the patch-survival gate doing what it was added for. The
+five Phase 2 anomalies fit this mechanism and are not claimed as explained by it;
+no second harness was known to be running for those.
+
+The lock guards every conclusion all three harnesses produce, so it has its own
+self-tests:
+
+```text
+pwsh -NoProfile -File tools/run_control_lock_selftest.ps1
+```
+
+Five cases, no cargo, about a second: a clean acquisition releases, a live holder
+is refused by name, a lock whose process is gone is taken over, a recycled
+process identifier with a different start time is not the same run, and a
+malformed lock is taken over rather than crashing the run that finds it. Run it
+whenever `control_tree.ps1` changes.
+
+Each case also asserts that an acquisition returns exactly one usable path, which
+is not type pedantry. The first version of the lock wrote its takeover note to
+the output stream, so a takeover returned the note *and* the path; the caller
+kept both in one variable, the release matched nothing, and the first takeover
+left a lock that every later run took over and never released. A self-test that
+only checked the result was truthy passed while that was true.
 
 **To verify a commit rather than a working tree, extract it first** - `git
 archive HEAD` into a scratch directory and run there. The harness script is a
@@ -275,6 +308,65 @@ fact. `check_placement`'s extent check was recorded as redundant with saturation
 plus "outside the map is solid" until the test its own comment described got
 written; it turned out to be the only thing refusing a NaN edge, and writing that
 case then exposed a second gap in the same predicate.
+
+### World binding guards
+
+```text
+pwsh -NoProfile -File tools/run_script_tilemap_controls.ps1
+pwsh -NoProfile -File tools/run_script_tilemap_controls.ps1 -Release
+```
+
+Thirty-six controls over `src/scripting/tilemap.rs`, `src/scripting/world.rs`,
+`src/scripting/utilities.rs` and `src/kernel.rs`: thirty-two that must be
+detected with their rule removed and four recorded redundancies, covering the
+description and collider schemas, arguments refused rather than narrowed, phase
+gating, the shared attempt budget, and each of the three aggregate ceilings both
+enforced and latching outside `pcall`. Four self-tests bring the file to forty
+entries. All of them behave identically in both profiles, which is unlike the
+other two harnesses because nothing here depends on a `debug_assert`. The runner
+prints the three counts separately rather than one total: a single number is what
+let an earlier draft of this section say "thirty-six controls, three of them
+redundancies" and be wrong twice in one sentence.
+
+Eight of the thirty-two cover one rule each at four entry points, twice over:
+every call that charges tile work must budget against what the callback has left
+rather than the whole ceiling, and must charge what it performed before refusing.
+Controlling the shared helper alone proved only that the helper matters -
+reverting any single call site left the suite green - so each site has its own
+assertion and its own control.
+
+Those four redundancy entries cover three rules; the third carries two because it
+is dead in two different places. The `is_finite` test inside `whole` is redundant
+because `f64::fract` is NaN for infinity as well as for NaN, so the `fract` test
+beside it already refuses every non-finite value, and `dense`'s early exit is
+redundant with the index range check beside it because keys are unique.
+
+The remaining two are one rule in a shared helper, which is why it needs three
+targets rather than one. `plain`'s
+unknown-name branch is dead for both schemas here - every map and collider field
+is required, so an unknown name either makes the table too large, which the count
+refuses, or displaces a required field, which the field read refuses - and
+load-bearing for sprite options, whose six fields are optional, so
+`{width = 8, bogus = 1}` is two keys under the count limit with nothing else to
+refuse it. The same edit therefore runs three times: against `script_assets`,
+where it must be detected, and against this phase's two schemas, where it must
+not. Run against one suite it would have reported a confirmed redundancy either
+way, which is the general point: a redundancy control on a shared helper has to
+be wider than one on a private function.
+
+Two deadline observations, one covered and one not.
+`conversion-skips-the-deadline` witnesses the check inside `dense`, and it works
+only because its test can observe a kernel that outlived a failed callback:
+through `GameRuntime` a latched deadline stops the session either way, so "the
+copy stopped before publishing" and "the copy finished and installed a map" look
+identical from outside. The fixture therefore lives beside the bindings and
+asserts its own premise - that the copy really did outlast the budget - so a
+machine fast enough to finish inside it fails loudly instead of passing without
+testing anything. `region_table`'s check has no control and cannot have one: it
+runs after the kernel call, on a read that mutates nothing, so a deadline
+expiring during output conversion leaves no state that differs from one expiring
+after it. It is kept because the contract requires the observation, and recorded
+as uncovered rather than left looking covered.
 
 ### Collision max-load stress
 

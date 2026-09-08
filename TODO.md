@@ -17,13 +17,15 @@ Completed work and historical evidence live in [implementation records](docs/imp
 
 - [ ] **M1: Single-map tilemaps and solid-tile collision.** The next delivery:
   one kernel map, optional hecs colliders, swept movement and sample migration.
-  Phases 0 to 2 are complete: the
+  Phases 0 to 3 are complete: the
   [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md) freezes the
   API/schema, numerical and refusal contracts with feasibility receipts, the
-  kernel owns a checked map with bounded reads and cell edits, and entities can
+  kernel owns a checked map with bounded reads and cell edits, entities can
   carry a tile collider whose swept movement, teleports and map/cell mutations
-  obey T3-T6. Phase 3 (Luau integration) is the next unmet gate; no script can
-  reach any of it yet, and the sprite sample still runs its own collision.
+  obey T3-T6, and a Luau game reaches all of it through nine scoped `ctx.world`
+  calls under enforced work, output and attempt ceilings. Phase 4 (sample and
+  release proof) is the next unmet gate; the sprite sample still runs its own
+  collision and no live-input or Player evidence exists yet.
 - [ ] **M2: Simultaneous maps.** Independent live maps, entity membership,
   transfers and map-local lifecycle, including the required T6 revision.
 - [ ] **M3: Independent layers.** Separate tile layers with explicit editing,
