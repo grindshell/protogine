@@ -571,8 +571,8 @@ review session's.
 `--no-default-features` because prototype geometry needs no decoder, VM or
 window.
 
-**Across the whole of M2 so far, `src/` and `tests/` are untouched.** Seventeen
-commits from the contract's first draft, and the diff against M1's final state is
+**Across the whole of M2 so far, `src/` and `tests/` are untouched.** From the
+contract's first draft to Phase 0's close, the diff against M1's final state is
 four documents, one probe and one runner. Every finding the review produced -
 two blocking contradictions, a T5 revision, an admission rule, a fixed-pass check
 that would have entered a gate false, a per-body window nothing could see, a
@@ -811,8 +811,25 @@ added occurrences. Recording a count here creates one more restatement to keep
 in step, which is the failure mode this section is about - so the method is
 written down and the tally deliberately is not.
 
-A first draft of this paragraph listed how many times each number appears, and
-the counts were stale before the edit finished, because adding the paragraph
-added occurrences. Recording a count here creates one more restatement to keep
-in step, which is the failure mode this section is about - so the method is
-written down and the tally deliberately is not.
+**The same rule has a sharper form one level up, and this document broke that
+one too.** The paragraph recording what the contract-before-code order bought
+once opened "Seventeen commits from the contract's first draft". That was the
+count when it was written, 18 in the commit that carried the sentence, and 19 a
+commit later: **the act of recording it incremented it.** Writing N+1 to
+compensate would mean predicting one's own commit, and would break again on the
+next amendment - which this record has taken after every closing so far, so
+there is no version of it that nothing follows. An occurrence tally at least
+holds still once written; a count of the commits containing it is falsified by
+the write. So **never record a count of the artefacts that contain the record**:
+state the range, or put the number outside the repository whose commits it
+counts. The area statistic beside it survives precisely because it is not that
+kind of count - zero files in `src/` stays true however many commits touch
+neither. The finding is the review session's.
+
+**And this section carried a byte-identical duplicate of the paragraph above
+from `1c980cc` until now**, through every pass since, including two where clause
+5 was run over this very heading. It was found by an unrelated edit failing on
+the ambiguity. The clause was right and its application was not: it says count
+repeated figures **and phrases**, and only figures were ever counted. A locator
+used at half its stated width is a locator that finds half of what it claims,
+and the section demonstrating that failure mode is the one that hosted it.
