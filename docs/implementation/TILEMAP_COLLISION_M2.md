@@ -776,11 +776,26 @@ halves, because the first half alone missed something both sessions ran it over:
    which. Across the three commits the count of `8.5%` ran 4, 4, 3, which is the
    shape to look for.
 
-   It is a locator and not a verdict, with legitimate false positives: a table
-   row and the prose explaining it will share a figure, which is why lines 582
-   and 599 both carry `8.5%` and should. Mechanical detection of the seam, human
-   judgement on the damage - which is a narrower and more honest claim than
-   either "no pass finds this" or a pretence that reading can be automated.
+   It is a locator and not a verdict, with two false-positive modes. The first
+   is legitimate sharing: a table row and the prose explaining it carry the same
+   figure, which is why two of the three surviving `8.5%` are correct.
+
+   **The second is the window, and it is the dangerous one.** The count depends
+   entirely on where the section boundary is drawn, and the same three tokens in
+   this document give `×1 ×0 ×0`, `×0 ×0 ×0` and `×3 ×3 ×4` under three
+   plausible windows. Line numbers make it worse, because they go stale as the
+   document grows: this section began at line 696 one commit ago and at 709 now.
+   So **take the window from the document's own structure - heading to heading -
+   never from line numbers or a heuristic, and when two readers' counts disagree,
+   suspect the boundary before the content.** Three count disagreements in this
+   milestone's review all resolved to differently chosen windows rather than to
+   anything wrong in the text. Without that rule the locator manufactures
+   disagreements indistinguishable from findings, which is worse than missing a
+   seam: it costs the other reader a verification cycle over nothing.
+
+   Mechanical detection of the seam, human judgement on the damage - a narrower
+   and more honest claim than either "no pass finds this" or a pretence that
+   reading can be automated.
 
    All three clauses are the review session's, each from a second occurrence.
 
