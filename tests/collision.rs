@@ -7,8 +7,8 @@
 //! core configuration, with no decoder, VM or graphics context.
 
 use protogine::collision::{
-    self, CollisionError, MAX_FIXED_PASS_WORK, MAX_LIVE_COLLIDERS, MIN_COLLIDER_EXTENT,
-    TileCollider, WorkBudget,
+    self, CollisionError, MAX_CALLBACK_WORK, MAX_FIXED_PASS_WORK, MAX_LIVE_COLLIDERS,
+    MIN_COLLIDER_EXTENT, TileCollider, WorkBudget,
 };
 use protogine::kernel::{FIXED_DT, Kernel, KernelError, Position, Velocity};
 use protogine::tilemap::{Axis, GEOMETRY_LIMIT, TileMap, TileMapError, TileMapInfo};
@@ -1662,7 +1662,7 @@ fn stopping_releases_the_sweep_scratch() {
 #[test]
 fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
     let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
-    kernel.reset_callback_work();
+    kernel.begin_callback();
 
     // A cell edit that leaves the map non-solid charges the cell alone.
     kernel.set_tile(3, 1, FLOOR).unwrap();
@@ -1674,7 +1674,7 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
 
     // Nor can replacing one solid ID with another, which is why the scan is
     // conditioned on the transition rather than on the new ID alone.
-    kernel.reset_callback_work();
+    kernel.begin_callback();
     kernel.set_tile(0, 0, WALL).unwrap();
     assert_eq!(
         kernel.callback_work(),
@@ -1684,10 +1684,10 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
 
     // Making a cell solid charges the cell plus one check per live collider,
     // whether or not the edit is accepted.
-    kernel.reset_callback_work();
+    kernel.begin_callback();
     kernel.set_tile(3, 1, WALL).unwrap();
     assert_eq!(kernel.callback_work(), 2);
-    kernel.reset_callback_work();
+    kernel.begin_callback();
     assert!(kernel.set_tile(1, 1, WALL).is_err());
     assert_eq!(
         kernel.callback_work(),
@@ -1696,7 +1696,7 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
     );
 
     // A placement check charges one unit per covered cell.
-    kernel.reset_callback_work();
+    kernel.begin_callback();
     kernel
         .set_position(&body, Position { x: 33.0, y: 33.0 })
         .unwrap();
@@ -1704,6 +1704,151 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
         kernel.callback_work(),
         4,
         "a 32-pixel box offset by one pixel covers four 32-pixel cells"
+    );
+}
+
+/// One assertion per entry point that charges tile work, because the shared
+/// helper being right does not establish that all four reach for it.
+#[test]
+fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
+    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+    let before = kernel.tile(3, 1).unwrap();
+    kernel.begin_callback();
+    // One unit short of the ceiling: the edit below costs two, so it must be
+    // refused part-way rather than allowed one whole call's worth of overrun.
+    kernel.charge_callback_work(MAX_CALLBACK_WORK - 1).unwrap();
+    assert_eq!(
+        kernel.set_tile(3, 1, WALL),
+        Err(KernelError::Collision(CollisionError::Work)),
+        "set_tile must be budgeted against what the callback has left, not the whole ceiling"
+    );
+    assert_eq!(
+        kernel.tile(3, 1),
+        Ok(before),
+        "the refused edit changed nothing"
+    );
+    assert!(
+        kernel.callback_work() >= MAX_CALLBACK_WORK,
+        "the work performed is charged before the refusal"
+    );
+
+    // The other three, each with nothing left at all. A placement check charges
+    // its first cell before it can look at anything, so one unit is enough to
+    // separate "budgeted against the remainder" from "budgeted against the
+    // ceiling"; what differs between them is not the size of the overrun but
+    // whether there is one.
+    let exhausted = |kernel: &mut Kernel| {
+        kernel.begin_callback();
+        kernel.charge_callback_work(MAX_CALLBACK_WORK).unwrap();
+    };
+    let work = Err(KernelError::Collision(CollisionError::Work));
+
+    exhausted(&mut kernel);
+    assert_eq!(
+        kernel.set_position(&body, Position { x: 33.0, y: 33.0 }),
+        work,
+        "set_position must be budgeted against what the callback has left"
+    );
+    assert_eq!(
+        kernel.position(&body),
+        Ok(Position { x: 32.0, y: 32.0 }),
+        "the refused teleport moved nothing"
+    );
+
+    exhausted(&mut kernel);
+    assert_eq!(
+        kernel.set_tile_collider(&body, Some(square(16.0))),
+        work,
+        "set_tile_collider must be budgeted against what the callback has left"
+    );
+    assert_eq!(
+        kernel.tile_collider(&body),
+        Ok(Some(square(32.0))),
+        "the refused attachment left the previous collider"
+    );
+
+    // Installation charges one placement check per live collider, so its
+    // budgeting is only reachable with a body attached - which is also the only
+    // case where the overrun is material, at up to 81 units per collider.
+    exhausted(&mut kernel);
+    assert_eq!(
+        kernel.set_tilemap(room()),
+        work,
+        "set_tilemap must be budgeted against what the callback has left"
+    );
+    assert_eq!(
+        kernel.tile(3, 1),
+        Ok(before),
+        "the refused installation left the map alone"
+    );
+}
+
+/// One assertion per entry point for the anti-probing half of the same rule.
+///
+/// `set_tilemap`'s is the one with teeth. A replacement that 1,023 colliders
+/// pass and the 1,024th fails walks about 82,000 cells; uncharged it would cost
+/// two units, and the attempt budget allows 4,096 calls per callback, so a
+/// script could spend hundreds of millions of cell visits against a
+/// 1,048,576-unit ceiling.
+#[test]
+fn every_entry_point_charges_the_work_it_performed_before_refusing() {
+    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+
+    kernel.begin_callback();
+    assert!(
+        kernel
+            .set_position(&body, Position { x: 0.0, y: 0.0 })
+            .is_err()
+    );
+    assert!(
+        kernel.callback_work() > 0,
+        "a refused teleport is charged for the cells it checked"
+    );
+
+    kernel.begin_callback();
+    // Legal as an extent - eight 32-pixel tiles is 256 - but from (32, 32) the
+    // box reaches 160 and overlaps the room's far wall, so it is refused after
+    // the scan rather than before it.
+    assert!(
+        kernel
+            .set_tile_collider(&body, Some(square(128.0)))
+            .is_err()
+    );
+    assert!(
+        kernel.callback_work() > 0,
+        "a refused attachment is charged for the cells it checked"
+    );
+
+    // A map whose interior is solid under the body, so revalidation walks the
+    // collider and then refuses.
+    kernel.begin_callback();
+    assert!(
+        kernel
+            .set_tilemap(build(
+                &["#####", "#####", "#####", "#####", "#####"],
+                32,
+                32,
+                (0, 0)
+            ))
+            .is_err()
+    );
+    assert!(
+        kernel.callback_work() > 0,
+        "a refused installation is charged for the colliders it revalidated"
+    );
+
+    // And a charge that crosses the ceiling counts, so a caller cannot probe for
+    // free by repeating a request that always refuses.
+    kernel.begin_callback();
+    kernel.charge_callback_work(MAX_CALLBACK_WORK).unwrap();
+    assert_eq!(
+        kernel.charge_callback_work(7),
+        Err(KernelError::Collision(CollisionError::Work))
+    );
+    assert_eq!(
+        kernel.callback_work(),
+        MAX_CALLBACK_WORK + 7,
+        "a refused charge is still charged"
     );
 }
 

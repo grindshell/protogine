@@ -1,5 +1,5 @@
 use super::assets::{ImageHandle, Images};
-use super::utilities::UtilityBudget;
+use super::utilities::{UtilityBudget, plain};
 use crate::drawing::{
     DRAW_COMMAND_LIMIT, DrawCommand, SourceRect, Sprite, valid_color, valid_coordinate,
     valid_extent,
@@ -192,40 +192,6 @@ fn source_rect(source: &Table) -> mlua::Result<SourceRect> {
         width,
         height,
     })
-}
-
-/// Reject metatables, unknown names and numeric keys, stopping at the first
-/// unexpected key. Values are read without metamethods.
-///
-/// The counter makes the iteration bound evident rather than leaving it to be
-/// re-derived: keys are unique, so a table can carry at most `fields.len()`
-/// known names before an unknown one stops the walk either way. Which of the
-/// two refusals reports first depends on the VM's iteration order, so neither
-/// message is a contract; both refuse the same tables.
-fn plain(table: &Table, fields: &[&str], what: &str) -> mlua::Result<()> {
-    if table.metatable().is_some() {
-        return Err(mlua::Error::runtime(format!(
-            "{what} must be a plain table with no metatable"
-        )));
-    }
-    let mut seen = 0;
-    for pair in table.clone().pairs::<Value, Value>() {
-        let (key, _) = pair?;
-        seen += 1;
-        if seen > fields.len() {
-            return Err(mlua::Error::runtime(format!("{what} has too many fields")));
-        }
-        let known = match &key {
-            Value::String(name) => name
-                .to_str()
-                .is_ok_and(|name| fields.iter().any(|field| *field == name.as_ref())),
-            _ => false,
-        };
-        if !known {
-            return Err(mlua::Error::runtime(format!("{what} has an unknown field")));
-        }
-    }
-    Ok(())
 }
 
 /// Actual numeric values only: a numeric string is a coercion, not a number.

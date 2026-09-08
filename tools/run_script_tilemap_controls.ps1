@@ -1,0 +1,557 @@
+# Negative controls for the `ctx.world` map and collider bindings.
+#
+# Each control removes one rule from the engine source, runs the single test
+# that is supposed to catch it, and requires that test to fail at a named
+# assertion. A guard that cannot be observed failing is not covered, and a
+# passing suite alone does not distinguish the two.
+#
+# Markers name the exact assertion, never a generic 'assertion' or 'panicked'
+# substring: those match any failure at all, which would reduce the harness to
+# "something broke" and silently absorb a control that moved to a different
+# failure site.
+#
+# Controls marked `Passes` are expected to keep passing. They record a rule that
+# is redundant given something else, and say which something, so a later change
+# that removes the other half is visibly uncovered rather than silently so.
+#
+# Every patch is written to an isolated copy of the tree under `target/`, never
+# to the working tree, so a build that overlaps this run cannot pick up a
+# deliberately broken source. The run proves that rather than asserting it: it
+# fingerprints the engine sources before and after and fails if either moved.
+#
+# The one real concurrency hazard is now identified and closed, and it was never
+# cargo. The copy's path derives from the harness name, so two concurrent runs of
+# *this* harness shared one patched tree: each wrote its own control's patch and
+# each restored the originals in its own loop, overwriting the other mid-control,
+# while each cleared the other's saved cargo output at startup.
+# `Enter-ControlLock` now refuses the second run by name instead of accommodating
+# it. Sharing the build cache between runs is fine; sharing patched sources never
+# was, and the copy alone only ever protected the working tree.
+#
+# Every observed instance was in the safe direction - the harness cried wolf
+# rather than passing a control that had not applied - because each conclusion is
+# separately gated on the patch surviving the run, the crate actually
+# recompiling, exactly one test executing, and a detecting control's test
+# reporting failure. Those gates are what caught this, twice. Read the saved
+# cargo output for any control that fails.
+param([switch]$Release)
+$ErrorActionPreference = 'Stop'
+$controlRepo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'control_tree.ps1')
+$controlSources = @(
+    'src/scripting/world.rs',
+    'src/scripting/tilemap.rs',
+    'src/scripting/utilities.rs',
+    'src/kernel.rs'
+)
+$controlFingerprint = Get-SourceFingerprint -Repo $controlRepo -Files $controlSources
+# Claimed before the copy exists, because the copy is what two runs would share.
+# Released after the fingerprint check below, so both exits pass through it; a
+# run that dies before then leaves a lock its own dead process identifies.
+$controlLock = Enter-ControlLock -Repo $controlRepo -Name 'script-tilemap-controls'
+
+# Every target uses the same feature set, so switching between them costs no
+# extra rebuild and the 'Compiling protogine' gate stays meaningful.
+$features = @('--no-default-features', '--features', 'scripting')
+$bindings = @('--test', 'script_tilemap') + $features
+$kernelTests = @('--test', 'collision') + $features
+$unitTests = @('--lib') + $features
+
+$regionCharged = @'
+                self.region_output(budget, u64::from(columns) * u64::from(rows))?;
+                let result = self
+                    .kernel
+                    .borrow()
+                    .tiles_region(column, row, columns, rows);
+                let ids = kernel_result(budget, result)?;
+'@ -replace "`r`n", "`n"
+
+$chargeThenCheck = @'
+        self.callback_work = self.callback_work.saturating_add(units);
+        if self.callback_work > MAX_CALLBACK_WORK {
+            return Err(CollisionError::Work.into());
+        }
+        Ok(())
+'@ -replace "`r`n", "`n"
+
+$plainUnknownName = @'
+        if !known {
+            return Err(mlua::Error::runtime(format!("{what} has an unknown field")));
+        }
+'@ -replace "`r`n", "`n"
+
+$arrayMetatable = @'
+    if table.metatable().is_some() {
+        return Err(mlua::Error::runtime(format!(
+            "{what} must be a plain array with no metatable"
+        )));
+    }
+'@ -replace "`r`n", "`n"
+
+$controls = @(
+    # --- Schema validation and copying ---------------------------------------
+
+    @{ Name = 'description-unvalidated'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Marker = 'an unknown field is refused'
+       Edits = @(@{ F = '    plain(desc, DESCRIPTION_FIELDS, "tilemap description")?;'; R = '' }) }
+
+    @{ Name = 'collider-options-unvalidated'; File = 'src/scripting/tilemap.rs'
+       Test = 'arguments_and_collider_options_are_refused_without_narrowing'
+       Marker = 'an unknown option'
+       Edits = @(@{ F = '    plain(options, COLLIDER_FIELDS, "collider options")?;'; R = '' }) }
+
+    @{ Name = 'array-metatable-accepted'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Marker = 'a cells metatable is refused'
+       Edits = @(@{ F = $arrayMetatable; R = '' }) }
+
+    @{ Name = 'array-holes-accepted'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Marker = 'a hole in cells'
+       Edits = @(@{ F = "    if seen != expected {`n        return Err(length());`n    }"; R = '' }) }
+
+    @{ Name = 'dimensions-narrowed'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Marker = 'a fractional dimension is refused'
+       Edits = @(@{ F = "    if !whole(count, 0.0, f64::from(u32::MAX)) {`n        return Err(mlua::Error::runtime(format!(`n            `"tilemap {key} must be a nonnegative whole number`"`n        )));`n    }"
+                    R = '' }) }
+
+    @{ Name = 'origins-narrowed'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Marker = 'a fractional origin is refused'
+       Edits = @(@{ F = "    if !whole(origin, INDEX_LOW, INDEX_HIGH) {`n        return Err(mlua::Error::runtime(format!(`n            `"tilemap {key} must be a whole number of world pixels`"`n        )));`n    }"
+                    R = '' }) }
+
+    @{ Name = 'ids-narrowed'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Marker = 'a fractional ID is refused'
+       Edits = @(@{ F = '            whole(id, 0.0, f64::from(u16::MAX)).then_some(id as u16)'
+                    R = '            Some(id as u16)' }) }
+
+    @{ Name = 'solids-truthy-accepted'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Marker = 'a truthy substitute is not a boolean'
+       Edits = @(@{ F = "            Value::Boolean(flag) => Some(flag),`n            _ => None,"
+                    R = "            Value::Boolean(flag) => Some(flag),`n            _ => Some(true)," }) }
+
+    # --- Arguments, refused without narrowing or wrapping --------------------
+
+    @{ Name = 'indices-narrowed'; File = 'src/scripting/tilemap.rs'
+       Test = 'arguments_and_collider_options_are_refused_without_narrowing'
+       Marker = 'tile column'
+       Edits = @(@{ F = '    let index = number(value).filter(|index| whole(*index, INDEX_LOW, INDEX_HIGH));'
+                    R = '    let index = number(value);' }) }
+
+    @{ Name = 'extents-narrowed'; File = 'src/scripting/tilemap.rs'
+       Test = 'arguments_and_collider_options_are_refused_without_narrowing'
+       Marker = 'region width'
+       Edits = @(@{ F = '    let extent = number(value).filter(|extent| whole(*extent, 0.0, f64::from(u32::MAX)));'
+                    R = '    let extent = number(value);' }) }
+
+    @{ Name = 'tile-ids-narrowed'; File = 'src/scripting/tilemap.rs'
+       Test = 'arguments_and_collider_options_are_refused_without_narrowing'
+       Marker = 'tile ID'
+       Edits = @(@{ F = '    let id = number(value).filter(|id| whole(*id, 0.0, f64::from(u16::MAX)));'
+                    R = '    let id = number(value);' }) }
+
+    # --- Phase gating and the shared attempt budget --------------------------
+
+    @{ Name = 'mutation-phase-ungated'; File = 'src/scripting/world.rs'
+       Test = 'only_init_and_update_may_mutate_the_map_or_its_colliders'
+       Marker = 'draw: set_tilemap must refuse'
+       Edits = @(@{ F = "            `"set_tilemap`",`n            scope.create_function(move |lua, args: MultiValue| {`n                self.begin(budget, true, writable)?;"
+                    R = "            `"set_tilemap`",`n            scope.create_function(move |lua, args: MultiValue| {`n                self.begin(budget, false, writable)?;" }) }
+
+    @{ Name = 'map-calls-uncounted'; File = 'src/scripting/world.rs'
+       Test = 'map_calls_share_the_existing_world_attempt_budget'
+       Marker = 'map calls must share the 4096 world attempts, not have their own'
+       Edits = @(@{ F = "            `"tile_solid`",`n            scope.create_function(move |lua, args: MultiValue| {`n                self.begin(budget, false, writable)?;"
+                    R = "            `"tile_solid`",`n            scope.create_function(move |lua, args: MultiValue| {" }) }
+
+    # --- Region output -------------------------------------------------------
+
+    @{ Name = 'region-output-uncharged'; File = 'src/scripting/world.rs'
+       Test = 'the_region_output_ceiling_latches_outside_pcall'
+       Marker = 'the region output ceiling must refuse the 65th read, uncatchably'
+       Edits = @(@{ F = '                self.region_output(budget, u64::from(columns) * u64::from(rows))?;'
+                    R = '' }) }
+
+    # A single request larger than the whole callback ceiling must stay an
+    # ordinary bounds error. Charging what was asked for rather than what could
+    # have been returned turns one out-of-range argument into a session fault,
+    # which contradicts the README's own taxonomy.
+    @{ Name = 'region-charges-what-was-asked-for'; File = 'src/scripting/world.rs'
+       Test = 'arguments_and_collider_options_are_refused_without_narrowing'
+       # Not the Luau assertion beside the request: the latch escapes `pcall` at
+       # the next VM interrupt, so the callback dies before `assert` can report.
+       # That is the point of the control and it was the wrong first guess.
+       Marker = 'every argument refusal must stay catchable rather than latch'
+       Edits = @(@{ F = '        let charged = ids.min(u64::from(MAX_REGION_CELLS));'
+                    R = '        let charged = ids;' }) }
+
+    @{ Name = 'region-refusal-uncharged'; File = 'src/scripting/world.rs'
+       Test = 'a_refused_region_is_charged_for_what_it_could_have_returned'
+       Marker = '64 refused requests must exhaust the region output ceiling'
+       Edits = @(@{ F = $regionCharged; R = @'
+                let result = self
+                    .kernel
+                    .borrow()
+                    .tiles_region(column, row, columns, rows);
+                let ids = kernel_result(budget, result)?;
+                self.region_output(budget, ids.len() as u64)?;
+'@ -replace "`r`n", "`n" }) }
+
+    # --- The aggregate tile-work ceiling -------------------------------------
+
+    @{ Name = 'callback-work-unenforced'; File = 'src/kernel.rs'
+       Test = 'the_aggregate_tile_work_ceiling_latches_outside_pcall'
+       Marker = 'the aggregate tile-work ceiling must refuse the 64th install, uncatchably'
+       Edits = @(@{ F = "        if self.callback_work > MAX_CALLBACK_WORK {`n            return Err(CollisionError::Work.into());`n        }"
+                    R = '' }) }
+
+    @{ Name = 'work-limit-catchable'; File = 'src/scripting/world.rs'
+       Test = 'the_aggregate_tile_work_ceiling_latches_outside_pcall'
+       Marker = 'the aggregate tile-work ceiling must refuse the 64th install, uncatchably'
+       Edits = @(@{ F = '        Err(KernelError::Collision(CollisionError::Work)) => Some("tile work limit exceeded"),'
+                    R = '' }) }
+
+    @{ Name = 'collider-limit-catchable'; File = 'src/scripting/world.rs'
+       Test = 'the_live_collider_limit_latches_outside_pcall'
+       Marker = 'the collider limit must refuse the 1025th attachment, uncatchably'
+       Edits = @(@{ F = '        Err(KernelError::ColliderLimit) => Some("collider limit exceeded"),'; R = '' }) }
+
+    @{ Name = 'callback-work-never-reset'; File = 'src/scripting/world.rs'
+       Test = 'tile_work_accounting_starts_over_in_every_callback'
+       Marker = 'tile-work accounting must restart each callback'
+       Edits = @(@{ F = '        kernel.begin_callback();'; R = '' }) }
+
+    # The shared helper, and then each of its four call sites separately. The
+    # helper being right does not establish that all four reach for it: reverting
+    # any one of them individually left the whole suite green until the fixture
+    # grew one assertion per entry point.
+    @{ Name = 'call-budget-is-the-whole-ceiling'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
+       Marker = 'set_tile must be budgeted against what the callback has left, not the whole ceiling'
+       Edits = @(@{ F = "    fn remaining_work(callback_work: u64) -> WorkBudget {`n        WorkBudget::new(MAX_CALLBACK_WORK.saturating_sub(callback_work))`n    }"
+                    R = "    fn remaining_work(_callback_work: u64) -> WorkBudget {`n        WorkBudget::new(MAX_CALLBACK_WORK)`n    }" }) }
+
+    @{ Name = 'set-tile-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
+       Marker = 'set_tile must be budgeted against what the callback has left, not the whole ceiling'
+       Edits = @(@{ F = "        // this one too rather than relying on the collider limit to do it.`n        let mut work = Self::remaining_work(*callback_work);"
+                    R = "        // this one too rather than relying on the collider limit to do it.`n        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
+
+    @{ Name = 'set-position-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
+       Marker = 'set_position must be budgeted against what the callback has left'
+       Edits = @(@{ F = "            let map = self.tilemap.as_ref().ok_or(KernelError::NoTileMap)?;`n            let mut work = Self::remaining_work(self.callback_work);"
+                    R = "            let map = self.tilemap.as_ref().ok_or(KernelError::NoTileMap)?;`n            let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
+
+    @{ Name = 'attach-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
+       Marker = 'set_tile_collider must be budgeted against what the callback has left'
+       Edits = @(@{ F = "            .expect(`"every entity has a position`");`n        let mut work = Self::remaining_work(self.callback_work);"
+                    R = "            .expect(`"every entity has a position`");`n        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
+
+    @{ Name = 'install-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
+       Marker = 'set_tilemap must be budgeted against what the callback has left'
+       Edits = @(@{ F = "        let info = map.info();`n        let mut work = Self::remaining_work(*callback_work);"
+                    R = "        let info = map.info();`n        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
+
+    # The anti-probing half, one control per entry point for the same reason.
+    @{ Name = 'set-tile-charges-after-refusing'; File = 'src/kernel.rs'
+       Test = 'tile_work_is_charged_per_visited_cell_and_survives_a_refusal'; Target = $kernelTests
+       Marker = 'a refused edit is charged for the scan it performed'
+       Edits = @(@{ F = "        *callback_work = callback_work.saturating_add(work.used());`n        outcome?;"
+                    R = "        outcome?;`n        *callback_work = callback_work.saturating_add(work.used());" }) }
+
+    @{ Name = 'set-position-charges-after-refusing'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_charges_the_work_it_performed_before_refusing'; Target = $kernelTests
+       Marker = 'a refused teleport is charged for the cells it checked'
+       Edits = @(@{ F = "            self.callback_work = self.callback_work.saturating_add(work.used());`n            placement?;"
+                    R = "            placement?;`n            self.callback_work = self.callback_work.saturating_add(work.used());" }) }
+
+    @{ Name = 'attach-charges-after-refusing'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_charges_the_work_it_performed_before_refusing'; Target = $kernelTests
+       Marker = 'a refused attachment is charged for the cells it checked'
+       Edits = @(@{ F = "        self.callback_work = self.callback_work.saturating_add(work.used());`n        placement?;"
+                    R = "        placement?;`n        self.callback_work = self.callback_work.saturating_add(work.used());" }) }
+
+    @{ Name = 'install-charges-after-refusing'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_charges_the_work_it_performed_before_refusing'; Target = $kernelTests
+       Marker = 'a refused installation is charged for the colliders it revalidated'
+       Edits = @(@{ F = "        *callback_work = callback_work.saturating_add(work.used());`n        refusal?;"
+                    R = "        refusal?;`n        *callback_work = callback_work.saturating_add(work.used());" }) }
+
+    @{ Name = 'charge-after-the-refusal'; File = 'src/kernel.rs'
+       Test = 'every_entry_point_charges_the_work_it_performed_before_refusing'; Target = $kernelTests
+       Marker = 'a refused charge is still charged'
+       Edits = @(@{ F = $chargeThenCheck; R = @'
+        if self.callback_work.saturating_add(units) > MAX_CALLBACK_WORK {
+            return Err(CollisionError::Work.into());
+        }
+        self.callback_work = self.callback_work.saturating_add(units);
+        Ok(())
+'@ -replace "`r`n", "`n" }) }
+
+    # --- The deadline between conversion batches -----------------------------
+    #
+    # `dense`'s is here. `region_table`'s check has no control and cannot have
+    # one: it runs after the kernel call, on a read that mutates nothing, so a
+    # deadline expiring during output conversion leaves no state that differs
+    # from one expiring after it. It is kept because the contract requires the
+    # observation, and recorded as uncovered rather than left to look covered.
+
+    @{ Name = 'conversion-skips-the-deadline'; File = 'src/scripting/tilemap.rs'
+       Test = 'scripting::world::tests::a_description_copy_stops_at_the_deadline_without_installing_a_map'
+       Target = $unitTests
+       Marker = 'the copy stopped at a batch boundary rather than publishing a map'
+       Edits = @(@{ F = "            budget.check()?;`n            charge(CONVERSION_BATCH.min(expected - seen) as u64)?;"
+                    R = "            charge(CONVERSION_BATCH.min(expected - seen) as u64)?;" }) }
+
+    # --- Redundancies, recorded rather than mistaken for coverage ------------
+
+    # Redundant with the range check in `array_index`: keys are unique, so a
+    # table cannot hold more than `expected` of them without holding one outside
+    # `1..=expected`, which is refused on its own. The early exit bounds nothing
+    # extra either, because an array part is traversed in index order. It is kept
+    # because it states the postcondition where a reader looks for it.
+    @{ Name = 'dense-early-exit'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'; Passes = $true
+       Edits = @(@{ F = "        if seen == expected {`n            return Err(length());`n        }"; R = '' }) }
+
+    # Redundant with the `fract` test beside it: `f64::fract` is NaN for both NaN
+    # and infinity, so `fract() != 0.0` already refuses every non-finite value.
+    # It is kept because the intent should not depend on that, and because a
+    # later reader comparing against a range would otherwise have to rediscover
+    # why NaN does not slip through the ordered comparisons.
+    @{ Name = 'whole-without-the-finite-test'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'; Passes = $true
+       Edits = @(@{ F = '    value.is_finite() && value.fract() == 0.0 && value >= low && value <= high'
+                    R = '    value.fract() == 0.0 && value >= low && value <= high' }) }
+
+    # `plain` is shared, so one edit needs three targets: the same removal is
+    # covered in one place and dead in two, and a control that ran only against
+    # this phase's suite would have printed REDUNDANT RULE CONFIRMED whether or
+    # not anything covered it. A redundancy control on a shared helper has to be
+    # wider than one on a private function - that generalisation is worth more
+    # than the finding that produced it.
+    #
+    # Every description and collider field is required, so a table carrying an
+    # unknown name either has too many keys, which the count above refuses, or
+    # displaces a required one, which the field read refuses. `SPRITE_FIELDS` is
+    # six *optional* names, so `{width = 8, bogus = 1}` is two keys under the
+    # count limit with nothing else to refuse it.
+    @{ Name = 'plain-unknown-names-in-sprite-options'; File = 'src/scripting/utilities.rs'
+       Test = 'sprite_options_reject_metatables_unknown_fields_and_coercions'
+       Target = @('--test', 'script_assets') + $features
+       Marker = 'accepted an invalid option'
+       Edits = @(@{ F = $plainUnknownName; R = '' }) }
+
+    @{ Name = 'plain-unknown-names-in-map-schemas'; File = 'src/scripting/utilities.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'; Passes = $true
+       Edits = @(@{ F = $plainUnknownName; R = '' }) }
+
+    @{ Name = 'plain-unknown-names-in-collider-options'; File = 'src/scripting/utilities.rs'
+       Test = 'arguments_and_collider_options_are_refused_without_narrowing'; Passes = $true
+       Edits = @(@{ F = $plainUnknownName; R = '' }) }
+
+    # --- Self-tests: controls the harness must refuse ------------------------
+    #
+    # There is otherwise no control on the controls, and this harness's own rule
+    # applies to itself: a gate that cannot be observed failing is not covered.
+    # One per gate, each built on a genuine instance of what that gate catches
+    # rather than a synthetic stand-in, and each fails naming the gate if it is
+    # ever removed.
+    #
+    # They run last because the stale-binary one needs a previous build in the
+    # copy's target directory to be skipped in favour of.
+
+    @{ Name = 'self-test-clobbered-source'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Clobber = $true; Expect = 'the patched source changed under the run'
+       Edits = @(@{ F = $arrayMetatable; R = '' }) }
+
+    @{ Name = 'self-test-stale-binary'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Backdate = $true; Expect = 'cargo did not rebuild'
+       Edits = @(@{ F = $arrayMetatable; R = '' }) }
+
+    @{ Name = 'self-test-missing-test'; File = 'src/scripting/tilemap.rs'
+       Test = 'a_test_name_that_does_not_exist'
+       Expect = 'did not execute exactly one test'
+       Edits = @(@{ F = $arrayMetatable; R = '' }) }
+
+    @{ Name = 'self-test-inert-edit'; File = 'src/scripting/tilemap.rs'
+       Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
+       Expect = 'did not fail with the rule removed'
+       Edits = @(@{ F = 'const CONVERSION_BATCH: usize = 256;'; R = 'const CONVERSION_BATCH: usize = 128;' }) }
+)
+
+$controlTree = New-ControlTree -Repo $controlRepo -Name 'script-tilemap-controls'
+$controlManifest = Join-Path $controlTree 'Cargo.toml'
+$controlOriginals = @{}
+foreach ($file in $controlSources) {
+    $controlOriginals[$file] = [IO.File]::ReadAllText((Join-Path $controlRepo $file))
+}
+function Restore-ControlSources {
+    foreach ($file in $controlSources) {
+        [IO.File]::WriteAllText((Join-Path $controlTree $file), $controlOriginals[$file], (New-Object Text.UTF8Encoding $false))
+    }
+}
+
+$controlFailures = @()
+# Every control's full cargo output, saved rather than summarised: a run that
+# disagrees with a serial one is a finding about the harness, and it cannot be
+# diagnosed from a one-line summary after the fact. Passing controls are kept
+# too, because the diagnosis is usually a comparison against one.
+$controlLogs = Join-Path $controlRepo 'target\script-tilemap-controls\runs'
+if (Test-Path -LiteralPath $controlLogs) { Remove-Item -LiteralPath $controlLogs -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $controlLogs | Out-Null
+function Save-ControlOutput {
+    param([string]$Name, [string]$Text)
+    [IO.File]::WriteAllText((Join-Path $controlLogs "$Name.txt"), $Text, (New-Object Text.UTF8Encoding $false))
+}
+try {
+    foreach ($control in $controls) {
+        # An edit defaults to the control's own file but may name another, so a
+        # rule that two files now enforce jointly can be removed from both.
+        $patched = @{}
+        foreach ($file in $controlSources) { $patched[$file] = $controlOriginals[$file] }
+        $missing = $false
+        foreach ($edit in $control.Edits) {
+            $file = if ($edit.File) { $edit.File } else { $control.File }
+            if (-not $patched[$file].Contains($edit.F)) { $missing = $true; break }
+            $patched[$file] = $patched[$file].Replace($edit.F, $edit.R)
+        }
+        if ($missing) {
+            $controlFailures += "$($control.Name): anchor no longer matches $($control.File); the control is stale, not the code"
+            continue
+        }
+
+        foreach ($file in $controlSources) {
+            [IO.File]::WriteAllText((Join-Path $controlTree $file), $patched[$file], (New-Object Text.UTF8Encoding $false))
+        }
+        if ($control.Backdate) {
+            # Self-test for the rebuild gate. Cargo decides freshness by
+            # modification time, so sources that look older than the last build
+            # are skipped and the previous binary runs with the mutation
+            # compiled out entirely. A genuine instance of the failure mode that
+            # gate catches, not a synthetic stand-in for it.
+            $stale = (Get-Date).AddDays(-30)
+            foreach ($file in $controlSources) {
+                (Get-Item -LiteralPath (Join-Path $controlTree $file)).LastWriteTime = $stale
+            }
+        }
+        $target = if ($control.Target) { $control.Target } else { $bindings }
+        $arguments = @('test', '--manifest-path', $controlManifest)
+        if ($Release) { $arguments += '--release' }
+        $arguments += $target + @('--', $control.Test)
+        $output = & cargo @arguments 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        if ($control.Clobber) {
+            # Self-test for the patch-survival gate. The cargo result is
+            # identical to a real detection; only the evidence chain is broken,
+            # so the harness must discard a conclusion that looks correct.
+            foreach ($file in $controlSources) {
+                [IO.File]::WriteAllText((Join-Path $controlTree $file), $controlOriginals[$file], (New-Object Text.UTF8Encoding $false))
+            }
+        }
+        # Read back before restoring. This establishes that the patch was still
+        # in place when cargo exited, which is weaker than "cargo compiled it" -
+        # a clobber reverted mid-run would pass - but there is no cheap way to
+        # observe the file during a compile, and every instance observed so far
+        # has been persistent.
+        $applied = $true
+        foreach ($file in $controlSources) {
+            if ([IO.File]::ReadAllText((Join-Path $controlTree $file)) -ne $patched[$file]) {
+                $applied = $false
+            }
+        }
+        Restore-ControlSources
+        Save-ControlOutput -Name $control.Name -Text $output
+
+        $where = ($output -split "`r?`n" | Where-Object { $_ -match 'panicked at|assertion|left:|right:' } | Select-Object -First 3) -join ' | '
+        # A zero exit is not evidence on its own: a filter that selects no test
+        # also exits zero, and so does a stale binary cargo decided not to
+        # rebuild. Both would read as "the guard is dead" or "the guard is live"
+        # at random, which is worse than no harness. Require the run to say it
+        # executed exactly one test, and a detecting control to say it failed.
+        $verdict = $null
+        $note = $null
+        if (-not $applied) {
+            $verdict = "$($control.Name): the patched source changed under the run, so it proves nothing"
+        } elseif ($output -match 'error\[E\d+\]|could not compile') {
+            $verdict = "$($control.Name): did not compile, so it proves nothing"
+        } elseif ($output -notmatch 'Compiling protogine') {
+            # Every control edits a source file, so a correct run must rebuild.
+            # If cargo decided the crate was up to date, it ran a binary built
+            # from different code and the result is about that binary, not this
+            # control. Observed when two runs of this harness overlapped.
+            $verdict = "$($control.Name): cargo did not rebuild, so the run is about a stale binary"
+        } elseif ($output -notmatch 'running 1 test(?!s)') {
+            $verdict = "$($control.Name): the run did not execute exactly one test, so it proves nothing"
+        } elseif (-not $control.Passes -and $output -notmatch 'test result: FAILED') {
+            $verdict = "$($control.Name): $($control.Test) did not fail with the rule removed"
+        } elseif ($control.Passes) {
+            if ($code -ne 0) { $verdict = "$($control.Name): recorded as redundant, but it failed at $where" }
+            else { $note = "REDUNDANT RULE CONFIRMED: $($control.Name)" }
+        } elseif ($code -eq 0) {
+            $verdict = "$($control.Name): $($control.Test) still passed with the rule removed"
+        } elseif (-not $control.Expect -and $output -notmatch [regex]::Escape($control.Marker)) {
+            $verdict = "$($control.Name): failed at '$where', not '$($control.Marker)'"
+        } else {
+            $note = "CONTROL DETECTED: $($control.Name)"
+        }
+
+        if ($control.Expect) {
+            # A self-test: the harness is supposed to refuse this one. Reaching a
+            # verdict at all, or the wrong verdict, means a gate is not working.
+            if (-not $verdict) {
+                $controlFailures += "$($control.Name): the harness accepted a control it must refuse; the '$($control.Expect)' gate is not working"
+            } elseif ($verdict -notmatch [regex]::Escape($control.Expect)) {
+                $controlFailures += "$($control.Name): refused as '$verdict', not '$($control.Expect)'"
+            } else {
+                "SELF-TEST REFUSED AS EXPECTED: $($control.Name)"
+            }
+        } elseif ($verdict) {
+            $controlFailures += $verdict
+        } else {
+            $note
+        }
+    }
+} finally {
+    Restore-ControlSources
+}
+
+$arguments = @('test', '--manifest-path', $controlManifest)
+if ($Release) { $arguments += '--release' }
+$arguments += $bindings
+$output = & cargo @arguments 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { $controlFailures += 'the suite did not return to green after restoring' }
+"`nrestored: " + (($output -split "`r?`n" | Where-Object { $_ -match 'test result' }) -join '')
+
+Exit-ControlLock -Path $controlLock
+
+if ((Get-SourceFingerprint -Repo $controlRepo -Files $controlSources) -ne $controlFingerprint) {
+    $controlFailures += 'the working tree changed during the run; controls must only ever patch the copy'
+}
+
+if ($controlFailures.Count -gt 0) {
+    "`nUNCOVERED GUARDS:"
+    $controlFailures | ForEach-Object { "  $_" }
+    "`nFull cargo output for each: $controlLogs"
+    "A red result from a run that overlapped another cargo invocation is worth"
+    "re-running serially before it is believed; see the header."
+    exit 1
+}
+# Reported as its three parts rather than one total. A single number invites a
+# doc to say "N controls, M of them redundancies" and get the arithmetic between
+# them wrong, which is exactly what happened once here.
+$guards = ($controls | Where-Object { -not $_.Expect }).Count
+$redundant = ($controls | Where-Object { $_.Passes }).Count
+$selfTests = $controls.Count - $guards
+"`nAll $guards binding guards behaved as specified: $($guards - $redundant) detected with the" `
+    + " rule removed and $redundant confirmed redundant. The harness refused all $selfTests self-tests."

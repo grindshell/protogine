@@ -7,6 +7,7 @@ mod filesystem;
 mod modules;
 #[cfg(feature = "native-plugins")]
 mod native;
+mod tilemap;
 mod utilities;
 mod world;
 

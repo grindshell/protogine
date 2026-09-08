@@ -1,11 +1,12 @@
-//! Per-callback resource accounting shared by the data, filesystem, asset and
-//! drawing bindings.
+//! Per-callback resource accounting and shared option-table inspection, used by
+//! the data, filesystem, asset, drawing and world bindings.
 //!
 //! The three call counters are independent on purpose: a metadata query must
 //! not consume the utility budget, and a per-tile draw loop's internal
 //! dimension lookups must not consume the asset budget.
 
 use super::Budget;
+use mlua::{Table, Value};
 use std::cell::Cell;
 
 pub(super) const BYTE_LIMIT: usize = 1024 * 1024;
@@ -87,4 +88,38 @@ impl<'a> UtilityBudget<'a> {
             "filesystem transfer limit exceeded",
         )
     }
+}
+
+/// Reject metatables, unknown names and numeric keys, stopping at the first
+/// unexpected key. Values are read without metamethods.
+///
+/// The counter makes the iteration bound evident rather than leaving it to be
+/// re-derived: keys are unique, so a table can carry at most `fields.len()`
+/// known names before an unknown one stops the walk either way. Which of the
+/// two refusals reports first depends on the VM's iteration order, so neither
+/// message is a contract; both refuse the same tables.
+pub(super) fn plain(table: &Table, fields: &[&str], what: &str) -> mlua::Result<()> {
+    if table.metatable().is_some() {
+        return Err(mlua::Error::runtime(format!(
+            "{what} must be a plain table with no metatable"
+        )));
+    }
+    let mut seen = 0;
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        seen += 1;
+        if seen > fields.len() {
+            return Err(mlua::Error::runtime(format!("{what} has too many fields")));
+        }
+        let known = match &key {
+            Value::String(name) => name
+                .to_str()
+                .is_ok_and(|name| fields.iter().any(|field| *field == name.as_ref())),
+            _ => false,
+        };
+        if !known {
+            return Err(mlua::Error::runtime(format!("{what} has an unknown field")));
+        }
+    }
+    Ok(())
 }

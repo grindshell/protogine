@@ -138,8 +138,8 @@ pub struct Kernel {
     colliders: u32,
     /// Reusable sweep scratch, reserved only once a collider exists.
     bodies: Vec<Candidate>,
-    /// Cell-visit units charged by map and collider calls since the last reset.
-    /// Phase 3 owns the per-callback ceiling; this is the accounting it needs.
+    /// Cell-visit units charged by map and collider calls in this callback,
+    /// against [`MAX_CALLBACK_WORK`].
     callback_work: u64,
     /// Cell-visit units the most recent fixed pass charged, for stress runs.
     fixed_work: u64,
@@ -262,7 +262,7 @@ impl Kernel {
             .map(|body| *body)
         {
             let map = self.tilemap.as_ref().ok_or(KernelError::NoTileMap)?;
-            let mut work = WorkBudget::new(MAX_CALLBACK_WORK);
+            let mut work = Self::remaining_work(self.callback_work);
             let placement =
                 collision::check_placement(map, &collider, position.x, position.y, &mut work);
             self.callback_work = self.callback_work.saturating_add(work.used());
@@ -337,7 +337,7 @@ impl Kernel {
             ..
         } = self;
         let info = map.info();
-        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);
+        let mut work = Self::remaining_work(*callback_work);
         let mut refusal = Ok(());
         for (position, collider) in world.query::<(&Position, &TileCollider)>().iter() {
             refusal = collider
@@ -417,7 +417,7 @@ impl Kernel {
         let becomes_solid = map.solid_definition(id)? && !map.solid_definition(previous)?;
         // Metered like every other entry point, so `MAX_CALLBACK_WORK` bounds
         // this one too rather than relying on the collider limit to do it.
-        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);
+        let mut work = Self::remaining_work(*callback_work);
         let mut outcome = work.charge(1).map_err(KernelError::from);
         if becomes_solid && outcome.is_ok() {
             for (position, collider) in world.query::<(&Position, &TileCollider)>().iter() {
@@ -468,7 +468,7 @@ impl Kernel {
             .world
             .get::<&Position>(entity)
             .expect("every entity has a position");
-        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);
+        let mut work = Self::remaining_work(self.callback_work);
         let placement =
             collision::check_placement(map, &collider, position.x, position.y, &mut work);
         self.callback_work = self.callback_work.saturating_add(work.used());
@@ -508,21 +508,45 @@ impl Kernel {
         self.bodies.capacity() * size_of::<Candidate>()
     }
 
-    /// Cell-visit units charged by map and collider calls since the last reset.
+    /// Cell-visit units charged by map and collider calls in this callback,
+    /// against [`MAX_CALLBACK_WORK`](crate::collision::MAX_CALLBACK_WORK).
     ///
-    /// **Accounting, not enforcement.** Nothing refuses a call because this has
-    /// grown: each entry point is separately bounded by
-    /// [`MAX_CALLBACK_WORK`](crate::collision::MAX_CALLBACK_WORK), but the
-    /// aggregate ceiling across a callback belongs to Phase 3, which owns the
-    /// callback boundary and is the only thing that can say when one begins.
-    /// The fixed pass has its own budget and never counts here.
+    /// This is enforced, not merely observed: every entry point below budgets
+    /// itself against what remains rather than against the whole ceiling, so
+    /// the last call in an exhausted callback is refused instead of being
+    /// allowed one more full call's worth of work. The fixed pass has its own
+    /// budget and never counts here.
     pub fn callback_work(&self) -> u64 {
         self.callback_work
     }
 
-    /// Begin a new callback's tile-work accounting.
-    pub fn reset_callback_work(&mut self) {
+    /// Begin a callback's tile-work accounting.
+    ///
+    /// The kernel cannot see callback boundaries on its own, so the caller
+    /// driving them says when one starts. Nothing else resets this: a session
+    /// that never calls it accumulates across its whole life and eventually
+    /// refuses, which is the safe direction for a caller that forgot.
+    pub fn begin_callback(&mut self) {
         self.callback_work = 0;
+    }
+
+    /// Charge tile work performed outside the kernel against this callback's
+    /// ceiling, such as description elements a binding copied and validated.
+    ///
+    /// Charged before the refusal, exactly as [`WorkBudget`] is, so a request
+    /// that is rejected after walking a quarter of a million elements still
+    /// pays for them.
+    pub fn charge_callback_work(&mut self, units: u64) -> Result<(), KernelError> {
+        self.callback_work = self.callback_work.saturating_add(units);
+        if self.callback_work > MAX_CALLBACK_WORK {
+            return Err(CollisionError::Work.into());
+        }
+        Ok(())
+    }
+
+    /// A budget for the tile work this callback has left.
+    fn remaining_work(callback_work: u64) -> WorkBudget {
+        WorkBudget::new(MAX_CALLBACK_WORK.saturating_sub(callback_work))
     }
 
     /// Cell-visit units the most recent fixed pass charged, against

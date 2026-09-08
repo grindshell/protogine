@@ -351,8 +351,9 @@ allowing a batch of further expensive calls. Budget failures remain latched.
 
 Each entity has a finite f64 position in world pixels and velocity in pixels per
 second. After a successful script update, the kernel integrates velocity over
-`1/60` second. Invalid system results fault the session. There is no collision,
-tile-map API, or generic component API yet.
+`1/60` second, sweeping any entity that carries a tile collider and moving the
+rest in a straight line. Invalid system results fault the session. There is no
+generic component API yet.
 
 | World API | Behavior |
 | --- | --- |
@@ -373,6 +374,59 @@ unpublished entity. Live entities are capped at 16,384, with
 4,096 world call attempts per callback, including malformed or missing arguments;
 exceeding either limit faults the session even through `pcall`. Ordinary validation
 and permission errors remain catchable.
+
+### Tile maps and colliders
+
+One optional grid lives in the kernel and is the authority for both collision and
+what a script draws. Tile coordinates are zero-based, IDs are whole numbers, and
+ID 0 is empty and never solid. A tile occupies
+`[origin + index * tile, origin + (index + 1) * tile)` on each axis, so a body
+whose edge lands exactly on a face touches it without overlapping it.
+
+| Map and collider API | Behavior |
+| --- | --- |
+| `ctx.world.set_tilemap(desc)` | Validate and copy a complete description, then install or replace the map atomically |
+| `ctx.world.clear_tilemap()` | Remove the map; refused while any collider is attached, and succeeds when none is installed |
+| `ctx.world.tilemap_info()` | Owned `{columns, rows, tile_width, tile_height, origin_x, origin_y}`, or nil |
+| `ctx.world.tile(column, row)` | The numeric ID at in-bounds coordinates |
+| `ctx.world.tile_solid(column, row)` | Whether a tile blocks; the one call accepting coordinates outside the grid, where the answer is always true |
+| `ctx.world.tiles_region(column, row, columns, rows)` | Owned flat row-major array of IDs, at most 4,096 per call |
+| `ctx.world.set_tile(column, row, id)` | Change one cell; refused if it would trap a body |
+| `ctx.world.set_tile_collider(entity, options)` | Attach or replace a collider; nil removes it. Attaching needs an installed map |
+| `ctx.world.tile_collider(entity)` | Owned `{offset_x, offset_y, width, height}`, or nil |
+
+`desc` carries exactly `columns`, `rows`, `tile_width`, `tile_height`,
+`origin_x`, `origin_y`, `solids` and `cells`; all eight are required. `solids` is
+a dense array of 1 to 1,024 booleans where element `i` defines ID `i`, and
+`cells` is a dense array of exactly `columns * rows` IDs in `0..#solids`, read as
+`cells[row * columns + column + 1]`. Collider options carry exactly `offset_x`,
+`offset_y`, `width` and `height`. Nothing accepts defaults, numeric strings,
+truthy substitutes, metatables, unexpected fields, holes or hash keys, and every
+description is copied rather than retained, so editing the table afterwards
+cannot reach the installed map.
+
+Dimensions are 1 to 1,024 cells with at most 262,144 of them; tiles are 1 to
+1,024 pixels; every map and collider edge stays within +/-16,777,216 world
+pixels. A collider offset is at most 4,096 pixels and each extent runs from
+1/256 of a pixel to the smaller of eight tiles and 4,096 pixels. At most 1,024
+colliders may be attached at once.
+
+A collider makes the entity sweep instead of flying free: X resolves fully across
+every crossed tile face, then Y resolves from the new X, and a blocked body stops
+flush against the wall while keeping the velocity it was given, so holding a
+direction keeps pressing. Outside the map is solid. `set_position` stays an
+immediate teleport and is never swept, but a collider's destination must be a
+legal placement, so crossing a wall to a free cell works while landing in one is
+refused. Map replacement, cell edits and attachment each preserve non-overlap or
+refuse without changing anything.
+
+Beyond the shared 4,096 attempts, a callback may charge 1,048,576 units of tile
+work - one per description element copied, cell visited or body checked - and
+receive 262,144 region IDs. A refused region read is charged too, for what a
+region read could have returned rather than for what it asked for, so repeating
+one is bounded while a single out-of-range request cannot exhaust the ceiling on
+its own. Exhausting a ceiling, or the collider limit, faults the session through
+`pcall`; schema, bounds, placement and handle errors stay catchable.
 
 `ctx.input.held(name)`, `pressed(name)`, and `released(name)` read logical buttons
 `up`, `down`, `left`, `right`, `action`, and `cancel`. The Rust caller supplies an
