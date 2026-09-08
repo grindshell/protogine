@@ -14,7 +14,7 @@
 //! claimed to fit do, and the timing. Each mode also asserts **its own
 //! configuration was exercised**, not only its result - Phase 3 shipped a
 //! stress arrangement that charged exactly zero units and reported success, and
-//! a mode measuring "1,024 bodies across 32 maps" can silently measure 1,024
+//! a mode measuring "1,024 bodies across 64 maps" can silently measure 1,024
 //! bodies on map 0 and print a plausible smaller number.
 //!
 //! There are no `control-*` modes. M1's Phase 0 had them because it froze
@@ -94,9 +94,10 @@ fn map_of(columns: u32, rows: u32) -> TileMap {
 ///
 /// Both coordinates vary, so both sweep legs vary; 21 and 50 are coprime and
 /// their lowest common multiple exceeds 1,024, so the pair does not repeat
-/// inside a battery. An earlier version held the column at 1, which made the X
-/// leg charge an identical 952 units for every body - 63% of the average cost,
-/// invariant across the whole battery. The row range is bounded by the shorter
+/// inside a battery. An earlier version held the column fixed, which on the
+/// 128x128 shape it then used made the X leg charge an identical 952 units for
+/// every body, 63% of the average cost, invariant across the whole battery.
+/// The row range is bounded by the shorter
 /// axis: a body of eight tiles on a 64-row map must start above row 55 or it
 /// charges nothing on Y.
 fn start_cell(i: usize) -> (u32, u32) {
@@ -129,9 +130,10 @@ fn body(i: usize) -> ((f64, f64), (f64, f64)) {
 /// Adding a constant to every body's charge - an M2 pass resolving membership
 /// once per body, say - leaves the spread untouched, leaves the two arms equal,
 /// and sits far inside the arrangement's own worst case. Before this prediction
-/// existed, a per-body overhead of up to 788 units each, 52% of a body's actual
-/// average cost, passed every assertion in the `work` mode. Only a predicted
-/// total catches an additive term, and no amount of variation ever will.
+/// existed, a per-body overhead of up to 609 units each - 54% of a body's actual
+/// average cost of 1,119 - passed every assertion in the `work` mode. Only a
+/// predicted total catches an additive term, and no amount of variation ever
+/// will.
 fn predicted(i: usize) -> u64 {
     let (column, row) = start_cell(i);
     let faces = |side: u32, from: u32| u64::from(side - (1 + from + SPAN_TILES));
@@ -228,10 +230,10 @@ fn storage() {
 }
 
 fn work() {
-    // Both arms use identical geometry. "Spread across 32 maps" under a fixed
+    // Both arms use identical geometry. "Spread across many maps" under a fixed
     // aggregate necessarily means smaller maps, so comparing a 1024x256 map
-    // against 32 128x128 ones would vary geometry and distribution together and
-    // measure a ratio of about 0.2 rather than a per-map term.
+    // against the maximum map count would vary geometry and distribution
+    // together and measure a ratio of about 0.15 rather than a per-map term.
     let single = vec![map_of(BALANCE.0, BALANCE.1)];
     let many: Vec<TileMap> = (0..MAX_MAPS)
         .map(|_| map_of(BALANCE.0, BALANCE.1))
@@ -278,6 +280,36 @@ fn work() {
     // admits - as well as for a per-map one.
     let predicted_total = check_predicted(&one_charges, "one map");
     assert_eq!(check_predicted(&many_charges, "spread"), predicted_total);
+
+    // `predicted` reads the same `start_cell` the battery does, so it cannot
+    // see the arrangement changing underneath both of them. Two checks close
+    // that, neither of them a second copy of `start_cell`.
+    //
+    // Order matters here and it took a breakage to see why. Both checks catch
+    // a lost column, but the total moves whenever the spread does, so with the
+    // literal first the distinct-pair check never fires at all and its
+    // diagnosis is permanently pre-empted. The specific one goes first.
+    //
+    // First, the coprimality argument in `start_cell`'s comment, asserted
+    // rather than left as a number-theoretic claim nothing checks: lcm(21, 50)
+    // is 1,050, so no two of the 1,024 bodies share a start.
+    let distinct: std::collections::HashSet<(u32, u32)> =
+        (0..MAX_LIVE_COLLIDERS as usize).map(start_cell).collect();
+    assert_eq!(
+        distinct.len(),
+        MAX_LIVE_COLLIDERS as usize,
+        "every body must start somewhere different, which is what the moduli are chosen for"
+    );
+    // Then the total, pinned to a literal because a literal cannot follow
+    // `start_cell` anywhere. The same convention as
+    // `the_fixed_pass_ceiling_cannot_be_reached_under_the_frozen_limits`
+    // pinning 11,796,480 rather than recomputing it: a deliberate change to the
+    // arrangement updates the number, and the diff records that a measurement
+    // moved.
+    assert_eq!(
+        predicted_total, 1_145_600,
+        "the arrangement's total is pinned; if this moved deliberately, update it and say so"
+    );
 
     let one: u64 = one_charges.iter().sum();
     let spread: u64 = many_charges.iter().sum();

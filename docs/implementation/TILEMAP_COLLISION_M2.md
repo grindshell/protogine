@@ -547,7 +547,7 @@ not latency.
 
 **The probe's own assertions were watched failing**, because a mode that reports
 a plausible number while measuring the wrong arrangement is this plan's most
-frequent defect. Six deliberate breakages, each firing at its own named
+frequent defect. Eight deliberate breakages, each firing at its own named
 assertion and nowhere else: the spread arm put on one map fails *every map must
 carry its share of bodies*; bodies given zero travel fail *every body must charge
 something*; bodies given identical start rows fail *per-body cost must vary*; one
@@ -560,10 +560,30 @@ five were satisfied by a defect none of them could see.
 
 The probe's start column varies as well as its row, which is presentation rather
 than correctness now that the prediction guards the arrangement. It was worth
-fixing anyway: holding the column at 1 made the X leg charge an identical 952
+fixing anyway: holding the column fixed made the X leg charge an identical 952
 units for every body, 63% of the average cost invariant across the whole battery,
 so a mode advertising "the absolute work an M2-shaped arrangement charges" was
 exercising one axis.
+
+**Two more guards close the prediction's residual coupling.** `predicted` reads
+the same `start_cell` the battery does, so it cannot see the arrangement changing
+underneath both of them - it would predict a degenerate battery correctly and
+agree. That is narrow: sharing `start_cell` cannot hide a wrong solver, a
+per-body term or a per-map term, all of which still fail. But it is blind to
+exactly the defect the column variation just fixed, so a refactor could reinstate
+it silently. The total is therefore pinned to a literal, which cannot follow
+`start_cell` anywhere - the same convention as
+`the_fixed_pass_ceiling_cannot_be_reached_under_the_frozen_limits` pinning
+11,796,480 - and the coprimality claim in `start_cell`'s comment is asserted as
+1,024 distinct starts rather than left as prose. Both are the review session's.
+
+Ordering them took a breakage to get right, and it is the phase's own lesson
+turning up inside its fix. With the literal first, the distinct-pair check never
+fired at all: the total moves whenever the spread does, so the literal always
+pre-empted the more specific diagnosis, leaving a guard nobody could ever read.
+The specific one goes first, and each now has a breakage of its own - `i % 1`
+fires the distinct-pair check, `i % 23` changes the total while keeping 1,024
+distinct starts and fires the literal.
 
 ### What the probe found that the contract did not predict
 

@@ -45,7 +45,7 @@ PASS MARKER CONFIRMED: shapes
 
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode timing
 charged 1145600 units over 15 passes
-p50 1.9201ms  p95 2.2106ms  max 2.3687ms
+p50 1.8088ms  p95 1.8864ms  max 1.9452ms
 tick period is 16.667 ms; this is one pass, not a frame
 TILEMAP-M2 PASS mode=timing
 PASS MARKER CONFIRMED: timing
@@ -53,7 +53,7 @@ PASS MARKER CONFIRMED: timing
 --- The probe's own assertions, watched failing -------------------------------
 
 Each breakage applied to examples/tilemap_m2_probe.rs, built, run, reverted;
-the tree confirmed byte-identical after each. All six re-run at 64 maps.
+the tree confirmed byte-identical after each. All eight re-run at 64 maps.
 
   spread arm all on one map             exit=101  every map must carry its share of bodies
   bodies that do not move               exit=101  every body must charge something
@@ -62,6 +62,8 @@ the tree confirmed byte-identical after each. All six re-run at 64 maps.
   a shape claimed to fit that does not  exit=101  does not behave as the contract claims
   one unit per body for membership      exit=101  every body must charge exactly what its
                                                   geometry predicts, and body 0 did not
+  column variation lost (i%1)           exit=101  every body must start somewhere different
+  moduli changed, spread intact (i%23)  exit=101  the arrangement's total is pinned
 
 The sixth passes all five of the others. Without the prediction, a per-body
 overhead of up to 609 units each - 54% of a body's average cost of 1,119 -
@@ -78,6 +80,6 @@ of 1,769,472 against a measured 1,145,600.
 
 --- SHA-256 of the probe and its runner, as shipped ----------------------------
 
-  DF5C1F7619F456058DEE0CA24D84CCAC1536708A45CC35CA9B7B841C57B0CA95  examples/tilemap_m2_probe.rs
+  D7D20B1C073B30FE52E3399011DEAEA5FB3C92C17572E4C6F68C37AEDEF21180  examples/tilemap_m2_probe.rs
   D0865F0BC1C8E7894D409F4692ED8F790039515B7D2DEB0860B53A7F39076930  tools/run_tilemap_m2_probe.ps1
-  B4F752860745830C2E4B0EFFAD37877F3977C14DE98E4C66A1FB0607DA317DB2  docs/implementation/TILEMAP_COLLISION_M2.md
+  32866D33AFEB606E0CE28EA38BDE26151C26F1810C83D5927AB3A159833C6A8C  docs/implementation/TILEMAP_COLLISION_M2.md
