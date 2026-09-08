@@ -41,9 +41,10 @@ const BALANCE_SIDE: u32 = 128;
 /// The largest single map M1's schema admits, used as the staging candidate.
 const WIDEST: (u32, u32) = (1_024, 256);
 const TILE: u32 = 32;
-/// Eight tiles, the maximum collider extent, so a sweep enumerates the full
-/// nine-cell perpendicular span M1's ceiling arithmetic assumes.
-const BODY: f64 = 8.0 * TILE as f64;
+/// Eight tiles, the maximum collider extent. A tile-aligned body of this size
+/// spans exactly eight cells perpendicular to its travel.
+const SPAN_TILES: u32 = 8;
+const BODY: f64 = SPAN_TILES as f64 * TILE as f64;
 
 /// Allocate the way `src/scripting/tilemap.rs` does, not with `vec![...]`.
 ///
@@ -82,19 +83,49 @@ fn map_of(columns: u32, rows: u32) -> TileMap {
     .expect("a legal map")
 }
 
+/// The tile body `i` starts on inside its own map.
+///
+/// Both coordinates vary, so both sweep legs vary; 21 and 100 are coprime, so
+/// the pair does not repeat inside a battery of 1,024. An earlier version held
+/// the column at 1, which made the X leg charge an identical 952 units for
+/// every body - 63% of the average cost, invariant across the whole battery.
+fn start_cell(i: usize) -> (u32, u32) {
+    ((i % 21) as u32, (i % 100) as u32)
+}
+
 /// Where body `i` starts inside its own map, and how far it asks to travel.
 ///
 /// Identical in both arms of the `work` comparison, which is what leaves the
-/// number of distinct map objects as the only difference between them. The
-/// starting row varies so per-body cost varies too: a battery where every body
-/// costs the same would hide a per-body term as easily as a per-map one.
+/// number of distinct map objects as the only difference between them.
 fn body(i: usize) -> ((f64, f64), (f64, f64)) {
-    let row = (i % 100) as f64;
-    let start = (f64::from(TILE), f64::from(TILE) + row * f64::from(TILE));
+    let (column, row) = start_cell(i);
+    let start = (f64::from((1 + column) * TILE), f64::from((1 + row) * TILE));
     // Far enough to reach the far boundary on both axes from anywhere inside,
     // so every sweep clamps rather than stopping short by arithmetic accident.
     let span = f64::from(BALANCE_SIDE * TILE);
     (start, (span, span))
+}
+
+/// What `sweep` must charge for body `i`, derived from the map geometry rather
+/// than from the solver.
+///
+/// The leading edge starts on face `1 + column + SPAN_TILES` and enumerates
+/// every face up to the last interior one - the boundary face clamps before a
+/// cell is inspected and charges nothing - with `SPAN_TILES` perpendicular
+/// cells at each. The Y leg does the same from the resolved X, where the body
+/// is flush against the right boundary and still spans `SPAN_TILES` columns.
+///
+/// **This is what actually guards the arrangement, and "cost must vary" is not.**
+/// Adding a constant to every body's charge - an M2 pass resolving membership
+/// once per body, say - leaves the spread untouched, leaves the two arms equal,
+/// and sits far inside the arrangement's own worst case. Before this prediction
+/// existed, a per-body overhead of up to 788 units each, 52% of a body's actual
+/// average cost, passed every assertion in the `work` mode. Only a predicted
+/// total catches an additive term, and no amount of variation ever will.
+fn predicted(i: usize) -> u64 {
+    let (column, row) = start_cell(i);
+    let faces = |from: u32| u64::from(BALANCE_SIDE - (1 + from + SPAN_TILES));
+    u64::from(SPAN_TILES) * (faces(column) + faces(row))
 }
 
 /// Sweep every body against the map `assign` gives it, sharing one budget.
@@ -122,6 +153,24 @@ fn sweep(maps: &[TileMap], assign: impl Fn(usize) -> usize) -> (Vec<u64>, Vec<us
         received[index] += 1;
     }
     (charges, received)
+}
+
+/// Check every body against the geometry and return the total.
+///
+/// Reports the first disagreement rather than the two vectors: `assert_eq!` on
+/// 1,024-element slices prints both in full, which is unreadable at exactly the
+/// moment someone needs to know which body is wrong and by how much.
+fn check_predicted(charges: &[u64], arm: &str) -> u64 {
+    let mut total = 0;
+    for (i, measured) in charges.iter().enumerate() {
+        let want = predicted(i);
+        assert_eq!(
+            *measured, want,
+            "{arm}: every body must charge exactly what its geometry predicts, and body {i} did not"
+        );
+        total += measured;
+    }
+    total
 }
 
 /// The worst case M1's ceiling arithmetic gives for this arrangement:
@@ -204,16 +253,28 @@ fn work() {
         "every body must charge something; a battery of free sweeps proves nothing"
     );
     assert!(many_charges.iter().all(|charge| *charge > 0));
+    // This catches a degenerate battery - every body given the same start, so
+    // the arrangement is one measurement repeated - which the prediction below
+    // cannot, because it would predict the degenerate figure correctly. It does
+    // *not* catch a per-body term, and an earlier comment here claimed it did.
     assert!(
         one_charges.iter().any(|charge| *charge != one_charges[0]),
-        "per-body cost must vary, or a per-body term would hide as easily as a per-map one"
+        "per-body cost must vary, or the battery is one measurement repeated"
     );
+
+    // The check that actually bounds the arrangement, in both arms. Derived
+    // from the geometry, not from the solver, so it fails for a per-body term
+    // of any shape - including the additive one every other assertion here
+    // admits - as well as for a per-map one.
+    let predicted_total = check_predicted(&one_charges, "one map");
+    assert_eq!(check_predicted(&many_charges, "spread"), predicted_total);
 
     let one: u64 = one_charges.iter().sum();
     let spread: u64 = many_charges.iter().sum();
     let ceiling = ceiling_for(BALANCE_SIDE);
     println!("one 128x128 map       {one} units");
     println!("32 identical 128x128  {spread} units");
+    println!("geometry predicts     {predicted_total} units");
     println!("arrangement ceiling   {ceiling} units");
     println!("fixed-pass ceiling    {MAX_FIXED_PASS_WORK} units");
 

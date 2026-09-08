@@ -1,12 +1,14 @@
 M2 Phase 0 feasibility probe
-Windows MSVC x64, rustc 1.95.0 (59807616e 2026-04-14), against commit aaad3ac
+Windows MSVC x64, rustc 1.95.0 (59807616e 2026-04-14), against commit 78e8b7e
 
 cargo build --release --example tilemap_m2_probe --no-default-features
 
 Prototype geometry over a Vec<TileMap>, not the production kernel. The work
 mode's two arms are equal by construction - a Vec index has no per-map cost to
 grow - so that pair is a reference value for Phase 2 and not evidence on its
-own. The storage, shapes and timing figures are measurements.
+own. What does guard the arrangement is the per-body geometry prediction, which
+an equality cannot replace: a uniformly added per-body term leaves both arms
+equal.
 
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode storage
 aggregate cells   524288
@@ -17,8 +19,9 @@ TILEMAP-M2 PASS mode=storage
 PASS MARKER CONFIRMED: storage
 
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode work
-one 128x128 map       1551488 units
-32 identical 128x128  1551488 units
+one 128x128 map       1469888 units
+32 identical 128x128  1469888 units
+geometry predicts     1469888 units
 arrangement ceiling   2359296 units
 fixed-pass ceiling    16777216 units
 baseline pair equal; Phase 2 owns the assertion
@@ -36,35 +39,41 @@ TILEMAP-M2 PASS mode=shapes
 PASS MARKER CONFIRMED: shapes
 
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode timing
-charged 1551488 units over 15 passes
-p50 2.4121ms  p95 2.6885ms  max 2.7382ms
+charged 1469888 units over 15 passes
+p50 2.4289ms  p95 2.5739ms  max 2.7949ms
 tick period is 16.667 ms; this is one pass, not a frame
 TILEMAP-M2 PASS mode=timing
 PASS MARKER CONFIRMED: timing
 
---- The probe's own configuration assertions, watched failing ----------------
+--- The probe's own assertions, watched failing -------------------------------
 
 Each breakage was applied to examples/tilemap_m2_probe.rs, built, run, and
-reverted; the tree was confirmed byte-identical afterwards. A mode that reports
-a plausible number while measuring the wrong arrangement is this plan's most
-frequent defect, so these are the assertions that matter most here.
+reverted; the tree was confirmed byte-identical after each.
 
-  spread arm all on one map            exit=101  fired at: every map must carry its share of bodies
-  bodies that do not move              exit=101  fired at: every body must charge something
-  every body identical                 exit=101  fired at: per-body cost must vary
-  one map short of the aggregate       exit=101  fired at: the maximum map count must be built
-  a shape claimed to fit that does not exit=101  fired at: does not behave as the contract claims
+  spread arm all on one map             exit=101  every map must carry its share of bodies
+  bodies that do not move               exit=101  every body must charge something
+  every body identical                  exit=101  per-body cost must vary
+  one map short of the aggregate        exit=101  the maximum map count must be built
+  a shape claimed to fit that does not  exit=101  does not behave as the contract claims
+  one unit per body for membership      exit=101  every body must charge exactly what its
+                                                  geometry predicts, and body 0 did not
+                                                  left: 1905  right: 1904
+
+The sixth passes all five of the others. Before the prediction existed, a
+per-body overhead of up to 788 units each - 52% of a body's average cost of
+1,435 - passed every assertion in the work mode, because the only bound was the
+arrangement's worst case of 2,359,296 against a measured 1,469,888.
 
 --- Cross-check against M1 -----------------------------------------------------
 
   M1 Phase 2 long sweep : 11,386,880 units, p50 16.5-17.8 ms
-  M2 Phase 0 arrangement:  1,551,488 units, p50 2.4121 ms
-  ratio of units 7.34; 2.4121 x 7.34 = 17.7 ms, inside M1's recorded range.
+  M2 Phase 0 arrangement:  1,469,888 units, p50 2.4289 ms
+  ratio of units 7.75; 2.4289 x 7.75 = 18.8 ms, a little above M1's range.
   One point of comparison across different shapes and runs: an observation,
   not a model.
 
 --- SHA-256 of the probe and its runner, as shipped ----------------------------
 
-  0C06B3330515DC4DCCB8DA2E736A508152F1DA4AEAC785CB8A7D552BC8B35303  examples/tilemap_m2_probe.rs
+  8EAADA72CA73569261F574CF2534FD0529D96C0F8DEE5011F7C1F7ECF90C0BC0  examples/tilemap_m2_probe.rs
   D0865F0BC1C8E7894D409F4692ED8F790039515B7D2DEB0860B53A7F39076930  tools/run_tilemap_m2_probe.ps1
-  F1F26E7B7DC869BEFD4676F2059FE79DFAD22F85A58B0AF46D01335E5BDB73C9  docs/implementation/TILEMAP_COLLISION_M2.md
+  B6C9CCBAF846AB4702F12F7EB0226E14F34C2C86256C04EAD066C7DAC9A957DE  docs/implementation/TILEMAP_COLLISION_M2.md

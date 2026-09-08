@@ -378,6 +378,35 @@ values and says they are a property of the prototype rather than evidence; the
 assertion is Phase 2's. The check, the correction and the constant-geometry form
 are all the review session's.
 
+**The equality is necessary and not sufficient, so Phase 2 must assert a
+predicted total in both arms and keep the equality as the cheaper cross-check.**
+An equality can only see a term that *differs between the arms*. A per-body cost
+added uniformly - the M2 pass resolving membership once per body, which is a
+completely plausible implementation - raises both arms by the same amount, leaves
+them equal, and passes. So does every other assertion the Phase 0 probe carried
+before this was noticed: the spread is unchanged, the totals stay inside the
+arrangement's own worst case, and no amount of varying the battery helps, because
+variation does not expose an additive constant. **Only a prediction does.**
+
+The prediction is available in closed form. For a tile-aligned body of
+`SPAN_TILES` tiles starting on tile `(column, row)` of a `side x side` map and
+sweeping to both far boundaries, the leading edge enumerates every face from
+`1 + column + SPAN_TILES` up to the last interior one - the boundary face clamps
+before a cell is inspected and charges nothing - with `SPAN_TILES` perpendicular
+cells at each, and the Y leg does the same from the resolved X:
+
+> `charge(body) = SPAN_TILES * ((side - 1 - column - SPAN_TILES) + (side - 1 - row - SPAN_TILES))`
+
+The Phase 0 probe asserts that per body and reproduces its measurement exactly.
+**Before it existed, a per-body overhead of up to 788 units each - 52% of a
+body's actual average cost - passed every assertion in the mode**, because the
+only bound was the arrangement's worst case of 2,359,296 against a measured
+1,469,888. The gap is not argued: adding one unit per body leaves all five
+configuration assertions passing, leaves the two arms equal, sits comfortably
+under the ceiling, and fails only the prediction. The derivation, the observation
+that variation can never catch an additive term, and the closed form are the
+review session's.
+
 **"Still fits" is not an acceptable restatement of it anywhere**, and an earlier
 draft left that older phrasing in the evidence table where Phase 2's exit gate
 reads it. Under the constant-geometry arms above, both charge 2,359,296 against a
@@ -403,7 +432,7 @@ the second half of the freeze pass, on the same edit that introduced it.)
 | Independence | Two maps with overlapping coordinate ranges and different walls; a body on each; each stops at its own wall and neither sees the other's |
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
-| Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 identical 128x128 maps charges **exactly** what the same bodies charge on one 128x128 map - a constant-geometry equality, not "still fits", and Phase 2's to assert |
+| Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 identical 128x128 maps charges **exactly** what the closed form above predicts, body by body, **and** the same as those bodies charge on one 128x128 map - the prediction because an equality alone cannot see a uniformly added per-body term, the equality because it is the cheaper cross-check; both Phase 2's to assert, and neither is "still fits" |
 | Migration | Every renamed call refuses its M1 argument shape rather than guessing; `set_position` on a body validates against its member map and refuses a destination that is legal only on another |
 | Membership integrity | A collider and its membership are attached, transferred, removed and despawned together, with no observable state where one exists without the other |
 
@@ -474,9 +503,9 @@ such**: the probe was built to make some of them wrong and did not.
 | Mode | Result |
 | --- | --- |
 | `storage` | 32 maps of 128x128 filling the aggregate exactly measure **1,081,344** bytes live and **1,606,656** at peak with the largest staging candidate, matching the contract's arithmetic to the byte |
-| `work` | 1,024 bodies of maximum footprint sweeping a 128x128 map charge **1,551,488** units - 65.8% of that arrangement's own worst case of 2,359,296, and 9.2% of the 16,777,216 fixed-pass ceiling. The two arms are identical per body and in total |
+| `work` | 1,024 bodies of maximum footprint sweeping a 128x128 map charge **1,469,888** units - 62.3% of that arrangement's own worst case of 2,359,296, and 8.8% of the 16,777,216 fixed-pass ceiling. Every body charges exactly what its geometry predicts, in both arms |
 | `shapes` | All five arrangements behave as the contract claims, and the cross-over is confirmed at 128x128 with 129x129 the first square whose 32 copies overflow |
-| `timing` | p50 **2.4121 ms**, p95 2.6885, max 2.7382, against a 16.667 ms tick |
+| `timing` | p50 **2.4289 ms**, p95 2.5739, max 2.7949, against a 16.667 ms tick |
 
 **The storage figure is measured rather than derived, and the distinction was
 the reason to build it that way.** The probe allocates through the production
@@ -488,8 +517,8 @@ is exact, and that is now observed instead of assumed.
 
 **One cross-check worth more than any single figure.** M1's Phase 2 stress
 charged 11,386,880 units at a p50 of 16.5 to 17.8 ms. This arrangement charges
-1,551,488 at 2.4121 ms. The ratio of units is 7.34, and 2.4121 x 7.34 = 17.7 ms,
-which lands inside M1's recorded p50 range. That is a single point of comparison
+1,469,888 at 2.4289 ms. The ratio of units is 7.75, and 2.4289 x 7.75 = 18.8 ms,
+which lands a little above M1's recorded p50 range. That is a single point of comparison
 across different map shapes, different arrangements and different runs, so it is
 an observation and not a model - but it is the first evidence in this plan that
 the charged work unit tracks time at all, and the plan has been treating the two
@@ -498,13 +527,23 @@ not latency.
 
 **The probe's own assertions were watched failing**, because a mode that reports
 a plausible number while measuring the wrong arrangement is this plan's most
-frequent defect. Five deliberate breakages, each firing at its own named
+frequent defect. Six deliberate breakages, each firing at its own named
 assertion and nowhere else: the spread arm put on one map fails *every map must
 carry its share of bodies*; bodies given zero travel fail *every body must charge
 something*; bodies given identical start rows fail *per-body cost must vary*; one
-map short of the aggregate fails *the maximum map count must be built*; and a
-shape claimed to fit that does not fails *does not behave as the contract
-claims*. The tree was confirmed byte-identical afterwards.
+map short of the aggregate fails *the maximum map count must be built*; a shape
+claimed to fit that does not fails *does not behave as the contract claims*; and
+one unit charged per body for membership resolution fails *every body must charge
+exactly what its geometry predicts* **while passing all five of the others**. The
+tree was confirmed byte-identical after each. The sixth exists because the first
+five were satisfied by a defect none of them could see.
+
+The probe's start column varies as well as its row, which is presentation rather
+than correctness now that the prediction guards the arrangement. It was worth
+fixing anyway: holding the column at 1 made the X leg charge an identical 952
+units for every body, 63% of the average cost invariant across the whole battery,
+so a mode advertising "the absolute work an M2-shaped arrangement charges" was
+exercising one axis.
 
 ### What the probe found that the contract did not predict
 
