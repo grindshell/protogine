@@ -10,11 +10,14 @@ describes current behavior; [AGENTS](../../AGENTS.md) owns contribution rules an
 
 | Plan | Status |
 | --- | --- |
-| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required. M1 complete through Phase 4, including the migrated sprite sample; M2-M4 unstarted and their contracts unfrozen |
+| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required. M1 complete through Phase 4, including the migrated sprite sample |
+| [M2 contract: simultaneous maps](TILEMAP_COLLISION_M2.md) | **Proposed, not frozen, nothing implemented.** Map identity, membership, transfer, per-map coordinates, the T6 revision, budgets and the migration off M1's implicit-map calls, with five decisions marked open |
 
 Active plans live at the repository root and move here when complete. A closed
 phase of an active plan is filed under Completed below, as the PNG/sprite Phase 0
-record already is, because later phases depend on the contracts it froze.
+record already is, because later phases depend on the contracts it froze. A
+contract that is still a proposal stays in the active table above and says so in
+its own first line, so that nothing links it as though it had been agreed.
 
 ## Completed
 
