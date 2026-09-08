@@ -67,6 +67,20 @@ that owns it, so the session is implied. The public handle carries the session
 and is checked at the API boundary. This is the same split `ImageId` and
 `EntityHandle` already make at different layers.
 
+**Slot reuse is deterministic, and that is a contract clause rather than an
+implementation detail.** `create_tilemap` takes the most recently freed slot;
+with none free it takes the next unused index. The reason is that the generation
+check cannot otherwise be tested. A handle to a removed map and a handle to a
+reused slot both refuse, and the obvious fixture - remove a map, present its
+handle, assert a refusal - cannot tell those apart, because both hold on a slot
+that was never recycled. Distinguishing them needs an *actual* reuse: remove map
+A, create map B, require B to land in A's slot, then present A's handle and
+require the refusal while B's own handle succeeds at the same slot index. If the
+allocator is free to hand B a fresh index, that fixture silently degrades into
+the easy case it was written to avoid. So the policy is frozen here and Phase 1
+asserts the landing rather than assuming it. The requirement is the review
+session's.
+
 ## M2-2. Membership
 
 **A collider belongs to exactly one map, named when it is attached.** Membership
@@ -437,7 +451,7 @@ the second half of the freeze pass, on the same edit that introduced it.)
 
 | Area | Cases |
 | --- | --- |
-| Identity | Foreign handle; handle to a removed map; handle to a reused slot; handle after `stop`; two live maps with distinct handles that are never confused |
+| Identity | Foreign handle; handle to a removed map; handle to a reused slot, where the fixture **forces the reuse and asserts the new map landed in the old slot** rather than asserting a refusal that an unrecycled slot would also satisfy; handle after `stop`; two live maps with distinct handles that are never confused |
 | Independence | Two maps with overlapping coordinate ranges and different walls; a body on each; each stops at its own wall and neither sees the other's |
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
@@ -657,17 +671,32 @@ halves, because the first half alone missed something both sessions ran it over:
    the stronger argument, because *one* cell elsewhere is enough to make the
    replacement refuse, not 262,145. The other quoted a double-charged install as
    "about 1,027" where the arithmetic gives 1,026.
-3. **After a constant moves, every token whose *meaning* moved while its value
-   stayed.** A scan for retired values cannot see these: when the map count rose
-   from 32 to 64, the retired tokens were `32` and `128x128`, and 32 is still a
-   number in this document while 128x128 is still a live `shapes` case. Neither
-   stands out beside `2,359,296`, whose value genuinely died. **The Budgets
-   evidence row survived two passes this way** - it kept "32 identical 128x128
-   maps" while the paragraph six lines above recorded the move - and it is the
-   same row that kept "still fits" through an earlier round, which makes it the
-   one to check first. Run this clause over `32`, `64`, `128`, `128x128` and
-   `8,192` after any change to a count. The clause is the review session's,
-   from the second occurrence.
+3. **After a constant moves, scan for the constant itself in every form it
+   takes** - the bare number, the shapes derived from it, and the ordinals that
+   count it - and not only for the figures derived from it. When the map count
+   rose from 32 to 64, the derived values (`2,359,296`, `1,469,888`, `788`) were
+   all correctly quarantined, because a scan keyed on retired *values* finds
+   them. The survivors were `32` itself and `128x128`, whose values did not
+   change: 32 is still a number in this document and 128x128 is still a live
+   `shapes` case.
+
+   **The Budgets evidence row contradicted itself inside one table cell** - it
+   opened "The 65th map refuses" and closed "across 32 identical 128x128 maps" -
+   which is the sharpest form of why this clause is needed. The ordinal had been
+   updated and the bare number had not, so a scan keyed on the *new* value lands
+   on a correctly-updated fragment sitting immediately beside a stale one and
+   reads as confirmation. That row has now kept a retired statement through two
+   separate rounds, the first being "still fits", which makes it the one to check
+   first.
+
+4. **Every file the phase touched, not only the ones written in prose.** Four
+   figures survived two passes over this document because they lived in the
+   probe's comments, and nobody had pointed the method at the source. A probe is
+   a document with a compiler: its comments carry the same load-bearing prose,
+   with the added hazard of sitting beside code that *is* current, so they look
+   maintained.
+
+   Both clauses are the review session's, each from a second occurrence.
 
 **Do both halves again after any edit that changes a number or a rule**, in
 preference to re-reading the prose around them. The method, the second half, and
