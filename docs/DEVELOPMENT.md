@@ -256,6 +256,12 @@ kept both in one variable, the release matched nothing, and the first takeover
 left a lock that every later run took over and never released. A self-test that
 only checked the result was truthy passed while that was true.
 
+Capture a note with `-InformationVariable`, never by redirecting the stream and
+rebuilding the value by hand. The second reads the note but discards what the
+function returned, so the assertion beside it starts checking a string the test
+constructed and can no longer fail. That happened here, to the case that asserts
+the malformed-lock wording, and it kept its name and its green tick for an hour.
+
 **To verify a commit rather than a working tree, extract it first** - `git
 archive HEAD` into a scratch directory and run there. The harness script is a
 live file like any other, so two invocations of it taken while tooling is being

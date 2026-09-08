@@ -79,12 +79,18 @@ Exit-ControlLock -Path $held
 
 # 5. A malformed lock is taken over rather than crashing the run that finds it,
 #    and says so rather than claiming a process by that name is not running.
+#
+#    `-InformationVariable` captures the note without displacing the return
+#    value. Redirecting the stream and rebuilding the path by hand also reads the
+#    note, but then the acquisition's own answer is thrown away and
+#    `Assert-SinglePath` checks a string this file just constructed - which can
+#    only ever pass. Adding the note assertion that way silently removed the one
+#    it sits beside.
 Hold-Lock "not-a-process`n"
-$note = Enter-ControlLock -Repo $repo -Name $name 6>&1 | Out-String
-$held = Join-Path $directory 'run.lock'
+$held = Enter-ControlLock -Repo $repo -Name $name -InformationVariable note
 Assert-SinglePath $held 'a malformed lock'
-if ($note -notmatch 'malformed') {
-    $failures += "the malformed-lock note did not say it was malformed: $($note.Trim())"
+if ("$note" -notmatch 'malformed') {
+    $failures += "the malformed-lock note did not say it was malformed: $("$note".Trim())"
 }
 Exit-ControlLock -Path $held
 

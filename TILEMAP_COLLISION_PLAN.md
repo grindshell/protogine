@@ -1058,8 +1058,27 @@ sharper form of the rule this project keeps rediscovering, and worth stating on
 its own: a check that never fires is one failure mode, and a check that fires for
 the wrong reason is the other, and only the first is visible as an empty battery.
 It now asserts exactly one usable path on every path through the function, and
-reintroducing `Write-Output` makes it fail by name. The instance was inside the
-guard added to fix the previous instance.
+reintroducing `Write-Output` makes every case that performs a takeover fail by
+name. The instance was inside the guard added to fix the previous instance.
+
+**Then it happened a fourth time, while fixing a cosmetic message, and that one
+is the most instructive of the four.** The review session pointed out that a
+malformed lock reported "left by process not-a-process, which is no longer
+running", claiming a fact about a process where there was none. Asserting the
+corrected wording meant capturing the note, and the obvious way to capture it -
+redirecting the information stream and rebuilding the lock path by hand - threw
+away the acquisition's return value in the same motion. `Assert-SinglePath` then
+checked a string the test had just constructed, which can only pass. The case
+kept its name, its comment and its green tick while no longer witnessing the
+thing the comment above it describes; the review session found it by reintroducing
+`Write-Output` and counting which cases spoke. `-InformationVariable` captures the
+note without displacing the return value, and both assertions now hold.
+
+The general rule that falls out is narrower and more useful than "write better
+tests": **when a test's subject moves from what the code returned to anything the
+test constructs, the assertion has changed meaning even if its text has not.**
+That substitution is invisible in review because the line still reads the same,
+and it is exactly the motion a small convenience edit encourages.
 
 `region_table`'s deadline check is the one observation in the new code with no
 witness at all, and it cannot have one. It runs after the kernel call, on a read
@@ -1131,7 +1150,9 @@ share proves only that the shared thing exists. A redundancy control on a shared
 helper needs a wider target than one on a private function, or it reports a
 confirmed redundancy whether or not anything covers the rule anywhere. And a
 guard that fires for the wrong reason still shows green, which is the failure
-mode an empty battery does not warn you about.
+mode an empty battery does not warn you about - and its commonest cause is a test
+whose subject quietly moved from what the code returned to something the test
+builds itself.
 
 Deliberately not in this phase, and still Phase 4's: the sample migration itself,
 the probe adaptation and its `Get-ProbeStates` change, the update-time tile-edit
