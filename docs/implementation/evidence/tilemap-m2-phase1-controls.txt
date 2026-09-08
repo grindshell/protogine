@@ -6,6 +6,12 @@ requiring one named assertion to fail, plus four self-tests the harness refuses.
 Core configuration (--no-default-features). Nine run against the library's unit
 tests; three run against tests/tilemap_registry.rs, whose point is being outside
 the crate.
+
+Re-recorded at M2 Phase 2. Four of the twelve - the M2-R1 scoping controls -
+had their anchors moved from current == target to the body's own membership,
+and the fixture they target moved from one body on one map to a member on each
+of two maps with a third empty. Without that they would have kept passing
+against an implementation reverted to a global scan.
 CONTROL DETECTED: generation-unchecked
 CONTROL DETECTED: session-unchecked
 CONTROL DETECTED: stop-refuses-by-identity

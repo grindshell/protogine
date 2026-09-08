@@ -136,6 +136,15 @@ $controls = @(
        Edits = @(@{ F = 'self.admit(cells, outgoing)?;'; R = 'self.admit(cells, 0)?;' }) }
 
     # --- M2-R1: every scan is scoped to the edited map's own members ----------
+    #
+    # **These four were re-earned in Phase 2 and their anchors moved.** In Phase
+    # 1 the scoping predicate was `current == target`, because only the implicit
+    # map could have members; now it is the body's own membership. The fixture
+    # they target moved with them, from one body on one map to a member on each
+    # of two maps and a third with none - without that, "scan the edited map's
+    # members" and "scan every collider" are the same scan and all four would
+    # keep passing against an implementation that had reverted to a global one.
+    # The prior is the review session's.
 
     # The inherited mistake, and the contract says it matters more than its
     # siblings for exactly that reason: `set_tile`'s global collider query is
@@ -145,35 +154,37 @@ $controls = @(
     @{ Name = 'cell-edit-scans-all-colliders'; File = 'src/kernel.rs'
        Test = 'kernel::tests::removing_and_replacing_an_unrelated_map_ignores_another_maps_bodies'
        Marker = 'a cell edit must ignore bodies on another map'
-       Edits = @(@{ F = 'let scan_members = *current == Some(target);'
-                    R = 'let scan_members = true;' }) }
+       Edits = @(@{ F = @'
+                if membership.0 != target {
+                    continue;
+                }
+'@
+                    R = '' }) }
 
     # Its mirror, and the reason the fixture pairs every map-local success with
-    # the same operation on the body's own map refusing. Scanning nobody makes
-    # the map-local assertion above pass for the wrong reason; only the paired
-    # one catches it.
+    # the same operation on a map that does have a member refusing. Scanning
+    # nobody makes the map-local assertion above pass for the wrong reason; only
+    # the paired one catches it.
     @{ Name = 'cell-edit-scans-nobody'; File = 'src/kernel.rs'
        Test = 'kernel::tests::removing_and_replacing_an_unrelated_map_ignores_another_maps_bodies'
-       Marker = 'while the same edit on the body''s own map still refuses'
-       Edits = @(@{ F = 'let scan_members = *current == Some(target);'
-                    R = 'let scan_members = false;' }) }
+       Marker = 'while a body on the edited map still refuses'
+       Edits = @(@{ F = 'if membership.0 != target {'
+                    R = 'if true {' }) }
 
     @{ Name = 'replacement-revalidates-every-map'; File = 'src/kernel.rs'
        Test = 'kernel::tests::removing_and_replacing_an_unrelated_map_ignores_another_maps_bodies'
-       Marker = "replacing another map must not revalidate this map's bodies"
+       Marker = 'replacing a map with no members must revalidate nobody'
        Edits = @(@{ F = @'
-        if self.current == Some(id) {
-            let Self {
+            if membership.0 != id {
+                continue;
+            }
 '@
-                    R = @'
-        if true {
-            let Self {
-'@ }) }
+                    R = '' }) }
 
     @{ Name = 'removal-scans-all-colliders'; File = 'src/kernel.rs'
        Test = 'kernel::tests::removing_and_replacing_an_unrelated_map_ignores_another_maps_bodies'
-       Marker = "removing another map must not see this map's bodies"
-       Edits = @(@{ F = 'if self.current == Some(id) && self.colliders > 0 {'
+       Marker = "removing a map with no members must not see anyone else's"
+       Edits = @(@{ F = 'if self.has_members(id) {'
                     R = 'if self.colliders > 0 {' }) }
 
     # --- The public surface: reachable, and each accessor its own quantity ----

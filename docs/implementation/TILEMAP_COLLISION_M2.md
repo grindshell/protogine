@@ -906,6 +906,198 @@ reason. Only pairing each map-local success in the fixture with the same
 operation on `current` refusing catches the second, which is why the fixture is
 written that way rather than as four successes.
 
+## Phase 2 exit, 2026-09-08
+
+`src/kernel.rs` (membership, `ColliderPlacement`, per-map sweeping),
+`src/scripting/world.rs` (the bindings that still address one implicit map),
+`tests/tilemap_membership.rs`, `tests/tilemap_fixed_pass.rs` and
+`tools/run_tilemap_membership_controls.ps1`. Core configuration throughout.
+
+### Membership, and the cost M2-2 overstated
+
+`Membership(TileMapId)` is a private component, and the layering argument is not
+what settles it. `TileCollider` is an all-public-fields struct built by literal
+at **fifteen sites outside the crate**, so a private field breaks every one; and
+a public field would have to be a `TileMapId`, which Phase 1 made `pub(crate)`
+precisely so two kernels cannot compare identities at the boundary. The field
+variant costs either those fifteen sites or that decision.
+
+**M2-2 costed this design at four sites to keep in step, and three of them
+collapse.** Despawn drops every component together in hecs; `remove_tilemap`
+refuses while members exist rather than clearing anything; and M2-5 folds
+transfer into attachment, so transfer *is* the attach site. That leaves one -
+and the right conclusion is not a narrower warning but a **structural**
+invariant: `set_tile_collider` writes both components as one hecs bundle, so the
+unpaired state is unreachable rather than merely avoided. A `?` between two
+single-component inserts is how a partial state gets written even when neither
+call can fail. The correction is the review session's; the narrowing was mine,
+and on its own it would have bought a weaker control instead of a stronger rule.
+
+### The failure mode this phase nearly shipped
+
+**Adding `&Membership` to the sweep's query is the natural edit and it is the
+dangerous one.** `fixed_update` partitions entities by collider presence: free
+flight runs only for those with *no* collider, and everything else takes its
+position from the swept candidates. An unpaired collider would match neither -
+excluded from the sweep by the query, excluded from free flight by having a
+collider - so its position would never be written. It would freeze in place with
+no refusal, no panic, and every other body resolving normally.
+
+So the query matches on `&TileCollider` alone and takes membership as an
+`Option`, refusing by name with `KernelError::UnpairedCollider`. Beside it,
+`assert_eq!(bodies.len(), colliders)` makes the partition a checked property
+rather than an inferred one, and catches a pre-existing hazard for free: the
+collider counter is maintained at three sites and `fixed_update`'s
+`colliders == 0` early-out trusts it, so a desync there would free-flight every
+body through every wall. That branch carries its own assertion too, and the
+despawn site has a control of its own. The failure mode is the review session's
+finding.
+
+**That check is a hard assertion and its neighbour is a debug one, which is a
+choice rather than an inconsistency.** It began as `debug_assert_eq!`, and the
+review session ran the control harness under `--release`, where the marker
+became unreachable: the control still detected the fault, but at a different
+assertion, and the marker gate refused it. What that run showed is worth more
+than the fix. **The protection was never debug-only** - an unpaired body freezes
+where it stands, which any fixture watching a position sees in either mode. What
+was debug-only is the *diagnosis*: in release a reader learns a body stopped in
+the wrong place, where the assertion names a collider that never became a
+candidate. One integer comparison per fixed pass, in a pass that may charge
+16,777,216 units and already panics in release at two `expect` sites, is a cheap
+price for the sentence that identifies the bug.
+
+The early-out's assertion stays debug-only, and the reason is the *kind* of
+check rather than how often it runs - frequency alone would not settle it, since
+a cheap check on a hot path is fine. The length check compares two integers
+already in hand; the early-out's is an archetype walk to prove a negative, so
+keeping it in release charges every collider-free game a scan per tick against a
+desync that cannot arise. That is a real cost against a hypothetical, which is
+the line.
+
+The split leaves the two desync directions guarded differently, which is worth
+stating exactly rather than leaving to be inferred: a count too high, or too low
+but non-zero, both reach the sweep and fire its release assertion; the single
+case that stays debug-only is `colliders == 0` while colliders exist, where the
+release symptom is bodies free-flighting through walls. Diagnosis debug-only,
+protection not - the same shape as the length check and the opposite answer,
+because of the query. Both harnesses now run green in both profiles, which
+neither had been exercised in before. The distinction is the review session's.
+
+### What the scoped scans cost
+
+A cell edit charges per **member tested**, not per collider visited.
+`MAX_CALLBACK_WORK` is denominated in cell visits and skipping a non-member
+visits no cell, so charging for the walk would make editing map A cost more
+because map B has bodies - a per-map term inside a budget that is meant to be
+map-independent, which is the same species the fixed-pass check exists to catch,
+one budget over.
+
+**The consequence is stated because it is not free.** That scan is no longer
+self-limiting: it was bounded by the work budget at about 1,048,576 entity
+visits per callback, and is now bounded by the 4,096 world-call limit instead,
+at worst **4,096 x 1,024 = 4,194,304** entity visits - roughly four times, and
+iteration rather than cell work. Acceptable, and it scales linearly with
+`MAX_LIVE_COLLIDERS`, so if it ever binds the fix is to index membership rather
+than to change the charge. `has_members` takes the same trade for the same
+reason, and it is one trade taken twice rather than two.
+
+### Evidence
+
+| Check | Result |
+| --- | --- |
+| Core suite | 103 passed, 0 failed, 22 suites |
+| Default suite | 280 passed, 0 failed, 23 suites |
+| Phase 2 controls | 8 detected, 1 recorded redundancy, 4 self-tests refused, **both profiles** |
+| Phase 1 controls | 12 detected, 4 self-tests refused, **re-earned**, both profiles |
+| Fixed pass | 1,145,600 units, per body and in both arms |
+| Clippy, fmt | clean on both configurations |
+
+Receipts in [evidence](evidence/tilemap-m2-phase2-controls.txt), and the Phase 1
+receipt is [re-recorded](evidence/tilemap-m2-phase1-controls.txt) against this
+code.
+
+**Phase 0's fixed-pass figure now holds through the production kernel.** The
+probe measured 1,145,600 over a prototype `Vec<TileMap>` and recorded it as a
+property of the prototype; `every_body_charges_exactly_what_its_geometry_predicts`
+reproduces it body by body through the real sweep with membership resolved per
+body, and both arms of the constant-geometry comparison agree.
+
+### Re-earning, and why it was not a formality
+
+**Four of Phase 1's twelve controls had anchors that no longer existed.** The
+scoping predicate moved from `current == target` to the body's own membership,
+so the harness reported them stale - which is the harness working. Their fixture
+moved too, from one body on one map to a member on each of two maps with a third
+holding none. That third map is what the map-local *successes* need: with every
+live map holding a member, "scoped" and "refuses" are indistinguishable.
+
+The four keep their original names deliberately. "Re-earned" is a claim about
+the same controls, and renaming them would have made it a claim about different
+ones.
+
+### The redundancy that is the point
+
+One Phase 2 control is recorded as **expected to pass**: a uniform per-body term
+added to the fixed pass, run against the one-map/sixty-four-map equality. It
+raises both arms by 1,024, leaves them equal, and passes - which is the
+contract's "necessary and not sufficient" claim demonstrated rather than
+asserted. The same patch fails the geometry prediction beside it.
+
+**It only demonstrates that because the equality test asserts an equality and
+nothing else.** The first draft pinned the absolute total alongside it, and the
+redundancy control failed instead of passing - a redundancy that turned out not
+to be one. The two assertions now live in separate tests, and the file says
+plainly that the prediction is not to be pruned because the equality beside it
+passes.
+
+### What Phase 2 closed, and what it did not
+
+Both entries in Phase 1's "cannot reach" section are closed, and each was
+watched failing first: `remove_tilemap` now refuses by handle when the map has a
+member, and the map-local cell edit is exercised through a fixture with bodies
+on two maps. Neither was deleted from that section on the strength of the code
+alone.
+
+One M1 refusal is retired rather than relaxed. `NoTileMap` is no longer reachable
+from `set_tile_collider`: a collider names its map by handle, so "no map
+installed" stopped being representable at that entry point, and the successor is
+a handle that no longer names a live map. `tests/collision.rs` asserts that
+instead. The Luau binding still answers `NoTileMap`, because a script still names
+no map until Phase 3.
+
+**The two new latching errors were silently misclassified from the moment they
+existed, and nothing would have said so.** `kernel_result` in
+`src/scripting/world.rs` ended in a `_ => None` catch-all, which makes the
+default for any new `KernelError` "ordinary catchable error". M2-8 puts the map
+count and the aggregate cell budget on the *latching* side, so both fell through
+it - and the failure needs no mistake by anyone: not a compile error, not a
+failing test, not a visible diff. It would have surfaced in Phase 3, as a script
+`pcall`-ing past a budget ceiling and continuing to spend, which is precisely
+what latching exists to prevent.
+
+The match is now exhaustive with no `_` arm, so a new variant cannot be added
+without someone deciding which side of the line it is on. Verified by adding a
+scratch variant and watching `E0004` name it, then restoring to an identical
+hash - the guard cannot be a harness control, because the harness refuses a
+control that does not compile and this one's whole point is that it does not.
+Found by the review session, who also noted the resolution goes the other way
+for `UnpairedCollider`: it faults the fixed pass and never reaches this
+function, so it is classified as catchable and stays out of the latching set.
+
+**And one M1 signature widened, which Phase 1's headline property said none
+would.** `set_tilemap` returns the handle it installed. Phase 1 recorded that
+every M1 signature and error was preserved, and named widening this return as a
+thing it would not do because `tests/collision.rs` asserted `Ok(())` on it -
+both true when written, and the second is why the pointer belongs here rather
+than as an edit to a dated record. What changed is upstream of both: from Phase 2
+a collider names its map by handle, Phase 1 deliberately refused a public
+accessor for `current`, and so a caller installing the implicit map and then
+attaching to it has no other door. Exactly one assertion moved. The whole
+construction retires in Phase 3 with the implicit map. Flagged by the review
+session, who also judged that it did not warrant stopping to ask: the decision
+had one available answer, which is what separates it from a question that was
+actually open.
+
 ## The one failure mode this document has produced
 
 Worth stating because it is the same every time, and because the next person to

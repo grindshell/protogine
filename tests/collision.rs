@@ -10,7 +10,10 @@ use protogine::collision::{
     self, CollisionError, MAX_CALLBACK_WORK, MAX_FIXED_PASS_WORK, MAX_LIVE_COLLIDERS,
     MIN_COLLIDER_EXTENT, TileCollider, WorkBudget,
 };
-use protogine::kernel::{FIXED_DT, Kernel, KernelError, Position, Velocity};
+use protogine::kernel::{
+    ColliderPlacement, EntityHandle, FIXED_DT, Kernel, KernelError, Position, TileMapHandle,
+    Velocity,
+};
 use protogine::tilemap::{Axis, GEOMETRY_LIMIT, TileMap, TileMapError, TileMapInfo};
 
 // ---------------------------------------------------------------------------
@@ -92,21 +95,35 @@ fn placeable(map: &TileMap, collider: &TileCollider, x: f64, y: f64) -> bool {
     collision::check_placement(map, collider, x, y, &mut work).is_ok()
 }
 
-/// A kernel with one collider attached to one entity.
+/// A placement joining `map` without moving the body — the shape every fixture
+/// here wants, since M2-5 folded transfer into attachment and only a transfer
+/// carries a position.
+fn on(map: &TileMapHandle, collider: TileCollider) -> Option<ColliderPlacement> {
+    Some(ColliderPlacement {
+        map: map.clone(),
+        collider,
+        position: None,
+    })
+}
+
+/// A kernel with one collider attached to one entity, and the map it joined.
+///
+/// The map handle is returned because from M2 Phase 2 a collider names its map,
+/// and `set_tilemap`'s return is the only way to name the implicit one.
 fn session(
     map: TileMap,
     at: (f64, f64),
     collider: TileCollider,
-) -> (Kernel, protogine::kernel::EntityHandle) {
+) -> (Kernel, EntityHandle, TileMapHandle) {
     let mut kernel = Kernel::new();
-    kernel.set_tilemap(map).expect("install");
+    let installed = kernel.set_tilemap(map).expect("install");
     let body = kernel
         .spawn(Position { x: at.0, y: at.1 })
         .expect("spawn the body");
     kernel
-        .set_tile_collider(&body, Some(collider))
+        .set_tile_collider(&body, on(&installed, collider))
         .expect("the fixture spawn is a legal placement");
-    (kernel, body)
+    (kernel, body, installed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,7 +1236,7 @@ fn pillar() -> TileMap {
 
 #[test]
 fn a_teleport_crosses_a_wall_but_never_lands_in_one() {
-    let (mut kernel, body) = session(pillar(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(pillar(), (32.0, 32.0), square(32.0));
     // Across the pillar to the far corner: T5 teleports rather than sweeping.
     assert_eq!(
         kernel.set_position(&body, Position { x: 96.0, y: 96.0 }),
@@ -1266,15 +1283,21 @@ fn a_teleport_crosses_a_wall_but_never_lands_in_one() {
 fn attaching_and_resizing_check_every_covered_cell() {
     let mut kernel = Kernel::new();
     let body = kernel.spawn(Position { x: 64.0, y: 64.0 }).unwrap();
+    // M2 retires `NoTileMap` at this entry point rather than relaxing it: a
+    // collider names its map by handle, so "no map installed" stopped being
+    // representable here. The successor is a handle that no longer names a live
+    // map, which is the same refusal one layer up.
+    let retired = kernel.create_tilemap(pillar()).unwrap();
+    kernel.remove_tilemap(&retired).unwrap();
     assert_eq!(
-        kernel.set_tile_collider(&body, Some(square(32.0))),
-        Err(KernelError::NoTileMap),
-        "attaching requires an installed map"
+        kernel.set_tile_collider(&body, on(&retired, square(32.0))),
+        Err(KernelError::InvalidTileMap),
+        "attaching requires a live map"
     );
-    kernel.set_tilemap(pillar()).unwrap();
+    let installed = kernel.set_tilemap(pillar()).unwrap();
     // (64, 64) is exactly the pillar cell.
     assert_eq!(
-        kernel.set_tile_collider(&body, Some(square(32.0))),
+        kernel.set_tile_collider(&body, on(&installed, square(32.0))),
         Err(KernelError::Collision(CollisionError::Placement)),
         "attaching must check every cell the box covers"
     );
@@ -1285,23 +1308,36 @@ fn attaching_and_resizing_check_every_covered_cell() {
         .set_position(&body, Position { x: 32.0, y: 32.0 })
         .unwrap();
     let small = square(32.0);
-    assert_eq!(kernel.set_tile_collider(&body, Some(small)), Ok(()));
-    assert_eq!(kernel.tile_collider(&body), Ok(Some(small)));
+    assert_eq!(
+        kernel.set_tile_collider(&body, on(&installed, small)),
+        Ok(())
+    );
+    assert_eq!(
+        kernel.tile_collider(&body),
+        Ok(Some((installed.clone(), small))),
+        "the read names the map the body joined"
+    );
     assert_eq!(kernel.live_colliders(), 1);
 
     // Growing it over the pillar refuses and leaves the previous collider.
     assert_eq!(
-        kernel.set_tile_collider(&body, Some(square(64.0))),
+        kernel.set_tile_collider(&body, on(&installed, square(64.0))),
         Err(KernelError::Collision(CollisionError::Placement))
     );
-    assert_eq!(kernel.tile_collider(&body), Ok(Some(small)));
+    assert_eq!(
+        kernel.tile_collider(&body),
+        Ok(Some((installed.clone(), small)))
+    );
     // Beyond eight tiles on a 32-pixel grid.
     assert_eq!(
-        kernel.set_tile_collider(&body, Some(square(256.000_000_000_000_1))),
+        kernel.set_tile_collider(&body, on(&installed, square(256.000_000_000_000_1))),
         Err(KernelError::Collision(CollisionError::Extent)),
         "attaching must refuse an extent beyond eight tiles"
     );
-    assert_eq!(kernel.tile_collider(&body), Ok(Some(small)));
+    assert_eq!(
+        kernel.tile_collider(&body),
+        Ok(Some((installed.clone(), small)))
+    );
 
     // Detaching always succeeds and releases capacity.
     assert_eq!(kernel.set_tile_collider(&body, None), Ok(()));
@@ -1312,7 +1348,7 @@ fn attaching_and_resizing_check_every_covered_cell() {
 
 #[test]
 fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
-    let (mut kernel, body) = session(pillar(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(pillar(), (32.0, 32.0), square(32.0));
     // The same room with the body's own cell filled in.
     let trapping = build(
         &["#####", "##..#", "#.#.#", "#...#", "#####"],
@@ -1353,14 +1389,14 @@ fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
         32,
         (0, 0),
     );
-    assert_eq!(kernel.set_tilemap(opened), Ok(()));
+    assert!(kernel.set_tilemap(opened).is_ok());
     assert_eq!(kernel.tile_solid(2, 2), Ok(false));
     assert_eq!(kernel.position(&body), Ok(Position { x: 32.0, y: 32.0 }));
 }
 
 #[test]
 fn a_solid_edit_under_a_body_refuses_and_leaves_the_cell() {
-    let (mut kernel, body) = session(pillar(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(pillar(), (32.0, 32.0), square(32.0));
     assert_eq!(
         kernel.set_tile(1, 1, WALL),
         Err(KernelError::Collision(CollisionError::Placement)),
@@ -1389,7 +1425,7 @@ fn a_solid_edit_under_a_body_refuses_and_leaves_the_cell() {
 
 #[test]
 fn the_map_can_be_cleared_only_once_every_collider_is_detached() {
-    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(room(), (32.0, 32.0), square(32.0));
     assert_eq!(
         kernel.clear_tilemap(),
         Err(KernelError::CollidersAttached),
@@ -1402,37 +1438,40 @@ fn the_map_can_be_cleared_only_once_every_collider_is_detached() {
     assert_eq!(kernel.clear_tilemap(), Ok(()));
     assert_eq!(kernel.clear_tilemap(), Ok(()), "clearing twice succeeds");
     assert_eq!(kernel.tilemap(), Ok(None));
-    kernel.set_tilemap(corridor(&[9])).unwrap();
+    let reinstalled = kernel.set_tilemap(corridor(&[9])).unwrap();
     kernel
         .set_position(&body, Position { x: 64.0, y: 32.0 })
         .unwrap();
-    assert_eq!(kernel.set_tile_collider(&body, Some(square(32.0))), Ok(()));
+    assert_eq!(
+        kernel.set_tile_collider(&body, on(&reinstalled, square(32.0))),
+        Ok(())
+    );
     assert_eq!(kernel.live_colliders(), 1);
 }
 
 #[test]
 fn the_collider_limit_is_enforced_and_released() {
     let mut kernel = Kernel::new();
-    kernel.set_tilemap(room()).unwrap();
+    let installed = kernel.set_tilemap(room()).unwrap();
     // Bodies never block one another, so they can all share a cell.
     let mut handles = Vec::new();
     for _ in 0..MAX_LIVE_COLLIDERS {
         let handle = kernel.spawn(Position { x: 32.0, y: 32.0 }).unwrap();
         kernel
-            .set_tile_collider(&handle, Some(square(32.0)))
+            .set_tile_collider(&handle, on(&installed, square(32.0)))
             .unwrap();
         handles.push(handle);
     }
     assert_eq!(kernel.live_colliders(), MAX_LIVE_COLLIDERS);
     let extra = kernel.spawn(Position { x: 32.0, y: 32.0 }).unwrap();
     assert_eq!(
-        kernel.set_tile_collider(&extra, Some(square(32.0))),
+        kernel.set_tile_collider(&extra, on(&installed, square(32.0))),
         Err(KernelError::ColliderLimit),
         "the live collider limit must refuse the next attachment"
     );
     // Replacing an existing collider at the limit is not a new attachment.
     assert_eq!(
-        kernel.set_tile_collider(&handles[0], Some(square(16.0))),
+        kernel.set_tile_collider(&handles[0], on(&installed, square(16.0))),
         Ok(())
     );
     // Despawn releases the capacity the detach path also releases.
@@ -1442,12 +1481,15 @@ fn the_collider_limit_is_enforced_and_released() {
         MAX_LIVE_COLLIDERS - 1,
         "despawn must release collider capacity"
     );
-    assert_eq!(kernel.set_tile_collider(&extra, Some(square(32.0))), Ok(()));
+    assert_eq!(
+        kernel.set_tile_collider(&extra, on(&installed, square(32.0))),
+        Ok(())
+    );
 }
 
 #[test]
 fn collider_calls_refuse_foreign_stale_and_reused_handles() {
-    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, installed) = session(room(), (32.0, 32.0), square(32.0));
 
     // Another session's handle is not this session's, even at the same slot.
     let mut other = Kernel::new();
@@ -1458,7 +1500,7 @@ fn collider_calls_refuse_foreign_stale_and_reused_handles() {
         Err(KernelError::InvalidHandle)
     );
     assert_eq!(
-        kernel.set_tile_collider(&foreign, Some(square(32.0))),
+        kernel.set_tile_collider(&foreign, on(&installed, square(32.0))),
         Err(KernelError::InvalidHandle)
     );
     assert_eq!(
@@ -1512,7 +1554,7 @@ fn entities_without_colliders_integrate_exactly_as_before() {
 
 #[test]
 fn a_body_stops_at_the_wall_while_its_velocity_is_preserved() {
-    let (mut kernel, body) = session(corridor(&[9]), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(corridor(&[9]), (32.0, 32.0), square(32.0));
     kernel
         .set_velocity(&body, Velocity { x: 1200.0, y: 0.0 })
         .unwrap();
@@ -1534,7 +1576,7 @@ fn a_body_stops_at_the_wall_while_its_velocity_is_preserved() {
 
 #[test]
 fn a_late_refusal_moves_no_entity() {
-    let (mut kernel, body) = session(corridor(&[9]), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(corridor(&[9]), (32.0, 32.0), square(32.0));
     kernel
         .set_velocity(&body, Velocity { x: 1200.0, y: 0.0 })
         .unwrap();
@@ -1590,7 +1632,7 @@ fn replay_is_independent_of_insertion_order() {
     let mut runs = Vec::new();
     for reversed in [false, true] {
         let mut kernel = Kernel::new();
-        kernel.set_tilemap(corridor(&[9, 14])).unwrap();
+        let installed = kernel.set_tilemap(corridor(&[9, 14])).unwrap();
         let mut handles = Vec::new();
         let order: Vec<usize> = if reversed {
             (0..starts.len()).rev().collect()
@@ -1601,7 +1643,7 @@ fn replay_is_independent_of_insertion_order() {
             let (at, velocity) = starts[index];
             let handle = kernel.spawn(Position { x: at.0, y: at.1 }).unwrap();
             kernel
-                .set_tile_collider(&handle, Some(square(32.0)))
+                .set_tile_collider(&handle, on(&installed, square(32.0)))
                 .unwrap();
             kernel
                 .set_velocity(
@@ -1634,7 +1676,7 @@ fn replay_is_independent_of_insertion_order() {
 
 #[test]
 fn stopping_releases_the_sweep_scratch() {
-    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(room(), (32.0, 32.0), square(32.0));
     kernel
         .set_velocity(&body, Velocity { x: 120.0, y: 0.0 })
         .unwrap();
@@ -1661,7 +1703,7 @@ fn stopping_releases_the_sweep_scratch() {
 
 #[test]
 fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
-    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, _installed) = session(room(), (32.0, 32.0), square(32.0));
     kernel.begin_callback();
 
     // A cell edit that leaves the map non-solid charges the cell alone.
@@ -1711,7 +1753,7 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
 /// helper being right does not establish that all four reach for it.
 #[test]
 fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
-    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, installed) = session(room(), (32.0, 32.0), square(32.0));
     let before = kernel.tile(3, 1).unwrap();
     kernel.begin_callback();
     // One unit short of the ceiling: the edit below costs two, so it must be
@@ -1757,13 +1799,13 @@ fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
 
     exhausted(&mut kernel);
     assert_eq!(
-        kernel.set_tile_collider(&body, Some(square(16.0))),
+        kernel.set_tile_collider(&body, on(&installed, square(16.0))),
         work,
         "set_tile_collider must be budgeted against what the callback has left"
     );
     assert_eq!(
         kernel.tile_collider(&body),
-        Ok(Some(square(32.0))),
+        Ok(Some((installed.clone(), square(32.0)))),
         "the refused attachment left the previous collider"
     );
 
@@ -1772,7 +1814,7 @@ fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
     // case where the overrun is material, at up to 81 units per collider.
     exhausted(&mut kernel);
     assert_eq!(
-        kernel.set_tilemap(room()),
+        kernel.set_tilemap(room()).map(|_| ()),
         work,
         "set_tilemap must be budgeted against what the callback has left"
     );
@@ -1792,7 +1834,7 @@ fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
 /// 1,048,576-unit ceiling.
 #[test]
 fn every_entry_point_charges_the_work_it_performed_before_refusing() {
-    let (mut kernel, body) = session(room(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, installed) = session(room(), (32.0, 32.0), square(32.0));
 
     kernel.begin_callback();
     assert!(
@@ -1811,7 +1853,7 @@ fn every_entry_point_charges_the_work_it_performed_before_refusing() {
     // the scan rather than before it.
     assert!(
         kernel
-            .set_tile_collider(&body, Some(square(128.0)))
+            .set_tile_collider(&body, on(&installed, square(128.0)))
             .is_err()
     );
     assert!(
@@ -1937,7 +1979,7 @@ fn max_load_stress_completes_inside_the_fixed_pass_ceiling() {
         ),
     ] {
         let mut kernel = Kernel::new();
-        kernel.set_tilemap(stress_map()).unwrap();
+        let installed = kernel.set_tilemap(stress_map()).unwrap();
         let body = square(8.0);
         let mut handles = Vec::new();
         for index in 0..MAX_LIVE_COLLIDERS {
@@ -1948,7 +1990,9 @@ fn max_load_stress_completes_inside_the_fixed_pass_ceiling() {
                 y: base.1 + spread * f64::from(index / 128) * 7.0,
             };
             let handle = kernel.spawn(at).unwrap();
-            kernel.set_tile_collider(&handle, Some(body)).unwrap();
+            kernel
+                .set_tile_collider(&handle, on(&installed, body))
+                .unwrap();
             kernel
                 .set_velocity(
                     &handle,

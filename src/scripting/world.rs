@@ -5,7 +5,7 @@ use super::utilities::UtilityBudget;
 use crate::{
     collision::CollisionError,
     input::{Button, InputSnapshot},
-    kernel::{EntityHandle, Kernel, KernelError, Position, Velocity},
+    kernel::{ColliderPlacement, EntityHandle, Kernel, KernelError, Position, Velocity},
     tilemap::{MAX_REGION_CELLS, TileMap},
 };
 use mlua::{
@@ -338,7 +338,10 @@ impl EngineContext<'_> {
                 // The candidate is complete and owned before the kernel sees
                 // it, so a refused install cannot leave a partial map behind.
                 let map = TileMap::new(info, solids, cells).map_err(mlua::Error::external)?;
-                let result = self.kernel.borrow_mut().set_tilemap(map);
+                // The handle is discarded: Luau still addresses one implicit
+                // map until Phase 3 migrates the surface, and a script that
+                // could hold a map handle would be half-migrated.
+                let result = self.kernel.borrow_mut().set_tilemap(map).map(|_| ());
                 kernel_result(budget, result)
             })?,
         )?;
@@ -425,10 +428,29 @@ impl EngineContext<'_> {
                 let (handle, options) = <(AnyUserData, Option<Table>)>::from_lua_multi(args, lua)?;
                 let handle = entity(handle)?;
                 let collider = options.as_ref().map(tilemap::collider).transpose()?;
-                let result = self
-                    .kernel
-                    .borrow_mut()
-                    .set_tile_collider(&handle, collider);
+                // The script names no map, so this attaches to the implicit
+                // one. Resolved here rather than in the kernel, which has no
+                // implicit-map fallback by design (M2-6): a game creating a
+                // second map would otherwise silently change what an existing
+                // call means. Phase 3 replaces this with a map the script
+                // names, and `current_handle` goes with it.
+                let result = {
+                    let mut kernel = self.kernel.borrow_mut();
+                    match collider {
+                        Some(collider) => match kernel.current_handle() {
+                            Some(map) => kernel.set_tile_collider(
+                                &handle,
+                                Some(ColliderPlacement {
+                                    map,
+                                    collider,
+                                    position: None,
+                                }),
+                            ),
+                            None => Err(KernelError::NoTileMap),
+                        },
+                        None => kernel.set_tile_collider(&handle, None),
+                    }
+                };
                 kernel_result(budget, result)
             })?,
         )?;
@@ -440,7 +462,13 @@ impl EngineContext<'_> {
                 let handle = entity(handle)?;
                 let result = self.kernel.borrow().tile_collider(&handle);
                 match kernel_result(budget, result)? {
-                    Some(collider) => Ok(Value::Table(tilemap::collider_table(lua, &collider)?)),
+                    // The map is dropped here and returned alongside the box in
+                    // Phase 3, which is where M2-6 puts it. Until the script
+                    // can name a map, a handle it could read would have nothing
+                    // to be passed to.
+                    Some((_, collider)) => {
+                        Ok(Value::Table(tilemap::collider_table(lua, &collider)?))
+                    }
                     None => Ok(Value::Nil),
                 }
             })?,
@@ -467,14 +495,59 @@ fn pair(lua: &Lua, x: f64, y: f64) -> mlua::Result<Table> {
 /// overlapping placement are recoverable call errors, while an exhausted
 /// aggregate ceiling latches outside `pcall` so a script cannot spend the rest
 /// of its callback discovering the limit one refusal at a time.
+/// **Exhaustive on purpose, with no `_` arm.** A catch-all made the default for
+/// a new `KernelError` "ordinary catchable error", and got that wrong silently:
+/// M2 added `TileMapLimit` and `AggregateCellLimit`, which M2-8 makes *latching*,
+/// and they fell through it from the moment they existed. Nothing would have
+/// said so - not a compile error, not a failing test, not a visible diff - and
+/// the behaviour is a script `pcall`-ing past a budget ceiling and continuing to
+/// spend, which is the one thing latching exists to prevent. They are unreachable
+/// from Lua until Phase 3 gives a script a way to create a map, which is exactly
+/// how long the defect would have stayed invisible.
+///
+/// Listing every variant converts that into a compile error: a new one cannot be
+/// added without someone deciding which side of the line it is on. The cost is
+/// one arm per variant; the alternative was a Phase 3 obligation nobody could be
+/// reminded of. Found by the review session.
 fn kernel_result<T>(budget: &UtilityBudget<'_>, result: Result<T, KernelError>) -> mlua::Result<T> {
     let exhausted = match &result {
+        Ok(_) => None,
+        // Latching: an exhausted ceiling that a script must not be able to
+        // discover one refusal at a time.
         Err(KernelError::EntityLimit) => Some("entity limit exceeded"),
         Err(KernelError::ColliderLimit) => Some("collider limit exceeded"),
+        Err(KernelError::TileMapLimit) => Some("map limit exceeded"),
+        Err(KernelError::AggregateCellLimit) => Some("aggregate cell limit exceeded"),
         // Only a callback entry point reaches here; the fixed pass has its own
         // budget and faults the systems instead.
         Err(KernelError::Collision(CollisionError::Work)) => Some("tile work limit exceeded"),
-        _ => None,
+        // Catchable: schema, geometry, bounds, handles, phase and placement are
+        // recoverable call errors, and a script may `pcall` any of them.
+        //
+        // **M2-8 lists five latching failures and only four are arms above.**
+        // The fifth, region output, latches upstream in `region_output`, which
+        // charges at the call site before the kernel is reached - the aggregate
+        // is a property of the callback and the kernel cannot see one. So a
+        // reader holding M2-8 beside this match sees four of five and a gap
+        // that is not there. The edit that gap invites is latching
+        // `TileMap(TileMapError::Region)`, which would latch the **per-call**
+        // 4,096 cap: an ordinary out-of-bounds argument, deliberately catchable,
+        // and one the compiler cannot object to because the arm already exists
+        // and would only move. Now that the match is total it looks complete,
+        // which is exactly when that mistake becomes available.
+        Err(KernelError::Inactive)
+        | Err(KernelError::InvalidHandle)
+        | Err(KernelError::Nonfinite)
+        | Err(KernelError::NoTileMap)
+        | Err(KernelError::InvalidTileMap)
+        | Err(KernelError::TileMap(_))
+        | Err(KernelError::Collision(_))
+        | Err(KernelError::CollidersAttached)
+        | Err(KernelError::Capacity) => None,
+        // Never reaches here: an unpaired collider faults the fixed pass, which
+        // has its own path. Classified anyway because the match is exhaustive,
+        // and it is not budget exhaustion.
+        Err(KernelError::UnpairedCollider) => None,
     };
     if let Some(message) = exhausted {
         budget.limit(true, message)?;

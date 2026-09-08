@@ -121,6 +121,17 @@ pub enum KernelError {
     ColliderLimit,
     /// The integration scratch could not be reserved.
     Capacity,
+    /// A collider was found without the membership inserted alongside it.
+    ///
+    /// Unreachable through any entry point: [`Kernel::set_tile_collider`] is
+    /// the only writer of either component and writes them as one hecs bundle.
+    /// It exists so that the state M2-2 makes representable is **loud**. The
+    /// silent alternative is what the natural implementation produces - adding
+    /// `&Membership` to the sweep's query drops an unpaired body out of the
+    /// sweep *and* out of free flight, since that branch runs only when the
+    /// entity has no collider, so its position is simply never written and it
+    /// freezes in place with nothing reported. Found by the review session.
+    UnpairedCollider,
 }
 
 impl fmt::Display for KernelError {
@@ -141,6 +152,9 @@ impl fmt::Display for KernelError {
             }
             Self::ColliderLimit => f.write_str("collider limit exceeded"),
             Self::Capacity => f.write_str("could not reserve collision scratch"),
+            Self::UnpairedCollider => {
+                f.write_str("a collider was attached without a map membership")
+            }
         }
     }
 }
@@ -170,6 +184,38 @@ impl KernelError {
     }
 }
 
+/// The map a collider is a member of (M2-2).
+///
+/// A separate private component rather than a field on [`TileCollider`], and
+/// the layering argument is not the load-bearing one. `TileCollider` is an
+/// all-public-fields struct built by literal at fifteen sites outside this
+/// crate, so a private field breaks every one of them; and a public field would
+/// have to be a [`TileMapId`], which is `pub(crate)` precisely so two kernels
+/// cannot compare identities at the API boundary. The field variant costs
+/// either those fifteen sites or that visibility decision.
+///
+/// The cost of this choice is that "collider without membership" becomes
+/// representable. [`Kernel::set_tile_collider`] is the only place either
+/// component is written, and it writes them as one hecs bundle, so the unpaired
+/// state is unreachable rather than merely avoided.
+#[derive(Clone, Copy)]
+struct Membership(TileMapId);
+
+/// A collider, the map it joins, and optionally where to put the body (M2-5).
+///
+/// One call rather than detach-teleport-reattach, because a failure at the
+/// third step of that sequence leaves the body detached at a new position -
+/// a partial outcome the caller has to unwind. Here a refusal leaves
+/// membership, geometry and position exactly as they were.
+#[derive(Clone, Debug)]
+pub struct ColliderPlacement {
+    pub map: TileMapHandle,
+    pub collider: TileCollider,
+    /// `None` keeps the entity where it is. A position is a teleport under T5:
+    /// never swept, validated only against the destination map.
+    pub position: Option<Position>,
+}
+
 /// One body's sweep inputs, and after the sweep its resolved position.
 ///
 /// Only colliders need scratch. An entity in free flight recomputes
@@ -182,6 +228,9 @@ struct Candidate {
     position: Position,
     velocity: Velocity,
     collider: TileCollider,
+    /// Resolved per body rather than once per pass (M2-3). This field is the
+    /// whole of what makes two overlapping maps give independent results.
+    map: TileMapId,
 }
 
 /// Engine-owned world. No ECS references or query borrows escape this API.
@@ -340,12 +389,20 @@ impl Kernel {
             .ok()
             .map(|body| *body)
         {
-            // M2-R2: validated against the map the body is a member of, which
-            // under the Phase 1 invariant is `current`. A destination legal on
-            // some other live map is still refused - changing maps is M2-5's
-            // transfer and nothing else.
-            let id = self.current.ok_or(KernelError::NoTileMap)?;
-            let map = self.maps.get(id).expect("current names a live map");
+            // M2-R2: validated against the map the body is a **member** of, and
+            // never against any other live map. A destination that is legal
+            // only on a different map is still refused - changing maps is
+            // M2-5's transfer and nothing else. `set_position` keeps its
+            // signature deliberately: a map argument would give it two ways to
+            // say which map applies, and one of them would have to lose.
+            let membership = *self
+                .world
+                .get::<&Membership>(entity)
+                .expect("a collider and its membership are written as one bundle");
+            let map = self
+                .maps
+                .get(membership.0)
+                .expect("a member map cannot be removed while it has members");
             let mut work = Self::remaining_work(self.callback_work);
             let placement =
                 collision::check_placement(map, &collider, position.x, position.y, &mut work);
@@ -474,52 +531,70 @@ impl Kernel {
     /// leaves the installed map untouched and no reader can observe a partial
     /// one; the candidate arrives already schema-checked by [`TileMap::new`].
     ///
-    /// Under the Phase 1 invariant a map that is not `current` has no members,
-    /// so nothing is scanned and no work is charged for it - which is the
-    /// map-local half of M2-R1, reachable today.
+    /// Bodies on *other* maps are neither checked nor charged for. Membership
+    /// decides which bodies a map's contents can invalidate, so no operation on
+    /// one map can refuse because of a body on another.
     fn replace_map(&mut self, id: TileMapId, map: TileMap) -> Result<(), KernelError> {
         // Admission first: it is O(1), and a candidate that cannot be installed
         // should not charge for walking the bodies of the map it would replace.
         self.maps
             .admits_replacement(id, map.info().cell_count())
             .map_err(KernelError::from_table)?;
-        if self.current == Some(id) {
-            let Self {
-                world,
-                callback_work,
-                ..
-            } = self;
-            let info = map.info();
-            let mut work = Self::remaining_work(*callback_work);
-            let mut refusal = Ok(());
-            for (position, collider) in world.query::<(&Position, &TileCollider)>().iter() {
-                refusal = collider
-                    .check(&info)
-                    .and_then(|()| {
-                        collision::check_placement(
-                            &map, collider, position.x, position.y, &mut work,
-                        )
-                    })
-                    .map_err(KernelError::from);
-                if refusal.is_err() {
-                    break;
-                }
+        let Self {
+            world,
+            callback_work,
+            ..
+        } = self;
+        let info = map.info();
+        let mut work = Self::remaining_work(*callback_work);
+        let mut refusal = Ok(());
+        for (position, collider, membership) in world
+            .query::<(&Position, &TileCollider, &Membership)>()
+            .iter()
+        {
+            // Skipped before anything is charged: a non-member visits no cell,
+            // so the budget - which counts cell visits - sees nothing here.
+            if membership.0 != id {
+                continue;
             }
-            // Charged whether or not the swap happens, so a repeatedly refused
-            // install cannot walk the map for free.
-            *callback_work = callback_work.saturating_add(work.used());
-            refusal?;
+            refusal = collider
+                .check(&info)
+                .and_then(|()| {
+                    collision::check_placement(&map, collider, position.x, position.y, &mut work)
+                })
+                .map_err(KernelError::from);
+            if refusal.is_err() {
+                break;
+            }
         }
+        // Charged whether or not the swap happens, so a repeatedly refused
+        // install cannot walk the map for free.
+        *callback_work = callback_work.saturating_add(work.used());
+        refusal?;
         self.maps.replace(id, map).map_err(KernelError::from_table)
+    }
+
+    /// Whether any collider is a member of `id` (M2-R1).
+    ///
+    /// A query rather than a per-map counter: it is bounded by
+    /// [`MAX_LIVE_COLLIDERS`], removal is not a hot path, and a counter would
+    /// add exactly the bookkeeping M2-2 names as this design's cost. The same
+    /// trade as the scoped scans - O(all live colliders) to avoid an index -
+    /// taken deliberately in both places rather than twice by accident.
+    fn has_members(&self, id: TileMapId) -> bool {
+        self.world
+            .query::<&Membership>()
+            .iter()
+            .any(|membership| membership.0 == id)
     }
 
     /// Retire one map, refusing while a collider is a member of it (M2-R1).
     ///
-    /// Under the Phase 1 invariant every collider is a member of `current`, so
-    /// a map that is not `current` has none and its removal cannot be refused
-    /// by a body on another map - which is the clause M2-R1 exists to state.
+    /// Only a body on *this* map refuses it. A collider elsewhere is neither
+    /// checked nor detached, which is the clause M2-R1 exists to state and the
+    /// reason the global `colliders` counter is not consulted here.
     fn remove_map(&mut self, id: TileMapId) -> Result<(), KernelError> {
-        if self.current == Some(id) && self.colliders > 0 {
+        if self.has_members(id) {
             return Err(KernelError::CollidersAttached);
         }
         // On `?` where the five `current` resolutions are on `expect`, and the
@@ -545,22 +620,47 @@ impl Kernel {
     /// which is what keeps the identity stable across a swap and the M1
     /// contract - a refused replacement leaving the installed map whole -
     /// exactly as it was.
-    pub fn set_tilemap(&mut self, map: TileMap) -> Result<(), KernelError> {
+    /// Returns the implicit map's handle, which is the only way an external
+    /// caller can name it. Additive rather than a new rule: a collider is
+    /// attached by handle from Phase 2 on, so a caller installing the implicit
+    /// map and then attaching to it needs one, and there is deliberately no
+    /// public accessor for `current` (Phase 1 rejected adding one).
+    pub fn set_tilemap(&mut self, map: TileMap) -> Result<TileMapHandle, KernelError> {
         self.require_active()?;
-        match self.current {
-            Some(id) => self.replace_map(id, map),
+        let id = match self.current {
+            Some(id) => {
+                self.replace_map(id, map)?;
+                id
+            }
             None => {
                 let id = self.maps.insert(map).map_err(KernelError::from_table)?;
                 self.current = Some(id);
-                Ok(())
+                id
             }
-        }
+        };
+        Ok(TileMapHandle {
+            session: self.session.clone(),
+            id,
+        })
+    }
+
+    /// A handle to the implicit map, for the un-migrated Luau bindings alone.
+    ///
+    /// Crate-visible and retired in Phase 3 with the rest of that surface. A
+    /// binding is callback-scoped and cannot hold a handle between callbacks,
+    /// so it has to ask; a game gets one from [`Self::set_tilemap`] instead.
+    #[cfg(feature = "scripting")]
+    pub(crate) fn current_handle(&self) -> Option<TileMapHandle> {
+        self.current.map(|id| TileMapHandle {
+            session: self.session.clone(),
+            id,
+        })
     }
 
     /// Remove the implicit map, succeeding when none is installed.
     ///
-    /// T6 refuses while any collider remains attached, which under the Phase 1
-    /// invariant is exactly "while a collider is a member of it".
+    /// T6 refuses while a collider is a member of it, which under M2-R1 is a
+    /// statement about this map alone: a body on another map does not block it.
     pub fn clear_tilemap(&mut self) -> Result<(), KernelError> {
         self.require_active()?;
         match self.current {
@@ -627,11 +727,9 @@ impl Kernel {
         let Self {
             world,
             maps,
-            current,
             callback_work,
             ..
         } = self;
-        let scan_members = *current == Some(target);
         // The fifth `current` resolution, and it takes the same treatment as
         // the other four. Production reaches this only from `set_tile` with
         // `target = current`, and Phase 3's by-handle form will reach it with a
@@ -648,8 +746,24 @@ impl Kernel {
         // this one too rather than relying on the collider limit to do it.
         let mut work = Self::remaining_work(*callback_work);
         let mut outcome = work.charge(1).map_err(KernelError::from);
-        if becomes_solid && scan_members && outcome.is_ok() {
-            for (position, collider) in world.query::<(&Position, &TileCollider)>().iter() {
+        if becomes_solid && outcome.is_ok() {
+            for (position, collider, membership) in world
+                .query::<(&Position, &TileCollider, &Membership)>()
+                .iter()
+            {
+                // Non-members are skipped before charging. `MAX_CALLBACK_WORK`
+                // counts cell visits and skipping one visits no cell, so the
+                // alternative - charging for the walk - would make editing this
+                // map cost more because another map has bodies, which is a
+                // per-map term inside a budget that is meant to be
+                // map-independent. The cost is that this scan is no longer
+                // self-limiting: the walk is bounded by the 4,096 world calls a
+                // callback may make rather than by the work budget, at worst
+                // 4,096 x 1,024 entity visits. If that ever binds, index
+                // membership rather than changing the charge.
+                if membership.0 != target {
+                    continue;
+                }
                 // Charged before the refusal, so a repeatedly refused edit
                 // cannot scan the map for free.
                 if let Err(error) = work.charge(1) {
@@ -667,23 +781,48 @@ impl Kernel {
         Ok(map.set_tile(column, row, id)?)
     }
 
-    /// Attach, replace or remove an entity's collider (T3).
+    /// Attach, replace, transfer or remove an entity's collider (T3, M2-5).
     ///
-    /// Attaching requires an installed map and checks every cell the box
-    /// covers, not a sweep. A refusal leaves the previous collider, or its
-    /// absence, exactly as it was.
+    /// `Some` attaches at the current position, or moves the body too when the
+    /// placement carries one - which is the only way to reach a map that does
+    /// not overlap the body's current one. Either way it is one call, so there
+    /// is no intermediate state in which a body belongs to both maps or
+    /// neither, and a refusal leaves membership, geometry and position exactly
+    /// as they were.
+    ///
+    /// Checks run in M2-5's order, all before anything is written: the entity
+    /// handle, then the map handle, then the extents against the *destination*
+    /// map's tile size - a body legal on a 32-pixel grid can be illegal on an
+    /// 8-pixel one, since the cap is tile-relative - then the destination box
+    /// on the destination map.
+    ///
+    /// **This is the only writer of either component, and it writes them as one
+    /// hecs bundle.** M2-2 costed this design at four sites to keep in step;
+    /// three of them collapse - despawn drops every component together,
+    /// `remove_tilemap` refuses rather than clearing, and transfer *is* this
+    /// call - and a bundle makes the fourth structural. The unpaired state is
+    /// unreachable rather than merely avoided. The correction is the review
+    /// session's.
     pub fn set_tile_collider(
         &mut self,
         entity: &EntityHandle,
-        collider: Option<TileCollider>,
+        placement: Option<ColliderPlacement>,
     ) -> Result<(), KernelError> {
         let entity = self.validate(entity)?;
         let attached = self.world.get::<&TileCollider>(entity).is_ok();
-        let Some(collider) = collider else {
+        let Some(placement) = placement else {
             if attached {
                 self.world
-                    .remove_one::<TileCollider>(entity)
-                    .map_err(|_| KernelError::InvalidHandle)?;
+                    // `UnpairedCollider`, not `InvalidHandle`. The entity was
+                    // resolved by `validate` two lines up, so the only way this
+                    // fails is one half of the pair being missing - and saying
+                    // "stale or foreign entity handle" would be actively false
+                    // about a live entity, while leaving the collider attached.
+                    // Unreachable, like the other two readers of that state, but
+                    // this is the one whose message would have been wrong rather
+                    // than merely absent. Found by the review session.
+                    .remove::<(TileCollider, Membership)>(entity)
+                    .map_err(|_| KernelError::UnpairedCollider)?;
                 self.colliders -= 1;
             }
             return Ok(());
@@ -691,43 +830,70 @@ impl Kernel {
         if !attached && self.colliders >= MAX_LIVE_COLLIDERS {
             return Err(KernelError::ColliderLimit);
         }
-        // A collider may only be attached to `current` in Phase 1: a map
-        // created through the registry has no way to name itself here until
-        // Phase 2's membership arrives, so attaching to one is refused rather
-        // than silently resolved to the implicit map.
-        let id = self.current.ok_or(KernelError::NoTileMap)?;
-        let map = self.maps.get(id).expect("current names a live map");
-        collider.check(&map.info())?;
-        let position = *self
-            .world
-            .get::<&Position>(entity)
-            .expect("every entity has a position");
+        let id = self.validate_map(&placement.map)?;
+        let destination = match placement.position {
+            Some(position) => {
+                finite(position.x, position.y)?;
+                position
+            }
+            None => *self
+                .world
+                .get::<&Position>(entity)
+                .expect("every entity has a position"),
+        };
+        let map = self
+            .maps
+            .get(id)
+            .expect("a validated handle names a live map");
+        placement.collider.check(&map.info())?;
         let mut work = Self::remaining_work(self.callback_work);
-        let placement =
-            collision::check_placement(map, &collider, position.x, position.y, &mut work);
+        let legal = collision::check_placement(
+            map,
+            &placement.collider,
+            destination.x,
+            destination.y,
+            &mut work,
+        );
         self.callback_work = self.callback_work.saturating_add(work.used());
-        placement?;
+        legal?;
         self.world
-            .insert_one(entity, collider)
+            .insert(entity, (placement.collider, Membership(id)))
             .map_err(|_| KernelError::InvalidHandle)?;
+        *self
+            .world
+            .get::<&mut Position>(entity)
+            .expect("every entity has a position") = destination;
         if !attached {
             self.colliders += 1;
         }
         Ok(())
     }
 
-    /// An owned copy of an entity's collider, or `None` when it has none. The
-    /// entity is validated either way.
+    /// An entity's collider and the map it is a member of, or `None` when it
+    /// has none. The entity is validated either way.
+    ///
+    /// The map is returned rather than offered separately because M2-2 makes
+    /// membership uninferable from position: a read that omitted it would leave
+    /// a caller no way to observe which map a body is on at all.
     pub fn tile_collider(
         &self,
         entity: &EntityHandle,
-    ) -> Result<Option<TileCollider>, KernelError> {
+    ) -> Result<Option<(TileMapHandle, TileCollider)>, KernelError> {
         let entity = self.validate(entity)?;
-        Ok(self
+        let Ok(collider) = self.world.get::<&TileCollider>(entity) else {
+            return Ok(None);
+        };
+        let membership = *self
             .world
-            .get::<&TileCollider>(entity)
-            .ok()
-            .map(|body| *body))
+            .get::<&Membership>(entity)
+            .expect("a collider and its membership are written as one bundle");
+        Ok(Some((
+            TileMapHandle {
+                session: self.session.clone(),
+                id: membership.0,
+            },
+            *collider,
+        )))
     }
 
     /// Colliders currently attached, bounded by
@@ -845,6 +1011,32 @@ impl Kernel {
             )?;
         }
         if self.colliders == 0 {
+            // The counter is maintained at three sites and this early-out
+            // trusts it, so a desync here would free-flight every body through
+            // every wall with nothing reported. `sweep_bodies` checks the same
+            // partition from the other side; this covers the branch where it
+            // never runs.
+            // Debug-only where `sweep_bodies`' length check is not, and the
+            // asymmetry is about the *kind* of check rather than how often it
+            // runs. A cheap check on a hot path would be fine; this one is not
+            // cheap in the same way. The length check compares two integers
+            // already in hand, while this is an archetype walk to prove a
+            // negative - so keeping it in release charges every collider-free
+            // game a scan per tick against a desync that cannot arise.
+            //
+            // After that split, the two desync directions are guarded
+            // differently and it is worth being exact. A count too high, or too
+            // low but non-zero, both reach the sweep and fire its release
+            // assertion. The one case that stays debug-only is `colliders == 0`
+            // while colliders exist, and there the release symptom is bodies
+            // free-flighting through walls - observable, so what is debug-only
+            // is again the diagnosis rather than the protection. The reasoning
+            // is the review session's; mine was frequency, which does not
+            // settle it.
+            debug_assert!(
+                self.world.query::<&TileCollider>().iter().next().is_none(),
+                "the collider count disagrees with the world"
+            );
             // Today's allocation-free integration, unchanged. An installed map
             // cannot reach it: only a collider opts an entity into collision.
             for (position, velocity) in self.world.query_mut::<(&mut Position, &Velocity)>() {
@@ -880,34 +1072,69 @@ impl Kernel {
         let Self {
             world,
             maps,
-            current,
             bodies,
+            colliders,
             fixed_work,
             ..
         } = self;
         *fixed_work = 0;
-        // A collider cannot be attached without a map, and the map cannot be
-        // removed while one is attached, so this is defence rather than a path.
-        // Every body sweeps against `current` under the Phase 1 invariant;
-        // Phase 2 resolves a map per body instead, which is the change the
-        // fixed-pass equality and the per-body prediction are there to police.
-        let id = current.ok_or(KernelError::NoTileMap)?;
-        let map = maps.get(id).expect("current names a live map");
         bodies.clear();
         bodies
             .try_reserve_exact(MAX_LIVE_COLLIDERS as usize)
             .map_err(|_| KernelError::Capacity)?;
-        for (entity, position, velocity, collider) in world
-            .query::<(Entity, &Position, &Velocity, &TileCollider)>()
+        // **The query matches on `&TileCollider` alone and takes membership as
+        // an `Option`, deliberately.** Requiring `&Membership` here is the
+        // natural edit and it is the dangerous one: an unpaired collider would
+        // match neither this query nor `fixed_update`'s free-flight branch,
+        // which runs only for entities that have no collider, so its position
+        // would simply never be written. It would freeze in place with no
+        // refusal, no panic and every other body resolving normally. Collected
+        // and refused by name instead. The failure mode is the review
+        // session's.
+        let mut outcome = Ok(());
+        for (entity, position, velocity, collider, membership) in world
+            .query::<(
+                Entity,
+                &Position,
+                &Velocity,
+                &TileCollider,
+                Option<&Membership>,
+            )>()
             .iter()
         {
+            let Some(membership) = membership else {
+                outcome = Err(KernelError::UnpairedCollider);
+                break;
+            };
             bodies.push(Candidate {
                 entity,
                 position: *position,
                 velocity: *velocity,
                 collider: *collider,
+                map: membership.0,
             });
         }
+        outcome?;
+        // The partition `fixed_update` relies on, checked rather than inferred:
+        // every collider became a candidate, so no entity is about to fall
+        // between the sweep and free flight. It also catches a desync of the
+        // counter itself, which is maintained at three sites and which
+        // `fixed_update`'s early-out trusts.
+        // A hard assertion rather than a debug one, and the distinction matters
+        // because of what is debug-only: not the *protection* - an unpaired body
+        // freezes where it stands, which any fixture watching a position sees in
+        // either mode - but the **diagnosis**. In release a reader learns that a
+        // body stopped in the wrong place; here they learn that a collider never
+        // became a candidate, which is the sentence that names the bug. One
+        // integer comparison per fixed pass, in a pass that may charge 16,777,216
+        // work units and already panics in release at two `expect` sites below.
+        // Found by the review session running the control harness in release,
+        // where the marker was unreachable.
+        assert_eq!(
+            bodies.len(),
+            *colliders as usize,
+            "every collider must become a swept candidate"
+        );
         // Stable entity-identifier order, matching `entities`' hecs-slot
         // ordering. Bodies never affect one another, so this decides nothing
         // about the result; it decides which body is being charged when a
@@ -921,6 +1148,15 @@ impl Kernel {
                 candidate.velocity.x * FIXED_DT,
                 candidate.velocity.y * FIXED_DT,
             );
+            // Resolved per body, which is the whole of M2-3: two maps may cover
+            // the same world coordinates, and which one a body collides against
+            // is a property of the body rather than of where it stands. The
+            // lookup is an index into the slot table and carries no per-map
+            // term - the property Phase 2's equality and per-body prediction
+            // exist to police.
+            let map = maps
+                .get(candidate.map)
+                .expect("a member map cannot be removed while it has members");
             match collision::solve(
                 map,
                 &candidate.collider,
@@ -969,16 +1205,20 @@ mod tests {
         .expect("test map is within the frozen limits")
     }
 
-    fn body(kernel: &mut Kernel) -> EntityHandle {
+    fn body(kernel: &mut Kernel, map: &TileMapHandle) -> EntityHandle {
         let entity = kernel.spawn(Position { x: 0.0, y: 0.0 }).unwrap();
         kernel
             .set_tile_collider(
                 &entity,
-                Some(TileCollider {
-                    offset_x: 0.0,
-                    offset_y: 0.0,
-                    width: 32.0,
-                    height: 32.0,
+                Some(ColliderPlacement {
+                    map: map.clone(),
+                    collider: TileCollider {
+                        offset_x: 0.0,
+                        offset_y: 0.0,
+                        width: 32.0,
+                        height: 32.0,
+                    },
+                    position: None,
                 }),
             )
             .unwrap();
@@ -1088,58 +1328,93 @@ mod tests {
 
     #[test]
     fn removing_and_replacing_an_unrelated_map_ignores_another_maps_bodies() {
-        // The Phase 1 form of M2-R1, and it needs two live maps and a collider
-        // at once. `current` holds the body; B overlaps it exactly, so a rule
-        // that scanned all colliders instead of the edited map's own would
-        // refuse every operation below.
+        // **Both maps have a member, and that is the whole point of the
+        // fixture.** In Phase 1 only `current` could have members, so "scan the
+        // edited map's members" and "scan every collider" were the same scan
+        // and this test passed for a reason that has now gone away. With a body
+        // on each map a global scan is distinguishable from a scoped one, which
+        // is what these assertions have to be re-earned against. The prior is
+        // the review session's.
         let mut kernel = Kernel::new();
-        kernel.set_tilemap(grid(8, 8, 0)).unwrap();
-        let entity = body(&mut kernel);
+        let implicit = kernel.set_tilemap(grid(8, 8, 0)).unwrap();
+        let entity = body(&mut kernel, &implicit);
         let overlapping = kernel.create_tilemap(grid(8, 8, 0)).unwrap();
-        assert_eq!(kernel.tilemap_count(), 2, "two live maps and one collider");
+        // Four tiles away from the first body, so the two are never over the
+        // same cell and each assertion below names one map's member alone.
+        let other = kernel.spawn(Position { x: 128.0, y: 128.0 }).unwrap();
+        kernel
+            .set_tile_collider(
+                &other,
+                Some(ColliderPlacement {
+                    map: overlapping.clone(),
+                    collider: TileCollider {
+                        offset_x: 0.0,
+                        offset_y: 0.0,
+                        width: 32.0,
+                        height: 32.0,
+                    },
+                    position: None,
+                }),
+            )
+            .unwrap();
+        // A third map with no members at all, which is what the map-local
+        // successes need: with every live map holding a member, "scoped" and
+        // "refuses" would be indistinguishable.
+        let empty = kernel.create_tilemap(grid(8, 8, 0)).unwrap();
+        assert_eq!(kernel.tilemap_count(), 3, "three live maps");
+        assert_eq!(kernel.live_colliders(), 2, "and a member on two of them");
 
-        // Each map-local success below is paired with the same operation on
-        // `current` refusing. Without the pair, every assertion here would also
-        // pass against an implementation that had simply stopped checking.
+        // Every map-local success below is paired with the same operation on a
+        // map that *does* have a member refusing. Without the pair, each would
+        // also pass against an implementation that had stopped checking.
 
         // A cell edit scans only the edited map's members. Cell (0,0) of B is
-        // exactly where the body stands, so M1's global query - correct code,
+        // exactly where A's body stands, so M1's global query - correct code,
         // which is why this rule matters more than its siblings - would refuse.
         kernel
             .set_map_tile(overlapping.id, 0, 0, 1)
             .expect("a cell edit must ignore bodies on another map");
         assert_eq!(
+            kernel.set_map_tile(overlapping.id, 4, 4, 1),
+            Err(KernelError::Collision(CollisionError::Placement)),
+            "while a body on the edited map still refuses"
+        );
+        assert_eq!(
             kernel.set_tile(0, 0, 1),
             Err(KernelError::Collision(CollisionError::Placement)),
-            "while the same edit on the body's own map still refuses"
+            "and so does the implicit map's own body"
         );
 
-        // Replacement revalidates only its own members. This candidate sits a
-        // thousand pixels away, so the body is outside it and would refuse if
-        // anything were checked.
+        // Replacement revalidates only its own members. The candidate sits a
+        // thousand pixels away, so any body checked against it is outside.
         kernel
-            .replace_tilemap(&overlapping, grid(8, 8, 1_000))
-            .expect("replacing another map must not revalidate this map's bodies");
+            .replace_tilemap(&empty, grid(8, 8, 1_000))
+            .expect("replacing a map with no members must revalidate nobody");
         assert_eq!(
-            kernel.set_tilemap(grid(8, 8, 1_000)),
+            kernel.replace_tilemap(&overlapping, grid(8, 8, 1_000)),
             Err(KernelError::Collision(CollisionError::Placement)),
-            "while the same replacement of the body's own map still refuses"
+            "while replacing a map with one still refuses"
         );
 
         // Removal is refused only by a body on the map being removed.
         kernel
-            .remove_tilemap(&overlapping)
-            .expect("removing another map must not see this map's bodies");
+            .remove_tilemap(&empty)
+            .expect("removing a map with no members must not see anyone else's");
+        assert_eq!(
+            kernel.remove_tilemap(&overlapping),
+            Err(KernelError::CollidersAttached),
+            "while removing a map with a member refuses"
+        );
         assert_eq!(
             kernel.clear_tilemap(),
             Err(KernelError::CollidersAttached),
-            "while the map the body is on still refuses"
+            "and so does the implicit map the other body is on"
         );
-        assert_eq!(kernel.tilemap_count(), 1);
+        assert_eq!(kernel.tilemap_count(), 2);
         assert_eq!(kernel.tilemap().unwrap().unwrap().origin_x, 0, "unmoved");
         assert!(
-            kernel.position(&entity).is_ok(),
-            "and the body is untouched"
+            kernel.position(&entity).is_ok() && kernel.position(&other).is_ok(),
+            "and both bodies are untouched"
         );
     }
 }

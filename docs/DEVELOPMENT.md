@@ -613,3 +613,65 @@ suites rather than the one that happens to be the default. Every control edits a
 `.rs` source, so all four gates apply to every one of them, including the rebuild
 gate the sprites harness exempts its Luau controls from. Receipts are in the
 [Phase 1 record](implementation/TILEMAP_COLLISION_M2.md#phase-1-exit-2026-09-08).
+
+**Four of the twelve were re-earned at Phase 2 rather than replaced.** Their
+scoping predicate moved from `current == target` to the body's own membership,
+and the fixture they target moved from one body on one map to a member on each
+of two maps with a third empty. The harness reported them stale first, which is
+what it is for; they keep their original names, because "re-earned" is a claim
+about the same controls.
+
+### Membership and transfer guards (M2 Phase 2)
+
+```text
+pwsh -NoProfile -File tools/run_tilemap_membership_controls.ps1
+pwsh -NoProfile -File tools/run_tilemap_membership_controls.ps1 -Release
+```
+
+Nine controls over `src/kernel.rs` - eight that must be detected and one
+recorded redundancy - plus four self-tests, across
+`tests/tilemap_membership.rs` and `tests/tilemap_fixed_pass.rs`. A control names
+its own suite, since the fixed-pass rules and the behavioural ones live in
+different files.
+
+Two are worth knowing about before reading the list. **`sweep-requires-membership-and-loses-a-body`
+is the silent failure the design avoids**: requiring `&Membership` in the sweep's
+query is the natural way to write it, and with the collider/membership pair
+broken an unpaired body then matches neither the sweep nor free flight, so its
+position is never written and it freezes with nothing reported. Two edits,
+because the failure needs both, and what catches it is the `bodies.len() ==
+colliders` check - which is why that check is not decoration, and why it is a
+hard assertion rather than a debug one. As a `debug_assert_eq!` its marker was
+unreachable under `-Release`, so the control detected the fault at a different
+assertion and the marker gate refused it. **Run both harnesses in both profiles**;
+neither had been until Phase 2, and the release run is what found that.
+
+### What a green harness does not claim
+
+These harnesses are "patch it and watch a **runtime** assertion fail", and their
+first gate is *did this compile*. So a rule the compiler enforces is not merely
+invisible to them - it is **refused** by them, and always will be, because a
+control that does not compile is discarded as proving nothing. That is a
+property of the framework rather than a gap in any particular control.
+
+`kernel_result`'s exhaustive match is the example: removing an arm is a compile
+error, so there is no control for it and there cannot be one. It was checked the
+way that kind of rule has to be - a scratch variant added, `E0004` observed
+naming it *at that function*, the source restored to an identical hash. Reading
+the match is cheaper and proves as much about exhaustiveness; what only a run
+establishes is *where* the compiler objects, and a guarantee that fires
+somewhere unhelpful is worth less than one pointing at the line to edit.
+
+**So do not read an absent control as an absent guard.** Some rules are enforced
+by the compiler, some by a runtime assertion, some by a fixture, and only the
+middle kind fits a mutation harness. This is the inverse of the never-fired-gate
+reading and the same underlying mistake about what a green run is saying. The
+distinction is the review session's.
+
+**`equality-alone-cannot-see-a-per-body-term` is expected to pass.** A uniform
+per-body term raises both arms of the fixed-pass comparison equally, so the
+equality is satisfied by exactly the defect the geometry prediction beside it
+catches. That only demonstrates anything while the equality test asserts an
+equality and nothing else; pinning an absolute figure there would quietly make
+it a different check. Receipts are in the
+[Phase 2 record](implementation/TILEMAP_COLLISION_M2.md#phase-2-exit-2026-09-08).

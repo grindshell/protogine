@@ -1,0 +1,36 @@
+M2 Phase 2 membership and transfer: negative controls
+Recorded 2026-09-08 from tools/run_tilemap_membership_controls.ps1
+
+Nine controls over src/kernel.rs - eight detected with their rule removed and
+one recorded redundancy - plus four self-tests the harness refuses. Core
+configuration (--no-default-features), over tests/tilemap_membership.rs and
+tests/tilemap_fixed_pass.rs.
+
+Both profiles. The debug run is below; -Release reaches the same verdict for
+every entry, which it did not before sweep_bodies' length check became a hard
+assertion: as a debug assertion its marker was unreachable in release, so the
+control detected the fault at a different assertion and the marker gate refused
+it. The protection was never debug-only - a frozen body is observable in either
+mode - but the diagnosis was.
+
+The redundancy is the point rather than an exception: the same per-body term
+that the geometry prediction catches leaves the one-map/sixty-four-map equality
+satisfied, which is the contract's "necessary and not sufficient" claim
+demonstrated rather than asserted.
+CONTROL DETECTED: sweep-ignores-membership
+CONTROL DETECTED: teleport-uses-the-implicit-map
+CONTROL DETECTED: transfer-writes-before-validating
+CONTROL DETECTED: attach-writes-no-membership
+CONTROL DETECTED: sweep-requires-membership-and-loses-a-body
+CONTROL DETECTED: removal-ignores-its-own-members
+CONTROL DETECTED: despawn-keeps-the-collider-count
+CONTROL DETECTED: fixed-pass-adds-a-per-body-term
+REDUNDANT RULE CONFIRMED: equality-alone-cannot-see-a-per-body-term
+SELF-TEST REFUSED AS EXPECTED: self-test-clobbered-source
+SELF-TEST REFUSED AS EXPECTED: self-test-backdated-source
+SELF-TEST REFUSED AS EXPECTED: self-test-missing-test
+SELF-TEST REFUSED AS EXPECTED: self-test-inert-edit
+
+restored: test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+All 9 membership guards behaved as specified: 8 detected with the rule removed and 1 confirmed redundant. The harness refused all 4 self-tests.
