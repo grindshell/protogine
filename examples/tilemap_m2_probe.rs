@@ -32,12 +32,19 @@ use std::time::Instant;
 
 /// Proposed M2 budgets, from the contract. Every one of them is what this probe
 /// exists to confirm or move.
-const MAX_MAPS: usize = 32;
+const MAX_MAPS: usize = 64;
 const MAX_AGGREGATE_CELLS: usize = 524_288;
-/// The shape where both budget limits bind together: 524,288 / 32 = 16,384 =
-/// 128^2. It is also the largest shape whose 32 copies fit the aggregate at all,
+/// The shape where both budget limits bind together: 524,288 / 64 = 8,192
+/// cells, and 128 x 64 is a shape achieving that exactly, so 64 copies fill the
+/// aggregate to the cell. It is the largest shape whose 64 copies fit at all,
 /// which is why the constant-geometry comparison below uses it.
-const BALANCE_SIDE: u32 = 128;
+///
+/// Unlike the 32-map case, where 16,384 = 128^2 made the balance point a square,
+/// 8,192 is not a perfect square. The largest square whose 64 copies fit is
+/// 90 x 90, leaving 5,888 cells unused, so the exact shape has to be
+/// rectangular. That is no loss: unequal axes exercise the two sweep legs
+/// differently.
+const BALANCE: (u32, u32) = (128, 64);
 /// The largest single map M1's schema admits, used as the staging candidate.
 const WIDEST: (u32, u32) = (1_024, 256);
 const TILE: u32 = 32;
@@ -85,12 +92,15 @@ fn map_of(columns: u32, rows: u32) -> TileMap {
 
 /// The tile body `i` starts on inside its own map.
 ///
-/// Both coordinates vary, so both sweep legs vary; 21 and 100 are coprime, so
-/// the pair does not repeat inside a battery of 1,024. An earlier version held
-/// the column at 1, which made the X leg charge an identical 952 units for
-/// every body - 63% of the average cost, invariant across the whole battery.
+/// Both coordinates vary, so both sweep legs vary; 21 and 50 are coprime and
+/// their lowest common multiple exceeds 1,024, so the pair does not repeat
+/// inside a battery. An earlier version held the column at 1, which made the X
+/// leg charge an identical 952 units for every body - 63% of the average cost,
+/// invariant across the whole battery. The row range is bounded by the shorter
+/// axis: a body of eight tiles on a 64-row map must start above row 55 or it
+/// charges nothing on Y.
 fn start_cell(i: usize) -> (u32, u32) {
-    ((i % 21) as u32, (i % 100) as u32)
+    ((i % 21) as u32, (i % 50) as u32)
 }
 
 /// Where body `i` starts inside its own map, and how far it asks to travel.
@@ -102,7 +112,7 @@ fn body(i: usize) -> ((f64, f64), (f64, f64)) {
     let start = (f64::from((1 + column) * TILE), f64::from((1 + row) * TILE));
     // Far enough to reach the far boundary on both axes from anywhere inside,
     // so every sweep clamps rather than stopping short by arithmetic accident.
-    let span = f64::from(BALANCE_SIDE * TILE);
+    let span = f64::from(BALANCE.0.max(BALANCE.1) * TILE);
     (start, (span, span))
 }
 
@@ -124,8 +134,8 @@ fn body(i: usize) -> ((f64, f64), (f64, f64)) {
 /// total catches an additive term, and no amount of variation ever will.
 fn predicted(i: usize) -> u64 {
     let (column, row) = start_cell(i);
-    let faces = |from: u32| u64::from(BALANCE_SIDE - (1 + from + SPAN_TILES));
-    u64::from(SPAN_TILES) * (faces(column) + faces(row))
+    let faces = |side: u32, from: u32| u64::from(side - (1 + from + SPAN_TILES));
+    u64::from(SPAN_TILES) * (faces(BALANCE.0, column) + faces(BALANCE.1, row))
 }
 
 /// Sweep every body against the map `assign` gives it, sharing one budget.
@@ -177,13 +187,13 @@ fn check_predicted(charges: &[u64], arm: &str) -> u64 {
 /// `(columns + rows) * 9 * bodies`. Measured cost must be positive and must not
 /// exceed it - bounded on both sides, because `> 0` alone held for a Phase 2
 /// battery that did no work.
-fn ceiling_for(side: u32) -> u64 {
-    u64::from(side + side) * 9 * u64::from(MAX_LIVE_COLLIDERS)
+fn ceiling_for((columns, rows): (u32, u32)) -> u64 {
+    u64::from(columns + rows) * 9 * u64::from(MAX_LIVE_COLLIDERS)
 }
 
 fn storage() {
     let maps: Vec<TileMap> = (0..MAX_MAPS)
-        .map(|_| map_of(BALANCE_SIDE, BALANCE_SIDE))
+        .map(|_| map_of(BALANCE.0, BALANCE.1))
         .collect();
 
     assert_eq!(maps.len(), MAX_MAPS, "the maximum map count must be built");
@@ -222,9 +232,9 @@ fn work() {
     // aggregate necessarily means smaller maps, so comparing a 1024x256 map
     // against 32 128x128 ones would vary geometry and distribution together and
     // measure a ratio of about 0.2 rather than a per-map term.
-    let single = vec![map_of(BALANCE_SIDE, BALANCE_SIDE)];
+    let single = vec![map_of(BALANCE.0, BALANCE.1)];
     let many: Vec<TileMap> = (0..MAX_MAPS)
-        .map(|_| map_of(BALANCE_SIDE, BALANCE_SIDE))
+        .map(|_| map_of(BALANCE.0, BALANCE.1))
         .collect();
     let per_map = MAX_LIVE_COLLIDERS as usize / MAX_MAPS;
 
@@ -271,9 +281,9 @@ fn work() {
 
     let one: u64 = one_charges.iter().sum();
     let spread: u64 = many_charges.iter().sum();
-    let ceiling = ceiling_for(BALANCE_SIDE);
-    println!("one 128x128 map       {one} units");
-    println!("32 identical 128x128  {spread} units");
+    let ceiling = ceiling_for(BALANCE);
+    println!("one 128x64 map        {one} units");
+    println!("64 identical 128x64   {spread} units");
     println!("geometry predicts     {predicted_total} units");
     println!("arrangement ceiling   {ceiling} units");
     println!("fixed-pass ceiling    {MAX_FIXED_PASS_WORK} units");
@@ -316,13 +326,25 @@ fn shapes() {
             fits: true,
         },
         Shape {
-            name: "the balance point: thirty-two 128x128",
-            groups: &[(32, 128, 128)],
+            name: "the balance point: sixty-four 128x64",
+            groups: &[(64, 128, 64)],
             fits: true,
         },
+        // The arrangement that decided the map count. At 32 maps this was
+        // refused with half the cell budget unused; the owner raised the count
+        // to 64 on that evidence, so it now fits with room on both limits.
         Shape {
             name: "sixty-four 64x64 rooms",
             groups: &[(64, 64, 64)],
+            fits: true,
+        },
+        // A count still binds, and this is what it now refuses: many small
+        // rooms whose storage is trivial. Without any count, 524,288 maps of
+        // one cell would fit the cell budget while costing a slot, a
+        // generation and three Vec headers each.
+        Shape {
+            name: "one hundred 32x32 rooms",
+            groups: &[(100, 32, 32)],
             fits: false,
         },
         Shape {
@@ -370,26 +392,36 @@ fn shapes() {
         "every shape must have been evaluated"
     );
 
-    // The cross-over the contract's open question turns on. Below 128x128 the
-    // map count binds first; above it the cell budget does.
+    // The cross-over the contract's open question turns on: below this many
+    // cells per map the count binds first, above it the cell budget does.
+    let per_map = MAX_AGGREGATE_CELLS / MAX_MAPS;
     assert_eq!(
-        MAX_AGGREGATE_CELLS / MAX_MAPS,
-        (BALANCE_SIDE as usize) * (BALANCE_SIDE as usize),
-        "the two limits must bind together at exactly 128x128"
+        per_map,
+        (BALANCE.0 as usize) * (BALANCE.1 as usize),
+        "the comparison shape must be the one that fills the aggregate exactly"
     );
-    let side = BALANCE_SIDE as usize + 1;
+    // 8,192 is not a perfect square, so unlike the 32-map case the balance
+    // point is not a square shape. Recorded rather than rounded past, because
+    // 90x90 is what a reader reaching for a square will try.
+    let square = 90usize;
     assert!(
-        MAX_MAPS * side * side > MAX_AGGREGATE_CELLS,
-        "129x129 must be the first square whose 32 copies overflow"
+        MAX_MAPS * square * square <= MAX_AGGREGATE_CELLS
+            && MAX_MAPS * (square + 1) * (square + 1) > MAX_AGGREGATE_CELLS,
+        "90x90 must be the largest square whose {MAX_MAPS} copies fit"
     );
-    println!("cross-over confirmed at {BALANCE_SIDE}x{BALANCE_SIDE}");
+    println!(
+        "cross-over at {per_map} cells per map ({}x{} exactly; largest square {square}x{square}, {} cells spare)",
+        BALANCE.0,
+        BALANCE.1,
+        MAX_AGGREGATE_CELLS - MAX_MAPS * square * square
+    );
     println!("TILEMAP-M2 PASS mode=shapes");
 }
 
 fn timing() {
     const REPEATS: usize = 15;
     let maps: Vec<TileMap> = (0..MAX_MAPS)
-        .map(|_| map_of(BALANCE_SIDE, BALANCE_SIDE))
+        .map(|_| map_of(BALANCE.0, BALANCE.1))
         .collect();
     let per_map = MAX_LIVE_COLLIDERS as usize / MAX_MAPS;
 

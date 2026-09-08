@@ -281,16 +281,16 @@ move.** M1's ceilings are explicitly not aggregate multi-map limits.
 
 | Resource | Proposed bound | Reasoning |
 | --- | --- | --- |
-| Maps per session | 32 | Enough for a screen of rooms plus staging; small enough that a linear scan over maps is never a cost worth optimising |
-| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance, and it fits inside one callback with the arithmetic stated rather than asserted. A Luau install charges exactly once per cell - `src/scripting/world.rs:333` wires `charge_callback_work` into `solid_flags` and `cell_ids`, and `Kernel::set_tilemap` charges only for revalidating existing members, which is why Phase 4's install-cost test lands on 510 + 5 + 1 = 516 rather than the 1,026 a second charge per cell would add. So filling the whole budget costs 524,288 cells plus at most 32 x 1,024 solid flags = **557,056 of 1,048,576**, leaving 47% spare |
+| Maps per session | 64 | Raised from a proposed 32 by the owner on the Phase 0 probe's evidence, recorded under [OPEN] 4 below. Still small enough that a linear scan over maps is never a cost worth optimising |
+| Aggregate live cells | 524,288 | 1 MiB of cell storage, twice M1's single-map allowance, and it fits inside one callback with the arithmetic stated rather than asserted. A Luau install charges exactly once per cell - `src/scripting/world.rs:333` wires `charge_callback_work` into `solid_flags` and `cell_ids`, and `Kernel::set_tilemap` charges only for revalidating existing members, which is why Phase 4's install-cost test lands on 510 + 5 + 1 = 516 rather than the 1,026 a second charge per cell would add. So filling the whole budget costs 524,288 cells plus at most 64 x 1,024 solid flags = **589,824 of 1,048,576**, leaving 44% spare |
 | Per-map dimensions and cells | unchanged: 1..1,024 per axis, at most 262,144 cells | A single map is no larger than M1's |
-| Staging | at most one candidate map in flight | Peak cell storage is the aggregate plus one map: `(524,288 + 262,144) x 2` = 1,572,864 bytes, exactly 1.5 MiB. Adding the solid flags from the row above - 32 x 1,024 live plus the candidate's 1,024 - makes the peak 1,606,656 bytes, 1.532 MiB. The unqualified "about 1.5 MiB" an earlier draft carried was true of cells and not of the total, in a table where the row above counts flags explicitly |
+| Staging | at most one candidate map in flight | Peak cell storage is the aggregate plus one map: `(524,288 + 262,144) x 2` = 1,572,864 bytes, exactly 1.5 MiB. Adding the solid flags from the row above - 64 x 1,024 live plus the candidate's 1,024 - makes the peak 1,639,424 bytes, 1.563 MiB. The unqualified "about 1.5 MiB" an earlier draft carried was true of cells and not of the total, in a table where the row above counts flags explicitly |
 | Live colliders | unchanged: 1,024 across all maps | The limit that bounds the fixed pass is global, so it stays global |
 | Fixed-pass work | unchanged: 16,777,216 | Not a fresh derivation: 1,280 faces x 9 cells x 1,024 bodies = 11,796,480 is what `the_fixed_pass_ceiling_cannot_be_reached_under_the_frozen_limits` (`src/collision.rs:590`) already computes and asserts. The bound is insensitive to how bodies are distributed **by construction**, given four inputs M2 leaves alone: `MAX_LIVE_COLLIDERS` stays global, `MAX_SPAN_CELLS` is unchanged, per-map `columns + rows` is still capped at 1,280, and the pass still iterates colliders rather than maps. See the Phase 0 probe for what is actually at risk |
 | Callback work | unchanged: 1,048,576 | Now shared across every map a callback touches |
 | Region output | unchanged: 4,096 per call, 262,144 per callback | Now aggregate across maps |
 
-Solid-flag storage is at most 32 x 1,024 flags. Map count and aggregate cells are
+Solid-flag storage is at most 64 x 1,024 flags. Map count and aggregate cells are
 both checked before allocation.
 
 **Admission is checked against `live - replaced + candidate`**, where `replaced`
@@ -348,28 +348,38 @@ built around it.
 Phase 2.** What is at risk is not the bound - which cannot depend on distribution,
 for the four structural reasons in the budget table - but the M2 *implementation*
 growing a per-map term the M1 one did not have: resolving members by scanning
-maps, revalidating on the pass, anything carrying a factor of 32. The check is:
+maps, revalidating on the pass, anything carrying a factor of 64. The check is:
 
-> A fixed pass with 1,024 bodies on **one 128x128 map** charges **exactly** what
-> the same 1,024 bodies charge spread across **32 identical 128x128 maps**, from
+> A fixed pass with 1,024 bodies on **one 128x64 map** charges **exactly** what
+> the same 1,024 bodies charge spread across **64 identical 128x64 maps**, from
 > the same start positions and velocities relative to each map.
 
 **Both arms must have identical map geometry, and two earlier drafts of this
 paragraph did not.** Sweep cost is proportional to the map, not only to the body:
 `sweep` enumerates faces until the boundary index clamps, so a smaller map ends
-the walk sooner and charges less. "Spread across 32 maps" under a fixed aggregate
-*necessarily means smaller maps*, so comparing 1,024 bodies on one 1,024x256 map
-against 1,024 bodies on 32 128x128 maps compares 11,796,480 against 2,359,296 - a
-ratio of 0.2, varying geometry and distribution together. Phase 2 would have
+the walk sooner and charges less. "Spread across many maps" under a fixed
+aggregate *necessarily means smaller maps*, so comparing 1,024 bodies on one
+1,024x256 map against 1,024 bodies spread over the maximum map count compares
+11,796,480 against 1,769,472 - a ratio of 0.15, varying geometry and distribution
+together. Phase 2 would have
 asserted that, watched it fail for an entirely legitimate reason, and someone
 would have weakened it back to "still fits" with a failing test as the
 justification. Holding geometry constant leaves distribution as the only
 difference, which is what the check was always for.
 
-128x128 is not an arbitrary choice: `524,288 / 32 = 16,384 = 128²`, so it is the
-largest shape whose 32 copies fit the aggregate at all - 32 copies of 129x129 is
-532,512 and overflows. The point where the two budget limits bind together is
-therefore also the maximum-stress form of the constant-geometry comparison.
+128x64 is not an arbitrary choice: `524,288 / 64 = 8,192` cells, and 128x64 is a
+shape achieving that exactly, so 64 copies fill the aggregate to the cell and no
+larger shape fits 64 times. The point where the two budget limits bind together
+is therefore also the maximum-stress form of the constant-geometry comparison.
+
+**Raising the map count to 64 cost this shape its symmetry, and that is worth
+recording rather than rounding past.** At 32 maps the balance point was
+`16,384 = 128²`, a square. At 64 it is 8,192 cells, which is not a perfect
+square: the largest square whose 64 copies fit is 90x90, leaving 5,888 cells
+unused. So the exact shape has to be rectangular. No loss for the comparison -
+unequal axes exercise the two sweep legs differently, which is strictly better -
+but a reader reaching for a square will try 90x90 and find slack, so the probe
+asserts both facts.
 
 The check has a single right answer, fails the moment a per-map cost appears, and
 **cannot fail at Phase 0**, where a prototype holding `Vec<TileMap>` and indexing
@@ -389,19 +399,19 @@ arrangement's own worst case, and no amount of varying the battery helps, becaus
 variation does not expose an additive constant. **Only a prediction does.**
 
 The prediction is available in closed form. For a tile-aligned body of
-`SPAN_TILES` tiles starting on tile `(column, row)` of a `side x side` map and
-sweeping to both far boundaries, the leading edge enumerates every face from
+`SPAN_TILES` tiles starting on tile `(column, row)` of a `columns x rows` map
+and sweeping to both far boundaries, the leading edge enumerates every face from
 `1 + column + SPAN_TILES` up to the last interior one - the boundary face clamps
 before a cell is inspected and charges nothing - with `SPAN_TILES` perpendicular
 cells at each, and the Y leg does the same from the resolved X:
 
-> `charge(body) = SPAN_TILES * ((side - 1 - column - SPAN_TILES) + (side - 1 - row - SPAN_TILES))`
+> `charge(body) = SPAN_TILES * ((columns - 1 - column - SPAN_TILES) + (rows - 1 - row - SPAN_TILES))`
 
 The Phase 0 probe asserts that per body and reproduces its measurement exactly.
-**Before it existed, a per-body overhead of up to 788 units each - 52% of a
-body's actual average cost - passed every assertion in the mode**, because the
-only bound was the arrangement's worst case of 2,359,296 against a measured
-1,469,888. The gap is not argued: adding one unit per body leaves all five
+**Before it existed, a per-body overhead of up to 609 units each - 54% of a
+body's actual average cost of 1,119 - passed every assertion in the mode**,
+because the only bound was the arrangement's worst case of 1,769,472 against a
+measured 1,145,600. The gap is not argued: adding one unit per body leaves all five
 configuration assertions passing, leaves the two arms equal, sits comfortably
 under the ceiling, and fails only the prediction. The derivation, the observation
 that variation can never catch an additive term, and the closed form are the
@@ -409,13 +419,12 @@ review session's.
 
 **"Still fits" is not an acceptable restatement of it anywhere**, and an earlier
 draft left that older phrasing in the evidence table where Phase 2's exit gate
-reads it. Under the constant-geometry arms above, both charge 2,359,296 against a
-16,777,216 ceiling, so "still fits" is satisfied with 86% of the ceiling unused
-and goes on being satisfied by a **sevenfold** per-map term - the exact threshold
-is `16,777,216 / 2,359,296 = 7.11`, so seven times the correct cost still passes
-and only eight times fails. An accidental unit per map per body adds
-1,024 x 32 = 32,768 and lands at 2,392,064, which is not close to anything. "Still fits" passes. The equality
-fails. A small accidental per-map cost is the realistic shape of the mistake, so
+reads it. Under the constant-geometry arms above, both charge 1,145,600 against a
+16,777,216 ceiling, so "still fits" is satisfied with 93% of the ceiling unused
+and goes on being satisfied by a **fourteenfold** per-map term - the exact
+threshold is `16,777,216 / 1,145,600 = 14.6`. An accidental unit per map per body
+adds 1,024 x 64 = 65,536 and lands at 1,211,136, which is not close to anything.
+"Still fits" passes. The equality fails. A small accidental per-map cost is the realistic shape of the mistake, so
 the weaker phrasing would have been satisfied by precisely the defect the check
 exists to catch, and the smaller the maps the more room it has to hide in.
 
@@ -432,7 +441,7 @@ the second half of the freeze pass, on the same edit that introduced it.)
 | Independence | Two maps with overlapping coordinate ranges and different walls; a body on each; each stops at its own wall and neither sees the other's |
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
-| Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 identical 128x128 maps charges **exactly** what the closed form above predicts, body by body, **and** the same as those bodies charge on one 128x128 map - the prediction because an equality alone cannot see a uniformly added per-body term, the equality because it is the cheaper cross-check; both Phase 2's to assert, and neither is "still fits" |
+| Budgets | The 65th map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 identical 128x128 maps charges **exactly** what the closed form above predicts, body by body, **and** the same as those bodies charge on one 128x128 map - the prediction because an equality alone cannot see a uniformly added per-body term, the equality because it is the cheaper cross-check; both Phase 2's to assert, and neither is "still fits" |
 | Migration | Every renamed call refuses its M1 argument shape rather than guessing; `set_position` on a body validates against its member map and refuses a destination that is legal only on another |
 | Membership integrity | A collider and its membership are attached, transferred, removed and despawned together, with no observable state where one exists without the other |
 
@@ -471,18 +480,25 @@ most confidence are the ones that have needed correcting.
    fits in one callback, which is a real constraint but not obviously the one
    that should decide it. A game wanting sixteen 128x128 rooms needs 262,144 and
    fits comfortably; a game wanting four full-size maps does not.
-4. **Whether 32 maps is a limit anyone will feel**, and whether the map count
-   needs to be separate from the aggregate cell budget at all, given the cell
-   budget already bounds storage.
+4. ~~**Whether 32 maps is a limit anyone will feel.**~~ **Resolved by the owner
+   on 2026-09-08: 64.** The probe found the one arrangement where a single limit
+   refuses while the other is comfortable - sixty-four 64x64 rooms, an ordinary
+   metroidvania, at 262,144 cells and exactly half the aggregate - and the owner
+   raised the count on that evidence.
 
-   The shape of that question is settled even though the answer is not.
-   `524,288 / 32 = 16,384 = 128²`, so the two limits bind at exactly the same
-   point for 128x128 rooms: **below that size the map count binds first, above
-   it the cell budget does.** So the count is not redundant - it constrains
-   precisely one kind of game, the one with many small rooms - and the open
-   question is whether that game is worth constraining, which is a judgement
-   about intended content rather than about storage. Noticed while designing the
-   Phase 0 measurement, which is an argument for designing measurements.
+   The count is not redundant and never was: without one, 524,288 maps of a
+   single cell would fit the cell budget while costing a slot, a generation and
+   three `Vec` headers each. What it constrains is games with many small rooms,
+   and 64 moves that boundary from "sixty-four ordinary rooms" to "one hundred
+   32x32 rooms", which the probe now carries as the shape the count refuses.
+
+   The cross-over moved with it, and lost a property worth noting.
+   `524,288 / 64 = 8,192` cells per map: below that size the count binds first,
+   above it the cell budget does. But 8,192 is not a perfect square, where
+   16,384 was `128²`, so the balance point is now a rectangle - 128x64 exactly -
+   and the largest square whose 64 copies fit is 90x90 with 5,888 cells spare.
+   Noticed while designing the Phase 0 measurement, which is an argument for
+   designing measurements.
 
 **Resolved, and no longer open: `tile_collider` must return the map.** It was
 listed here as a question of shape. It is not - M2-2 makes membership
@@ -502,10 +518,10 @@ such**: the probe was built to make some of them wrong and did not.
 
 | Mode | Result |
 | --- | --- |
-| `storage` | 32 maps of 128x128 filling the aggregate exactly measure **1,081,344** bytes live and **1,606,656** at peak with the largest staging candidate, matching the contract's arithmetic to the byte |
-| `work` | 1,024 bodies of maximum footprint sweeping a 128x128 map charge **1,469,888** units - 62.3% of that arrangement's own worst case of 2,359,296, and 8.8% of the 16,777,216 fixed-pass ceiling. Every body charges exactly what its geometry predicts, in both arms |
-| `shapes` | All five arrangements behave as the contract claims, and the cross-over is confirmed at 128x128 with 129x129 the first square whose 32 copies overflow |
-| `timing` | p50 **2.4289 ms**, p95 2.5739, max 2.7949, against a 16.667 ms tick |
+| `storage` | 64 maps of 128x64 filling the aggregate exactly measure **1,114,112** bytes live and **1,639,424** at peak with the largest staging candidate, matching the contract's arithmetic to the byte |
+| `work` | 1,024 bodies of maximum footprint sweeping a 128x64 map charge **1,145,600** units - 64.7% of that arrangement's own worst case of 1,769,472, and 6.8% of the 16,777,216 fixed-pass ceiling. Every body charges exactly what its geometry predicts, in both arms |
+| `shapes` | All six arrangements behave as the contract claims; the cross-over is confirmed at 8,192 cells per map, which 128x64 achieves exactly and no square achieves at all - 90x90 is the largest, with 5,888 cells spare |
+| `timing` | p50 **1.7794 ms**, p95 1.9007, max 1.9563, against a 16.667 ms tick |
 
 **The storage figure is measured rather than derived, and the distinction was
 the reason to build it that way.** The probe allocates through the production
@@ -517,8 +533,12 @@ is exact, and that is now observed instead of assumed.
 
 **One cross-check worth more than any single figure.** M1's Phase 2 stress
 charged 11,386,880 units at a p50 of 16.5 to 17.8 ms. This arrangement charges
-1,469,888 at 2.4289 ms. The ratio of units is 7.75, and 2.4289 x 7.75 = 18.8 ms,
-which lands a little above M1's recorded p50 range. That is a single point of comparison
+1,145,600 at 1.7794 ms. The ratio of units is 9.94, and 1.7794 x 9.94 = 17.7 ms,
+which lands inside M1's recorded p50 range. The arrangement changed twice between
+first measuring this and settling it - the start column started varying, then the
+map count rose to 64 - and the derived figure moved 17.7, 18.8, 17.7 while M1's
+range stayed put, which is about as much as one point of comparison can be asked
+to survive. That is a single point of comparison
 across different map shapes, different arrangements and different runs, so it is
 an observation and not a model - but it is the first evidence in this plan that
 the charged work unit tracks time at all, and the plan has been treating the two
@@ -547,21 +567,31 @@ exercising one axis.
 
 ### What the probe found that the contract did not predict
 
-**The map count binds alone for a game that is not absurd.** `shapes` includes
-sixty-four 64x64 rooms: 262,144 cells, exactly half the aggregate, refused by the
-count of 32 with storage half unused. That is a large but ordinary
+**The map count bound alone for a game that is not absurd, and the owner raised
+it.** `shapes` included sixty-four 64x64 rooms at the proposed 32-map limit:
+262,144 cells, exactly half the aggregate, refused by the count with storage half
+unused. That is a large but ordinary
 metroidvania-shaped game, and it is the only arrangement tested where one limit
 refuses while the other is comfortable.
 
-This is evidence on [OPEN] 4 rather than a settlement of it. A count is clearly
-needed - without one, 524,288 maps of a single cell would fit the cell budget
-while costing a slot, a generation and three `Vec` headers each - so the question
-was never whether to have one but where to put it. **32 is defensible and 64
-would cost nothing measurable**: solid flags would rise to 65,536 bytes total,
-which is noise beside a megabyte of cells, and the balance point would move from
-128x128 to about 90x90. Raising it is not proposed here, because the choice is
-about which games to constrain rather than about what fits, and that is the
-owner's call rather than the probe's.
+A count is needed either way - without one, 524,288 maps of a single cell would
+fit the cell budget while costing a slot, a generation and three `Vec` headers
+each - so the question was never whether to have one but where to put it. The
+probe took that to the owner rather than settling it, because which games to
+constrain is a product judgement and not something a measurement decides.
+**Raised to 64 on 2026-09-08.** Solid flags rise to 65,536 bytes total, noise
+beside a megabyte of cells, and the shape the count now refuses is a hundred
+32x32 rooms rather than sixty-four ordinary ones.
+
+The knock-on was larger than "change a constant", which is the part worth
+keeping. The constant-geometry comparison shape is derived from the map count -
+it must be the largest shape whose *N* copies fit the aggregate - so raising N
+retired 128x128, whose 64 copies overflow at 1,048,576. Every figure downstream
+moved with it: the comparison is now 128x64, the arrangement's worst case falls
+from 2,359,296 to 1,769,472, the measured total from 1,469,888 to 1,145,600, the
+per-body window the prediction closes from 788 units to 609, and the "still fits"
+threshold from sevenfold to fourteenfold. The probe and this document were
+re-derived together rather than patched, and all six breakages re-run.
 
 ## The one failure mode this document has produced
 

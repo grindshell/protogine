@@ -1,28 +1,32 @@
 M2 Phase 0 feasibility probe
-Windows MSVC x64, rustc 1.95.0 (59807616e 2026-04-14), against commit 78e8b7e
+Windows MSVC x64, rustc 1.95.0 (59807616e 2026-04-14), against commit f60a2ae
 
 cargo build --release --example tilemap_m2_probe --no-default-features
 
 Prototype geometry over a Vec<TileMap>, not the production kernel. The work
 mode's two arms are equal by construction - a Vec index has no per-map cost to
 grow - so that pair is a reference value for Phase 2 and not evidence on its
-own. What does guard the arrangement is the per-body geometry prediction, which
-an equality cannot replace: a uniformly added per-body term leaves both arms
-equal.
+own. What guards the arrangement is the per-body geometry prediction, which an
+equality cannot replace: a uniformly added per-body term leaves both arms equal.
+
+Run at the owner's map count of 64, raised from a proposed 32 on this probe's
+own evidence. The comparison shape is derived from that count - it must be the
+largest shape whose 64 copies fit the aggregate - so it is 128x64 rather than
+the 128x128 the 32-map version used.
 
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode storage
 aggregate cells   524288
-live storage      1081344 bytes
-peak with staging 1606656 bytes
-contract predicts 1606656 bytes
+live storage      1114112 bytes
+peak with staging 1639424 bytes
+contract predicts 1639424 bytes
 TILEMAP-M2 PASS mode=storage
 PASS MARKER CONFIRMED: storage
 
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode work
-one 128x128 map       1469888 units
-32 identical 128x128  1469888 units
-geometry predicts     1469888 units
-arrangement ceiling   2359296 units
+one 128x64 map        1145600 units
+64 identical 128x64   1145600 units
+geometry predicts     1145600 units
+arrangement ceiling   1769472 units
 fixed-pass ceiling    16777216 units
 baseline pair equal; Phase 2 owns the assertion
 TILEMAP-M2 PASS mode=work
@@ -31,24 +35,25 @@ PASS MARKER CONFIRMED: work
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode shapes
 sixteen 128x128 rooms                      16 maps  262144 cells  fits=true  binds=-
 overworld 256x256 plus eight 64x64 rooms    9 maps   98304 cells  fits=true  binds=-
-the balance point: thirty-two 128x128      32 maps  524288 cells  fits=true  binds=-
-sixty-four 64x64 rooms                     64 maps  262144 cells  fits=false binds=map count
+the balance point: sixty-four 128x64       64 maps  524288 cells  fits=true  binds=-
+sixty-four 64x64 rooms                     64 maps  262144 cells  fits=true  binds=-
+one hundred 32x32 rooms                    100 maps  102400 cells  fits=false binds=map count
 four full-size 1024x256 maps                4 maps 1048576 cells  fits=false binds=cell budget
-cross-over confirmed at 128x128
+cross-over at 8192 cells per map (128x64 exactly; largest square 90x90, 5888 cells spare)
 TILEMAP-M2 PASS mode=shapes
 PASS MARKER CONFIRMED: shapes
 
 pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode timing
-charged 1469888 units over 15 passes
-p50 2.4289ms  p95 2.5739ms  max 2.7949ms
+charged 1145600 units over 15 passes
+p50 1.9201ms  p95 2.2106ms  max 2.3687ms
 tick period is 16.667 ms; this is one pass, not a frame
 TILEMAP-M2 PASS mode=timing
 PASS MARKER CONFIRMED: timing
 
 --- The probe's own assertions, watched failing -------------------------------
 
-Each breakage was applied to examples/tilemap_m2_probe.rs, built, run, and
-reverted; the tree was confirmed byte-identical after each.
+Each breakage applied to examples/tilemap_m2_probe.rs, built, run, reverted;
+the tree confirmed byte-identical after each. All six re-run at 64 maps.
 
   spread arm all on one map             exit=101  every map must carry its share of bodies
   bodies that do not move               exit=101  every body must charge something
@@ -57,23 +62,22 @@ reverted; the tree was confirmed byte-identical after each.
   a shape claimed to fit that does not  exit=101  does not behave as the contract claims
   one unit per body for membership      exit=101  every body must charge exactly what its
                                                   geometry predicts, and body 0 did not
-                                                  left: 1905  right: 1904
 
-The sixth passes all five of the others. Before the prediction existed, a
-per-body overhead of up to 788 units each - 52% of a body's average cost of
-1,435 - passed every assertion in the work mode, because the only bound was the
-arrangement's worst case of 2,359,296 against a measured 1,469,888.
+The sixth passes all five of the others. Without the prediction, a per-body
+overhead of up to 609 units each - 54% of a body's average cost of 1,119 -
+passed every assertion, because the only bound was the arrangement's worst case
+of 1,769,472 against a measured 1,145,600.
 
 --- Cross-check against M1 -----------------------------------------------------
 
   M1 Phase 2 long sweep : 11,386,880 units, p50 16.5-17.8 ms
-  M2 Phase 0 arrangement:  1,469,888 units, p50 2.4289 ms
-  ratio of units 7.75; 2.4289 x 7.75 = 18.8 ms, a little above M1's range.
-  One point of comparison across different shapes and runs: an observation,
-  not a model.
+  M2 Phase 0 arrangement:  1,145,600 units, p50 1.7794 ms
+  ratio of units 9.94; 1.7794 x 9.94 = 17.7 ms, inside M1's range.
+  The arrangement changed twice while settling this and the derived figure
+  moved 17.7, 18.8, 17.7 against a fixed M1 range. An observation, not a model.
 
 --- SHA-256 of the probe and its runner, as shipped ----------------------------
 
-  8EAADA72CA73569261F574CF2534FD0529D96C0F8DEE5011F7C1F7ECF90C0BC0  examples/tilemap_m2_probe.rs
+  DF5C1F7619F456058DEE0CA24D84CCAC1536708A45CC35CA9B7B841C57B0CA95  examples/tilemap_m2_probe.rs
   D0865F0BC1C8E7894D409F4692ED8F790039515B7D2DEB0860B53A7F39076930  tools/run_tilemap_m2_probe.ps1
-  B6C9CCBAF846AB4702F12F7EB0226E14F34C2C86256C04EAD066C7DAC9A957DE  docs/implementation/TILEMAP_COLLISION_M2.md
+  B4F752860745830C2E4B0EFFAD37877F3977C14DE98E4C66A1FB0607DA317DB2  docs/implementation/TILEMAP_COLLISION_M2.md
