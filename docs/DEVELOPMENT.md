@@ -314,6 +314,11 @@ all four under `MAX_PATH` - and 120 rather than 121 because `MAX_PATH` is 260
 subtraction is `259 - 139`. Redoing it from 260 gives 121, which puts
 `script-tilemap-controls` at exactly one character too many.
 
+Which half of that is measured here matters, because the numbers sit in one
+sentence and have different standing. The 132, 134 and 139 tails and the 261
+failure below were measured against this tree; the 259 boundary is `MAX_PATH`'s
+documented definition, and nobody here has watched 259 succeed where 260 fails.
+
 Shortening the harness directory names would be optimising the wrong leg. The
 deepest paths in a built copy are not `cl.exe`'s at all: cargo's incremental
 fragments reach a tail of 158, which exceeds the C++ limit under any root that
