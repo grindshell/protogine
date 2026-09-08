@@ -1,0 +1,70 @@
+M2 Phase 0 feasibility probe
+Windows MSVC x64, rustc 1.95.0 (59807616e 2026-04-14), against commit aaad3ac
+
+cargo build --release --example tilemap_m2_probe --no-default-features
+
+Prototype geometry over a Vec<TileMap>, not the production kernel. The work
+mode's two arms are equal by construction - a Vec index has no per-map cost to
+grow - so that pair is a reference value for Phase 2 and not evidence on its
+own. The storage, shapes and timing figures are measurements.
+
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode storage
+aggregate cells   524288
+live storage      1081344 bytes
+peak with staging 1606656 bytes
+contract predicts 1606656 bytes
+TILEMAP-M2 PASS mode=storage
+PASS MARKER CONFIRMED: storage
+
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode work
+one 128x128 map       1551488 units
+32 identical 128x128  1551488 units
+arrangement ceiling   2359296 units
+fixed-pass ceiling    16777216 units
+baseline pair equal; Phase 2 owns the assertion
+TILEMAP-M2 PASS mode=work
+PASS MARKER CONFIRMED: work
+
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode shapes
+sixteen 128x128 rooms                      16 maps  262144 cells  fits=true  binds=-
+overworld 256x256 plus eight 64x64 rooms    9 maps   98304 cells  fits=true  binds=-
+the balance point: thirty-two 128x128      32 maps  524288 cells  fits=true  binds=-
+sixty-four 64x64 rooms                     64 maps  262144 cells  fits=false binds=map count
+four full-size 1024x256 maps                4 maps 1048576 cells  fits=false binds=cell budget
+cross-over confirmed at 128x128
+TILEMAP-M2 PASS mode=shapes
+PASS MARKER CONFIRMED: shapes
+
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode timing
+charged 1551488 units over 15 passes
+p50 2.4121ms  p95 2.6885ms  max 2.7382ms
+tick period is 16.667 ms; this is one pass, not a frame
+TILEMAP-M2 PASS mode=timing
+PASS MARKER CONFIRMED: timing
+
+--- The probe's own configuration assertions, watched failing ----------------
+
+Each breakage was applied to examples/tilemap_m2_probe.rs, built, run, and
+reverted; the tree was confirmed byte-identical afterwards. A mode that reports
+a plausible number while measuring the wrong arrangement is this plan's most
+frequent defect, so these are the assertions that matter most here.
+
+  spread arm all on one map            exit=101  fired at: every map must carry its share of bodies
+  bodies that do not move              exit=101  fired at: every body must charge something
+  every body identical                 exit=101  fired at: per-body cost must vary
+  one map short of the aggregate       exit=101  fired at: the maximum map count must be built
+  a shape claimed to fit that does not exit=101  fired at: does not behave as the contract claims
+
+--- Cross-check against M1 -----------------------------------------------------
+
+  M1 Phase 2 long sweep : 11,386,880 units, p50 16.5-17.8 ms
+  M2 Phase 0 arrangement:  1,551,488 units, p50 2.4121 ms
+  ratio of units 7.34; 2.4121 x 7.34 = 17.7 ms, inside M1's recorded range.
+  One point of comparison across different shapes and runs: an observation,
+  not a model.
+
+--- SHA-256 of the probe and its runner, as shipped ----------------------------
+
+  0C06B3330515DC4DCCB8DA2E736A508152F1DA4AEAC785CB8A7D552BC8B35303  examples/tilemap_m2_probe.rs
+  D0865F0BC1C8E7894D409F4692ED8F790039515B7D2DEB0860B53A7F39076930  tools/run_tilemap_m2_probe.ps1
+  F1F26E7B7DC869BEFD4676F2059FE79DFAD22F85A58B0AF46D01335E5BDB73C9  docs/implementation/TILEMAP_COLLISION_M2.md

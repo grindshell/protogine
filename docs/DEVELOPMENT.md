@@ -536,7 +536,7 @@ fail at their named assertions. Generated files live under
 `target/png-sprite-probe/`; durable receipts are linked from the
 [Phase 0 record](implementation/PNG_SPRITE_PHASE0.md).
 
-### Tilemaps and collision
+### Tilemaps and collision (M1)
 
 ```text
 cargo build --release --example tilemap_probe --no-default-features
@@ -558,3 +558,30 @@ frozen rule with the mistake it prevents and must fail at its named assertion,
 not merely exit nonzero. Watchdogs are 30 seconds per mode and 60 for `work`.
 Generated files live under `target/tilemap-probe/`; durable receipts are linked
 from the [Phase 0 record](implementation/TILEMAP_COLLISION_PHASE0.md).
+
+### Simultaneous maps (M2)
+
+```text
+cargo build --release --example tilemap_m2_probe --no-default-features
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode storage
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode work
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode shapes
+pwsh -NoProfile -File tools/run_tilemap_m2_probe.ps1 -Mode timing
+```
+
+Prototype geometry over a `Vec<TileMap>`, holding the proposed budgets in the
+[M2 contract](implementation/TILEMAP_COLLISION_M2.md) up to measurement.
+`storage` allocates through the production `try_reserve_exact` sequence rather
+than `vec![...]`, whose capacity would be exact by construction and would make
+the figure confirm itself. `work` produces a baseline pair whose equality is a
+property of the prototype rather than evidence - a `Vec` index has no per-map
+cost to grow - and the assertion belongs to Phase 2. `shapes` checks ordinary
+content against both budget limits. Watchdogs are 30 seconds per mode and 60 for
+`timing`.
+
+**No control modes, unlike the M1 probe above.** That one froze numerical rules
+and each control replaced one with the mistake it prevents; M2's Phase 0 freezes
+no numerical rule, because the geometry is M1's unchanged. What replaces them is
+that every mode asserts its own configuration was exercised rather than only its
+result, and those five assertions were each watched failing. Receipts are in the
+[Phase 0 record](implementation/TILEMAP_COLLISION_M2.md#phase-0-exit-2026-09-08).

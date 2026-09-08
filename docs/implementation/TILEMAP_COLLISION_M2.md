@@ -382,9 +382,10 @@ are all the review session's.
 draft left that older phrasing in the evidence table where Phase 2's exit gate
 reads it. Under the constant-geometry arms above, both charge 2,359,296 against a
 16,777,216 ceiling, so "still fits" is satisfied with 86% of the ceiling unused
-and would go on being satisfied by any per-map term smaller than a six-fold one -
-an accidental unit per map per body adds 1,024 x 32 = 32,768 and lands at
-2,392,064, which is not close to anything. "Still fits" passes. The equality
+and goes on being satisfied by a **sevenfold** per-map term - the exact threshold
+is `16,777,216 / 2,359,296 = 7.11`, so seven times the correct cost still passes
+and only eight times fails. An accidental unit per map per body adds
+1,024 x 32 = 32,768 and lands at 2,392,064, which is not close to anything. "Still fits" passes. The equality
 fails. A small accidental per-map cost is the realistic shape of the mistake, so
 the weaker phrasing would have been satisfied by precisely the defect the check
 exists to catch, and the smaller the maps the more room it has to hide in.
@@ -460,6 +461,68 @@ uninferable from position, so a read that omits it leaves a script with no way
 to observe which map a body is on at all. That is not ergonomics, it is whether
 the state this document just made authoritative is readable. The argument is the
 review session's.
+
+## Phase 0 exit, 2026-09-08
+
+`examples/tilemap_m2_probe.rs` and `tools/run_tilemap_m2_probe.ps1`, built with
+`--no-default-features` because prototype geometry needs no decoder, VM or
+window. Receipts in
+[evidence](evidence/tilemap-m2-phase0-probe.txt). **Every proposed number
+survived, which is the least interesting outcome available and is reported as
+such**: the probe was built to make some of them wrong and did not.
+
+| Mode | Result |
+| --- | --- |
+| `storage` | 32 maps of 128x128 filling the aggregate exactly measure **1,081,344** bytes live and **1,606,656** at peak with the largest staging candidate, matching the contract's arithmetic to the byte |
+| `work` | 1,024 bodies of maximum footprint sweeping a 128x128 map charge **1,551,488** units - 65.8% of that arrangement's own worst case of 2,359,296, and 9.2% of the 16,777,216 fixed-pass ceiling. The two arms are identical per body and in total |
+| `shapes` | All five arrangements behave as the contract claims, and the cross-over is confirmed at 128x128 with 129x129 the first square whose 32 copies overflow |
+| `timing` | p50 **2.4121 ms**, p95 2.6885, max 2.7382, against a 16.667 ms tick |
+
+**The storage figure is measured rather than derived, and the distinction was
+the reason to build it that way.** The probe allocates through the production
+sequence - `Vec::new`, `try_reserve_exact`, `resize` - rather than with
+`vec![...]`, whose capacity is exact by construction and would have made the
+measurement confirm its own prediction. `try_reserve_exact` is documented as not
+deliberately over-allocating without being guaranteed exact; on this allocator it
+is exact, and that is now observed instead of assumed.
+
+**One cross-check worth more than any single figure.** M1's Phase 2 stress
+charged 11,386,880 units at a p50 of 16.5 to 17.8 ms. This arrangement charges
+1,551,488 at 2.4121 ms. The ratio of units is 7.34, and 2.4121 x 7.34 = 17.7 ms,
+which lands inside M1's recorded p50 range. That is a single point of comparison
+across different map shapes, different arrangements and different runs, so it is
+an observation and not a model - but it is the first evidence in this plan that
+the charged work unit tracks time at all, and the plan has been treating the two
+as unrelated on purpose since Phase 2 recorded that the ceiling bounds cells and
+not latency.
+
+**The probe's own assertions were watched failing**, because a mode that reports
+a plausible number while measuring the wrong arrangement is this plan's most
+frequent defect. Five deliberate breakages, each firing at its own named
+assertion and nowhere else: the spread arm put on one map fails *every map must
+carry its share of bodies*; bodies given zero travel fail *every body must charge
+something*; bodies given identical start rows fail *per-body cost must vary*; one
+map short of the aggregate fails *the maximum map count must be built*; and a
+shape claimed to fit that does not fails *does not behave as the contract
+claims*. The tree was confirmed byte-identical afterwards.
+
+### What the probe found that the contract did not predict
+
+**The map count binds alone for a game that is not absurd.** `shapes` includes
+sixty-four 64x64 rooms: 262,144 cells, exactly half the aggregate, refused by the
+count of 32 with storage half unused. That is a large but ordinary
+metroidvania-shaped game, and it is the only arrangement tested where one limit
+refuses while the other is comfortable.
+
+This is evidence on [OPEN] 4 rather than a settlement of it. A count is clearly
+needed - without one, 524,288 maps of a single cell would fit the cell budget
+while costing a slot, a generation and three `Vec` headers each - so the question
+was never whether to have one but where to put it. **32 is defensible and 64
+would cost nothing measurable**: solid flags would rise to 65,536 bytes total,
+which is noise beside a megabyte of cells, and the balance point would move from
+128x128 to about 90x90. Raising it is not proposed here, because the choice is
+about which games to constrain rather than about what fits, and that is the
+owner's call rather than the probe's.
 
 ## The one failure mode this document has produced
 
