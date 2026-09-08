@@ -585,3 +585,31 @@ no numerical rule, because the geometry is M1's unchanged. What replaces them is
 that every mode asserts its own configuration was exercised rather than only its
 result, and those five assertions were each watched failing. Receipts are in the
 [Phase 0 record](implementation/TILEMAP_COLLISION_M2.md#phase-0-exit-2026-09-08).
+
+### Map registry guards (M2 Phase 1)
+
+```text
+pwsh -NoProfile -File tools/run_tilemap_registry_controls.ps1
+```
+
+Twelve controls over `src/maps.rs` and `src/kernel.rs`, all of which must be
+detected, plus four self-tests the harness must refuse. Three concern identity -
+the generation check, the session check, and `require_active` reordered behind
+them, which is how `stop` reaches `Inactive` rather than `InvalidTileMap`. Two
+concern admission: a first-in-first-out free list, and charging `live +
+candidate` instead of subtracting what is replaced. Four concern M2-R1, the rule
+that every collider scan is scoped to the edited map's own members. Three cover
+the public surface: a replacement that advances its slot's generation, and each
+accounting accessor delegating to a neighbouring quantity.
+
+**Most controls run `cargo test --lib`, not `--test <name>`, and that is not
+incidental.** Two fixtures read `TileMapHandle::slot`, which is `#[cfg(test)]`
+and `pub(crate)`: M2-1 makes slot *reuse* a contract clause a fixture has to
+prove it forced, and does not make the slot *number* something a game observes.
+An integration test cannot see it, so the fixtures live where the visibility is.
+The three public-surface controls name `--test tilemap_registry` instead, since
+being outside the crate is their whole point, and the restore check runs both
+suites rather than the one that happens to be the default. Every control edits a
+`.rs` source, so all four gates apply to every one of them, including the rebuild
+gate the sprites harness exempts its Luau controls from. Receipts are in the
+[Phase 1 record](implementation/TILEMAP_COLLISION_M2.md#phase-1-exit-2026-09-08).

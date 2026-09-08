@@ -4,6 +4,7 @@ use crate::collision::{
     self, CollisionError, MAX_CALLBACK_WORK, MAX_FIXED_PASS_WORK, MAX_LIVE_COLLIDERS, TileCollider,
     WorkBudget,
 };
+use crate::maps::{MapTable, MapTableError, TileMapId};
 use crate::tilemap::{Axis, TileMap, TileMapError, TileMapInfo};
 use hecs::{Entity, World};
 use std::{fmt, rc::Rc};
@@ -55,6 +56,39 @@ impl EntityHandle {
     }
 }
 
+/// An opaque session identity and generation-checked map reference.
+///
+/// The session marker is what a bare [`TileMapId`] cannot carry: two kernels
+/// that each hold one map name it identically, so without the `Rc` a foreign
+/// handle would resolve against whatever occupies that slot here (M2-1).
+#[derive(Clone, Debug)]
+pub struct TileMapHandle {
+    session: Rc<()>,
+    id: TileMapId,
+}
+
+impl PartialEq for TileMapHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.session, &other.session) && self.id == other.id
+    }
+}
+impl Eq for TileMapHandle {}
+
+impl TileMapHandle {
+    /// The table slot, unique among the live maps of one session.
+    ///
+    /// Crate-visible, exactly as [`EntityHandle::slot`] is. M2-1 makes slot
+    /// *reuse* a contract clause about the allocator, which a fixture has to
+    /// read to prove it forced one; it does not make the slot *number*
+    /// something a game observes. A game sees reuse only as a stale handle
+    /// refusing, so this has no caller outside a fixture and is compiled for
+    /// one.
+    #[cfg(test)]
+    pub(crate) fn slot(&self) -> u32 {
+        self.id.slot()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntitySnapshot {
     pub entity: EntityHandle,
@@ -69,7 +103,17 @@ pub enum KernelError {
     Nonfinite,
     EntityLimit,
     /// A map operation on a session that has none installed.
+    ///
+    /// Retires in Phase 3 with the implicit map itself (M2-8); until then it is
+    /// what the un-migrated surface still answers.
     NoTileMap,
+    /// A stale, removed or foreign map handle (M2-8).
+    InvalidTileMap,
+    /// More live maps than [`MAX_TILEMAPS`](crate::maps::MAX_TILEMAPS).
+    TileMapLimit,
+    /// More cells across live maps than
+    /// [`MAX_AGGREGATE_CELLS`](crate::maps::MAX_AGGREGATE_CELLS).
+    AggregateCellLimit,
     TileMap(TileMapError),
     Collision(CollisionError),
     /// An operation that requires no attached collider found one (T6).
@@ -87,6 +131,9 @@ impl fmt::Display for KernelError {
             Self::Nonfinite => f.write_str("position and velocity must remain finite"),
             Self::EntityLimit => f.write_str("entity limit exceeded"),
             Self::NoTileMap => f.write_str("no tile map is installed"),
+            Self::InvalidTileMap => f.write_str("stale or foreign tile map handle"),
+            Self::TileMapLimit => MapTableError::Limit.fmt(f),
+            Self::AggregateCellLimit => MapTableError::AggregateCells.fmt(f),
             Self::TileMap(error) => error.fmt(f),
             Self::Collision(error) => error.fmt(f),
             Self::CollidersAttached => {
@@ -111,6 +158,18 @@ impl From<CollisionError> for KernelError {
     }
 }
 
+impl KernelError {
+    /// Translate rather than wrap, so `MapTableError` stays inside the crate
+    /// and M2-8's three refusals are named at this layer.
+    fn from_table(error: MapTableError) -> Self {
+        match error {
+            MapTableError::Limit => Self::TileMapLimit,
+            MapTableError::AggregateCells => Self::AggregateCellLimit,
+            MapTableError::Invalid => Self::InvalidTileMap,
+        }
+    }
+}
+
 /// One body's sweep inputs, and after the sweep its resolved position.
 ///
 /// Only colliders need scratch. An entity in free flight recomputes
@@ -130,9 +189,22 @@ pub struct Kernel {
     world: World,
     session: Rc<()>,
     active: bool,
-    /// The single installed map (T1). Dense storage outside hecs, so a static
-    /// tile is never an entity.
-    tilemap: Option<TileMap>,
+    /// Every live map (M2-1). Dense storage outside hecs, so a static tile is
+    /// never an entity and a map is never a game entity.
+    maps: MapTable,
+    /// The map M1's implicit-map API addresses, and the one map colliders may
+    /// be members of until Phase 2 gives them membership of their own.
+    ///
+    /// **The Phase 1 invariant is that every live collider is a member of
+    /// `current`**, and it holds structurally: attaching needs `current`,
+    /// `current` changes only by an in-place replacement that keeps its
+    /// identity, and removing it is refused while any collider exists. That is
+    /// what lets M2-R1 be *specialised* here rather than deferred - a map that
+    /// is not `current` has no members, so removing it, replacing it and
+    /// editing its cells are all correctly map-local today. Phase 2 replaces
+    /// this field with a per-entity component and the three rules read the
+    /// same; Phase 3 retires it with the rest of the implicit-map surface.
+    current: Option<TileMapId>,
     /// Live `TileCollider` components, tracked alongside hecs so the limit and
     /// the T6 clear restriction do not cost a query.
     colliders: u32,
@@ -157,7 +229,8 @@ impl Kernel {
             world: World::new(),
             session: Rc::new(()),
             active: true,
-            tilemap: None,
+            maps: MapTable::new(),
+            current: None,
             colliders: 0,
             bodies: Vec::new(),
             callback_work: 0,
@@ -172,7 +245,13 @@ impl Kernel {
     /// of cells has no reader once map access is inactive.
     pub fn stop(&mut self) {
         self.active = false;
-        self.tilemap = None;
+        // Generations are deliberately not advanced: `require_active` runs
+        // first at every entry point, so a handle to a live map refuses
+        // `Inactive` here where the same handle to a removed map in a live
+        // session refuses `InvalidTileMap` (M2-1). Dropping the table is for
+        // storage, exactly as M1 dropped its single map.
+        self.maps.clear();
+        self.current = None;
         self.bodies = Vec::new();
         // Zeroed with the rest, so all three accounting accessors agree that a
         // stopped session holds nothing. Nothing can attach or detach after
@@ -261,7 +340,12 @@ impl Kernel {
             .ok()
             .map(|body| *body)
         {
-            let map = self.tilemap.as_ref().ok_or(KernelError::NoTileMap)?;
+            // M2-R2: validated against the map the body is a member of, which
+            // under the Phase 1 invariant is `current`. A destination legal on
+            // some other live map is still refused - changing maps is M2-5's
+            // transfer and nothing else.
+            let id = self.current.ok_or(KernelError::NoTileMap)?;
+            let map = self.maps.get(id).expect("current names a live map");
             let mut work = Self::remaining_work(self.callback_work);
             let placement =
                 collision::check_placement(map, &collider, position.x, position.y, &mut work);
@@ -315,66 +399,182 @@ impl Kernel {
             .collect()
     }
 
+    /// The map M1's implicit-map API addresses.
+    ///
+    /// `None` is `NoTileMap`, exactly as before. A `current` the table refuses
+    /// is an invariant break rather than a refusal, so it panics rather than
+    /// answering `NoTileMap`: a plausible wrong error on a surface 133 call
+    /// sites depend on is worse than a loud one.
     fn map(&self) -> Result<&TileMap, KernelError> {
         self.require_active()?;
-        self.tilemap.as_ref().ok_or(KernelError::NoTileMap)
+        let id = self.current.ok_or(KernelError::NoTileMap)?;
+        Ok(self.maps.get(id).expect("current names a live map"))
     }
 
-    /// Install or replace the map (T6).
+    /// Resolve a public handle: session first, then slot and generation.
     ///
-    /// Every live collider is revalidated against the candidate before the
-    /// swap: extents are capped relative to tile size, so a body legal on the
-    /// installed map can be illegal on the new one even at the same position.
+    /// [`Self::require_active`] runs before either, so a stopped session
+    /// refuses `Inactive` rather than `InvalidTileMap` (M2-1).
+    fn validate_map(&self, handle: &TileMapHandle) -> Result<TileMapId, KernelError> {
+        self.require_active()?;
+        if !Rc::ptr_eq(&self.session, &handle.session) {
+            return Err(KernelError::InvalidTileMap);
+        }
+        self.maps.get(handle.id).map_err(KernelError::from_table)?;
+        Ok(handle.id)
+    }
+
+    /// Validate a complete description and install it in a fresh slot (M2-4).
+    ///
+    /// Admission is decided before the kernel allocates anything: the table
+    /// weighs the candidate's cells against `live - replaced + candidate`
+    /// before it takes a slot, so a refusal leaves the count, the storage and
+    /// the free list exactly as they were. The candidate is moved rather than
+    /// copied, so exactly one copy of it exists at peak.
+    pub fn create_tilemap(&mut self, map: TileMap) -> Result<TileMapHandle, KernelError> {
+        self.require_active()?;
+        let id = self.maps.insert(map).map_err(KernelError::from_table)?;
+        Ok(TileMapHandle {
+            session: self.session.clone(),
+            id,
+        })
+    }
+
+    /// Replace one map's contents in place, keeping its handle valid (M2-4).
+    pub fn replace_tilemap(
+        &mut self,
+        handle: &TileMapHandle,
+        map: TileMap,
+    ) -> Result<(), KernelError> {
+        let id = self.validate_map(handle)?;
+        self.replace_map(id, map)
+    }
+
+    /// Retire one map, refusing while a collider is a member of it (M2-4).
+    pub fn remove_tilemap(&mut self, handle: &TileMapHandle) -> Result<(), KernelError> {
+        let id = self.validate_map(handle)?;
+        self.remove_map(id)
+    }
+
+    /// Owned dimensions, tile size and origin of one named map (M2-4).
+    pub fn tilemap_info(&self, handle: &TileMapHandle) -> Result<TileMapInfo, KernelError> {
+        let id = self.validate_map(handle)?;
+        Ok(self
+            .maps
+            .get(id)
+            .expect("a validated handle names a live map")
+            .info())
+    }
+
+    /// Swap one map's contents, revalidating only *that map's* members (M2-R1).
+    ///
+    /// Extents are capped relative to tile size, so a body legal on the
+    /// outgoing map can be illegal on the candidate even at the same position.
     /// Validation runs entirely against the local candidate, so a refusal
     /// leaves the installed map untouched and no reader can observe a partial
     /// one; the candidate arrives already schema-checked by [`TileMap::new`].
-    pub fn set_tilemap(&mut self, map: TileMap) -> Result<(), KernelError> {
-        self.require_active()?;
-        let Self {
-            world,
-            tilemap,
-            callback_work,
-            ..
-        } = self;
-        let info = map.info();
-        let mut work = Self::remaining_work(*callback_work);
-        let mut refusal = Ok(());
-        for (position, collider) in world.query::<(&Position, &TileCollider)>().iter() {
-            refusal = collider
-                .check(&info)
-                .and_then(|()| {
-                    collision::check_placement(&map, collider, position.x, position.y, &mut work)
-                })
-                .map_err(KernelError::from);
-            if refusal.is_err() {
-                break;
+    ///
+    /// Under the Phase 1 invariant a map that is not `current` has no members,
+    /// so nothing is scanned and no work is charged for it - which is the
+    /// map-local half of M2-R1, reachable today.
+    fn replace_map(&mut self, id: TileMapId, map: TileMap) -> Result<(), KernelError> {
+        // Admission first: it is O(1), and a candidate that cannot be installed
+        // should not charge for walking the bodies of the map it would replace.
+        self.maps
+            .admits_replacement(id, map.info().cell_count())
+            .map_err(KernelError::from_table)?;
+        if self.current == Some(id) {
+            let Self {
+                world,
+                callback_work,
+                ..
+            } = self;
+            let info = map.info();
+            let mut work = Self::remaining_work(*callback_work);
+            let mut refusal = Ok(());
+            for (position, collider) in world.query::<(&Position, &TileCollider)>().iter() {
+                refusal = collider
+                    .check(&info)
+                    .and_then(|()| {
+                        collision::check_placement(
+                            &map, collider, position.x, position.y, &mut work,
+                        )
+                    })
+                    .map_err(KernelError::from);
+                if refusal.is_err() {
+                    break;
+                }
             }
+            // Charged whether or not the swap happens, so a repeatedly refused
+            // install cannot walk the map for free.
+            *callback_work = callback_work.saturating_add(work.used());
+            refusal?;
         }
-        // Charged whether or not the swap happens, so a repeatedly refused
-        // install cannot walk the map for free.
-        *callback_work = callback_work.saturating_add(work.used());
-        refusal?;
-        *tilemap = Some(map);
+        self.maps.replace(id, map).map_err(KernelError::from_table)
+    }
+
+    /// Retire one map, refusing while a collider is a member of it (M2-R1).
+    ///
+    /// Under the Phase 1 invariant every collider is a member of `current`, so
+    /// a map that is not `current` has none and its removal cannot be refused
+    /// by a body on another map - which is the clause M2-R1 exists to state.
+    fn remove_map(&mut self, id: TileMapId) -> Result<(), KernelError> {
+        if self.current == Some(id) && self.colliders > 0 {
+            return Err(KernelError::CollidersAttached);
+        }
+        // On `?` where the five `current` resolutions are on `expect`, and the
+        // difference is the message rather than the mechanism. Both callers
+        // pre-validate - `clear_tilemap` passes `current`, `remove_tilemap`
+        // passes an id `validate_map` has already resolved - so this cannot
+        // fail from either. But `remove_map` is the one helper whose id need
+        // not be `current`, so asserting "current names a live map" here would
+        // state something false about half its callers, and no other wording
+        // would be true of both. It stays a refusal for that reason and not by
+        // residue.
+        self.maps.remove(id).map_err(KernelError::from_table)?;
+        if self.current == Some(id) {
+            self.current = None;
+        }
         Ok(())
     }
 
-    /// Remove the map, succeeding when none is installed.
+    /// Install or replace the map addressed implicitly (T6).
     ///
-    /// T6 refuses while any collider remains attached. The M1 transition is
-    /// therefore detach, replace, reposition, reattach; M2-M4 must revise that.
+    /// Phase 3 retires this with the rest of the implicit-map surface. Until
+    /// then it is `create` on an empty session and `replace` on a live one,
+    /// which is what keeps the identity stable across a swap and the M1
+    /// contract - a refused replacement leaving the installed map whole -
+    /// exactly as it was.
+    pub fn set_tilemap(&mut self, map: TileMap) -> Result<(), KernelError> {
+        self.require_active()?;
+        match self.current {
+            Some(id) => self.replace_map(id, map),
+            None => {
+                let id = self.maps.insert(map).map_err(KernelError::from_table)?;
+                self.current = Some(id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove the implicit map, succeeding when none is installed.
+    ///
+    /// T6 refuses while any collider remains attached, which under the Phase 1
+    /// invariant is exactly "while a collider is a member of it".
     pub fn clear_tilemap(&mut self) -> Result<(), KernelError> {
         self.require_active()?;
-        if self.colliders > 0 {
-            return Err(KernelError::CollidersAttached);
+        match self.current {
+            Some(id) => self.remove_map(id),
+            None => Ok(()),
         }
-        self.tilemap = None;
-        Ok(())
     }
 
     /// Owned dimensions, tile size and origin, or `None` when no map exists.
     pub fn tilemap(&self) -> Result<Option<TileMapInfo>, KernelError> {
         self.require_active()?;
-        Ok(self.tilemap.as_ref().map(TileMap::info))
+        Ok(self
+            .current
+            .map(|id| self.maps.get(id).expect("current names a live map").info()))
     }
 
     pub fn tile(&self, column: i32, row: i32) -> Result<u16, KernelError> {
@@ -404,13 +604,42 @@ impl Kernel {
     /// collider scan entirely and charges one unit.
     pub fn set_tile(&mut self, column: i32, row: i32, id: u16) -> Result<(), KernelError> {
         self.require_active()?;
+        let target = self.current.ok_or(KernelError::NoTileMap)?;
+        self.set_map_tile(target, column, row, id)
+    }
+
+    /// Change one cell of a named map, scanning only *that map's* members.
+    ///
+    /// **This is the entry point whose map argument no longer implies its
+    /// collider set** (M2-R1). M1's global collider query was correct while
+    /// there was one map and every collider was on it; under one shared
+    /// coordinate space a body on another map standing over these world
+    /// coordinates would make the edit refuse. Under the Phase 1 invariant the
+    /// members of a map that is not `current` are none, so the scan is skipped
+    /// entirely rather than filtered.
+    fn set_map_tile(
+        &mut self,
+        target: TileMapId,
+        column: i32,
+        row: i32,
+        id: u16,
+    ) -> Result<(), KernelError> {
         let Self {
             world,
-            tilemap,
+            maps,
+            current,
             callback_work,
             ..
         } = self;
-        let map = tilemap.as_mut().ok_or(KernelError::NoTileMap)?;
+        let scan_members = *current == Some(target);
+        // The fifth `current` resolution, and it takes the same treatment as
+        // the other four. Production reaches this only from `set_tile` with
+        // `target = current`, and Phase 3's by-handle form will reach it with a
+        // target `validate_map` has already resolved, so a failure here is an
+        // invariant break rather than a refusal - and surfacing it as
+        // `InvalidTileMap` on M1's `set_tile` is exactly the plausible
+        // substitution this rule exists to prevent.
+        let map = maps.get_mut(target).expect("current names a live map");
         // Schema first: a malformed edit is refused before anything is scanned
         // or charged.
         let previous = map.tile(column, row)?;
@@ -419,7 +648,7 @@ impl Kernel {
         // this one too rather than relying on the collider limit to do it.
         let mut work = Self::remaining_work(*callback_work);
         let mut outcome = work.charge(1).map_err(KernelError::from);
-        if becomes_solid && outcome.is_ok() {
+        if becomes_solid && scan_members && outcome.is_ok() {
             for (position, collider) in world.query::<(&Position, &TileCollider)>().iter() {
                 // Charged before the refusal, so a repeatedly refused edit
                 // cannot scan the map for free.
@@ -462,7 +691,12 @@ impl Kernel {
         if !attached && self.colliders >= MAX_LIVE_COLLIDERS {
             return Err(KernelError::ColliderLimit);
         }
-        let map = self.tilemap.as_ref().ok_or(KernelError::NoTileMap)?;
+        // A collider may only be attached to `current` in Phase 1: a map
+        // created through the registry has no way to name itself here until
+        // Phase 2's membership arrives, so attaching to one is refused rather
+        // than silently resolved to the implicit map.
+        let id = self.current.ok_or(KernelError::NoTileMap)?;
+        let map = self.maps.get(id).expect("current names a live map");
         collider.check(&map.info())?;
         let position = *self
             .world
@@ -568,10 +802,33 @@ impl Kernel {
         Ok(self.map()?.cell_at(axis, world))
     }
 
-    /// Live map storage in bytes, for the memory accounting stress runs record.
-    /// Zero with no map, including after [`Self::stop`] releases it.
+    /// Live map storage in bytes, summed across every map, for the memory
+    /// accounting stress runs record. Zero with no map, including after
+    /// [`Self::stop`] releases it.
+    ///
+    /// Cells and solid flags only, which is exactly what M1's single-map
+    /// accessor reported: a session holding one map measures what it measured
+    /// before the registry existed. The registry's own overhead is
+    /// [`Self::tilemap_table_bytes`], kept apart so the aggregate budget stays
+    /// a statement about cells.
     pub fn tilemap_storage_bytes(&self) -> usize {
-        self.tilemap.as_ref().map_or(0, TileMap::storage_bytes)
+        self.maps.storage_bytes()
+    }
+
+    /// The slot table's own overhead in bytes, excluding the maps themselves.
+    pub fn tilemap_table_bytes(&self) -> usize {
+        self.maps.table_bytes()
+    }
+
+    /// Live maps, bounded by [`MAX_TILEMAPS`](crate::maps::MAX_TILEMAPS).
+    pub fn tilemap_count(&self) -> u32 {
+        self.maps.len()
+    }
+
+    /// Cells across every live map, bounded by
+    /// [`MAX_AGGREGATE_CELLS`](crate::maps::MAX_AGGREGATE_CELLS).
+    pub fn tilemap_cells(&self) -> u32 {
+        self.maps.cells()
     }
 
     /// Complete one fixed tick. Overflow refuses the entire integration pass.
@@ -622,15 +879,20 @@ impl Kernel {
     fn sweep_bodies(&mut self) -> Result<(), KernelError> {
         let Self {
             world,
-            tilemap,
+            maps,
+            current,
             bodies,
             fixed_work,
             ..
         } = self;
         *fixed_work = 0;
         // A collider cannot be attached without a map, and the map cannot be
-        // cleared while one is attached, so this is defence rather than a path.
-        let map = tilemap.as_ref().ok_or(KernelError::NoTileMap)?;
+        // removed while one is attached, so this is defence rather than a path.
+        // Every body sweeps against `current` under the Phase 1 invariant;
+        // Phase 2 resolves a map per body instead, which is the change the
+        // fixed-pass equality and the per-body prediction are there to police.
+        let id = current.ok_or(KernelError::NoTileMap)?;
+        let map = maps.get(id).expect("current names a live map");
         bodies.clear();
         bodies
             .try_reserve_exact(MAX_LIVE_COLLIDERS as usize)
@@ -684,5 +946,200 @@ fn finite(x: f64, y: f64) -> Result<(), KernelError> {
         Ok(())
     } else {
         Err(KernelError::Nonfinite)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grid(columns: u32, rows: u32, origin: i32) -> TileMap {
+        TileMap::new(
+            TileMapInfo {
+                columns,
+                rows,
+                tile_width: 32,
+                tile_height: 32,
+                origin_x: origin,
+                origin_y: origin,
+            },
+            vec![true],
+            vec![0; (columns * rows) as usize],
+        )
+        .expect("test map is within the frozen limits")
+    }
+
+    fn body(kernel: &mut Kernel) -> EntityHandle {
+        let entity = kernel.spawn(Position { x: 0.0, y: 0.0 }).unwrap();
+        kernel
+            .set_tile_collider(
+                &entity,
+                Some(TileCollider {
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    width: 32.0,
+                    height: 32.0,
+                }),
+            )
+            .unwrap();
+        entity
+    }
+
+    #[test]
+    fn a_reused_slot_refuses_the_handle_it_displaced() {
+        let mut kernel = Kernel::new();
+        let first = kernel.create_tilemap(grid(4, 4, 0)).unwrap();
+        let slot = first.slot();
+        kernel.remove_tilemap(&first).unwrap();
+        let second = kernel.create_tilemap(grid(8, 8, 0)).unwrap();
+
+        // Asserted before the stale handle is presented, and this is the whole
+        // point of the fixture (M2-1). Without a forced reuse the refusal below
+        // would be satisfied by a slot that was never recycled, which is the
+        // easy case this exists to avoid.
+        assert_eq!(second.slot(), slot, "the fixture needs a real reuse");
+
+        assert_eq!(
+            kernel.tilemap_info(&first),
+            Err(KernelError::InvalidTileMap),
+            "a handle to a removed map must refuse after its slot is reused"
+        );
+        assert_eq!(
+            kernel.tilemap_info(&second).unwrap().columns,
+            8,
+            "while the map that took the slot reads through its own handle"
+        );
+    }
+
+    #[test]
+    fn a_foreign_handle_refuses_against_a_map_holding_the_same_slot() {
+        // Both kernels hold a live map at slot 0, generation 0, so the identity
+        // alone cannot tell them apart: `TileMapId` carries no session. Without
+        // the `Rc::ptr_eq` in `validate_map` this resolves against the other
+        // kernel's table and answers 8 instead of refusing.
+        //
+        // The obvious version of this fixture - one kernel with a map, one
+        // without - passes with no session check at all, because an empty table
+        // refuses on its own. Same shape as M2-1's argument for why the reuse
+        // fixture must force the reuse rather than assert a refusal an
+        // unrecycled slot would also satisfy.
+        let mut first = Kernel::new();
+        let mut second = Kernel::new();
+        let foreign = first.create_tilemap(grid(4, 4, 0)).unwrap();
+        let own = second.create_tilemap(grid(8, 8, 0)).unwrap();
+        assert_eq!(foreign.slot(), own.slot(), "the fixture needs a collision");
+
+        assert_eq!(
+            second.tilemap_info(&foreign),
+            Err(KernelError::InvalidTileMap),
+            "a handle from another session must refuse, not read the slot it names"
+        );
+        assert_eq!(
+            second.replace_tilemap(&foreign, grid(2, 2, 0)),
+            Err(KernelError::InvalidTileMap)
+        );
+        assert_eq!(
+            second.remove_tilemap(&foreign),
+            Err(KernelError::InvalidTileMap)
+        );
+        // Nothing the foreign handle touched moved, and the local one still works.
+        assert_eq!(second.tilemap_info(&own).unwrap().columns, 8);
+        assert_eq!(first.tilemap_info(&foreign).unwrap().columns, 4);
+    }
+
+    #[test]
+    fn stopping_refuses_by_session_where_removal_refuses_by_identity() {
+        // M2-1 asks for both errors by name rather than for two situations that
+        // both refuse. `require_active` runs ahead of every identity check, so
+        // `stop` reaches `Inactive` without touching a generation - neither of
+        // the two mechanisms a reader would otherwise infer.
+        let mut kernel = Kernel::new();
+        let live = kernel.create_tilemap(grid(4, 4, 0)).unwrap();
+        let removed = kernel.create_tilemap(grid(4, 4, 0)).unwrap();
+        kernel.remove_tilemap(&removed).unwrap();
+        assert_eq!(
+            kernel.tilemap_info(&removed),
+            Err(KernelError::InvalidTileMap),
+            "a removed map refuses by identity while the session is live"
+        );
+
+        kernel.stop();
+        assert_eq!(
+            kernel.tilemap_info(&live),
+            Err(KernelError::Inactive),
+            "a stopped session refuses before any slot is examined"
+        );
+        assert_eq!(
+            kernel.tilemap_info(&removed),
+            Err(KernelError::Inactive),
+            "including for the handle that refused by identity a moment ago"
+        );
+        assert_eq!(
+            kernel.create_tilemap(grid(4, 4, 0)),
+            Err(KernelError::Inactive)
+        );
+        assert_eq!(
+            kernel.tilemap_storage_bytes(),
+            0,
+            "and released its storage"
+        );
+        assert_eq!(kernel.tilemap_count(), 0);
+    }
+
+    #[test]
+    fn removing_and_replacing_an_unrelated_map_ignores_another_maps_bodies() {
+        // The Phase 1 form of M2-R1, and it needs two live maps and a collider
+        // at once. `current` holds the body; B overlaps it exactly, so a rule
+        // that scanned all colliders instead of the edited map's own would
+        // refuse every operation below.
+        let mut kernel = Kernel::new();
+        kernel.set_tilemap(grid(8, 8, 0)).unwrap();
+        let entity = body(&mut kernel);
+        let overlapping = kernel.create_tilemap(grid(8, 8, 0)).unwrap();
+        assert_eq!(kernel.tilemap_count(), 2, "two live maps and one collider");
+
+        // Each map-local success below is paired with the same operation on
+        // `current` refusing. Without the pair, every assertion here would also
+        // pass against an implementation that had simply stopped checking.
+
+        // A cell edit scans only the edited map's members. Cell (0,0) of B is
+        // exactly where the body stands, so M1's global query - correct code,
+        // which is why this rule matters more than its siblings - would refuse.
+        kernel
+            .set_map_tile(overlapping.id, 0, 0, 1)
+            .expect("a cell edit must ignore bodies on another map");
+        assert_eq!(
+            kernel.set_tile(0, 0, 1),
+            Err(KernelError::Collision(CollisionError::Placement)),
+            "while the same edit on the body's own map still refuses"
+        );
+
+        // Replacement revalidates only its own members. This candidate sits a
+        // thousand pixels away, so the body is outside it and would refuse if
+        // anything were checked.
+        kernel
+            .replace_tilemap(&overlapping, grid(8, 8, 1_000))
+            .expect("replacing another map must not revalidate this map's bodies");
+        assert_eq!(
+            kernel.set_tilemap(grid(8, 8, 1_000)),
+            Err(KernelError::Collision(CollisionError::Placement)),
+            "while the same replacement of the body's own map still refuses"
+        );
+
+        // Removal is refused only by a body on the map being removed.
+        kernel
+            .remove_tilemap(&overlapping)
+            .expect("removing another map must not see this map's bodies");
+        assert_eq!(
+            kernel.clear_tilemap(),
+            Err(KernelError::CollidersAttached),
+            "while the map the body is on still refuses"
+        );
+        assert_eq!(kernel.tilemap_count(), 1);
+        assert_eq!(kernel.tilemap().unwrap().unwrap().origin_x, 0, "unmoved");
+        assert!(
+            kernel.position(&entity).is_ok(),
+            "and the body is untouched"
+        );
     }
 }

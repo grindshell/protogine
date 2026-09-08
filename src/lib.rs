@@ -11,6 +11,7 @@ pub mod drawing;
 pub mod input;
 pub mod kernel;
 pub mod manifest;
+pub mod maps;
 pub mod tilemap;
 
 #[cfg(feature = "native-plugins")]

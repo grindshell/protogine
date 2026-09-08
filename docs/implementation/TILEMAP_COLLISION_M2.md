@@ -115,6 +115,20 @@ unreachable and carries no coverage claim - the same treatment M1 gives
 defensive with their arithmetic attached. If M4 ever makes that loop real at a
 higher rate, this is the paragraph to revisit.
 
+**What happens *at* exhaustion is a mechanism, and stating only "unreachable"
+left a reader to predict the wrong one.** Phase 1 retires the slot: a counter
+that cannot advance is never returned to the free list, so the table loses one
+slot rather than reissuing a generation a live handle already holds. Wrapping
+would convert an unreachable event into an unreachable *false accept*; retiring
+converts it into an unreachable capacity loss, which is the direction every
+other defensive path here takes. The arithmetic lives in `MapTable::advance`,
+extracted as a free function precisely because the branch cannot be driven from
+a table - `advance(u32::MAX)` is asserted directly, so the path stays
+unreachable while the arithmetic stops being unexamined. This paragraph
+described no mechanism until Phase 1 wrote one, which is freeze-pass clause 1
+reaching across the document/code boundary rather than within the document. The
+finding is the review session's.
+
 **The entity side has no equivalent guarantee, and the symmetry is inviting
 enough to say so.** hecs owns entity slot reuse, so an M1-style fixture -
 despawn, respawn, assert the stale handle refuses - rests on a dependency's
@@ -349,13 +363,42 @@ move.** M1's ceilings are explicitly not aggregate multi-map limits.
 | Region output | unchanged: 4,096 per call, 262,144 per callback | Now aggregate across maps |
 
 Solid-flag storage is at most 64 x 1,024 flags. Map count and aggregate cells are
-both checked before allocation.
+both checked before the kernel allocates anything, and the count is checked
+first, so a candidate over both budgets names the count.
 
 **Admission is checked against `live - replaced + candidate`**, where `replaced`
 is zero for `create_tilemap` and the outgoing map's cell count for
-`replace_tilemap`. The description's info carries `columns` and `rows`, so the
-candidate's size is known before its cells are copied and the check happens
-before the allocation rather than after it.
+`replace_tilemap`.
+
+**An earlier draft justified this with "the check happens before the allocation
+rather than after it", and that was never true of the Rust path.** There is no
+description type anywhere: `TileMap::new(info, solids, cells)` takes the vector
+the caller already built, and M2-6's table writes M1's existing call as
+`set_tilemap(desc)`, so "desc" is this document's word for the `TileMap`
+argument in both columns and no new type was ever implied. A candidate reaching
+`create_tilemap` is already allocated. Streaming a description element by
+element is what `EngineContext::bind_tilemap` does, and that is Phase 3.
+
+What is true is stronger, and is what the staging row actually rests on: **the
+kernel never copies a candidate, it moves it, so exactly one copy exists at
+peak**, and admission is decided before the kernel allocates anything of its own
+- `MapTable::insert` weighs the cells before it takes a slot or grows the table,
+so a refusal leaves the count, the storage and the free list exactly as they
+were. Phase 1's `the_full_aggregate_measures_what_the_phase_0_probe_predicted`
+is the evidence for the peak figure. The correction is the review session's, who
+also found that the claim was wider than the one entry point it had been
+attributed to.
+
+**M1's Phase 0 record carries the older phrasing and is frozen, so read this
+paragraph before quoting it.** Its budget table says map dimensions are "checked
+before allocation", which is false for the same reason, and two rows below says
+region output is "charged before allocation", which is **true** - `TileMap::region`
+does check `MAX_REGION_CELLS` before it builds the output vector. One right and
+one wrong in one table is the worst arrangement for a reader skimming for the
+phrase, so the note is here rather than left to be rediscovered: the M1 row is
+not a second source confirming the retired claim. Found by the review session
+while resolving a count disagreement between us that turned out, for the fourth
+time this milestone, to be about which files each of us was scanning.
 
 That subtraction is the whole rule and an earlier draft omitted it, leaving two
 sentences pointing opposite ways: this one read as `live + candidate`, while the
@@ -499,7 +542,7 @@ the second half of the freeze pass, on the same edit that introduced it.)
 | Independence | Two maps with overlapping coordinate ranges and different walls; a body on each; each stops at its own wall and neither sees the other's |
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
-| Budgets | The 65th map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 64 identical 128x64 maps charges **exactly** what the closed form above predicts, body by body, **and** the same as those bodies charge on one 128x64 map - the prediction because an equality alone cannot see a uniformly added per-body term, the equality because it is the cheaper cross-check; both Phase 2's to assert, and neither is "still fits" |
+| Budgets | The 65th map refuses, and names the count rather than the cells when the candidate is over both; the aggregate cell budget refuses before the kernel allocates anything of its own; a refused admission leaves the count, the storage and the free list unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 64 identical 128x64 maps charges **exactly** what the closed form above predicts, body by body, **and** the same as those bodies charge on one 128x64 map - the prediction because an equality alone cannot see a uniformly added per-body term, the equality because it is the cheaper cross-check; both Phase 2's to assert, and neither is "still fits" |
 | Migration | Every renamed call refuses its M1 argument shape rather than guessing; `set_position` on a body validates against its member map and refuses a destination that is legal only on another |
 | Membership integrity | A collider and its membership are attached, transferred, removed and despawned together, with no observable state where one exists without the other |
 
@@ -705,6 +748,163 @@ from 2,359,296 to 1,769,472, the measured total from 1,469,888 to 1,145,600, the
 per-body window the prediction closes from 788 units to 609, and the "still fits"
 threshold from sevenfold to fourteenfold. The probe and this document were
 re-derived together rather than patched, and all six breakages re-run.
+
+## Phase 1 exit, 2026-09-08
+
+`src/maps.rs` (the registry), `src/kernel.rs` (the handle, the four map calls,
+the accounting accessors) and `tools/run_tilemap_registry_controls.ps1`. Core
+configuration throughout: the registry needs no decoder, VM or window, and its
+fixtures run under `--no-default-features`.
+
+**No inherited test file was edited.** The M1 map surface keeps every signature
+and every error it had, so `tests/collision.rs`, `tests/script_tilemap.rs` and
+`tests/tilemap.rs` are byte-identical and green. That was a claim to verify by
+diff rather than assert, and it survived.
+
+`tests/tilemap_registry.rs` is new, and the distinction between "no file edited"
+and "`tests/` untouched" is not pedantry - the second is what an earlier draft of
+this paragraph said, and it was hiding something. A clean `tests/` diff also
+meant **the whole of Phase 1's testing lived inside `src/`**, so seven new
+`pub fn`s and one new `pub struct` were exercised only from within the crate:
+every one of them could have been `pub(crate)` and the whole suite would still
+have passed. On the surface M2-6 makes game-facing and Phase 3 binds to Luau,
+that is worth a file rather than an inference. The new file takes the ordinary
+public round trip - create, read, replace, read, remove, refuse - and pins the
+four accounting accessors against each other. Found by the review session, who
+also identified the cause: their own earlier finding moved the identity fixtures
+into `src/` for a good reason and took the public round trip along with them.
+
+### The decision this phase turned on
+
+Membership is Phase 2's and the Luau migration is Phase 3's, which together mean
+**Phase 1 cannot have two maps and a collider at once** unless something answers
+"which map" for the un-migrated surface. The registry is complete here, and M1's
+implicit map becomes one designated entry in it, held as a private
+`Kernel::current`.
+
+That is a *specialisation* of M2-R1 rather than a deferral of it, and the
+distinction is load-bearing. The Phase 1 invariant is **every live collider is a
+member of `current`**, and it holds structurally: attaching needs `current`,
+`current` changes only by an in-place replacement that keeps its identity, and
+removing it is refused while any collider exists. Under that invariant a map
+that is not `current` has no members, so removal, replacement and cell edits on
+it are correctly map-local *today* - not approximately, and not pending. Phase 2
+replaces one `Option<TileMapId>` with a per-entity component and the three rules
+read the same afterwards.
+
+The cost argument - 341 map call sites, 276 of them in `tests/` - is why merging
+Phases 1 and 2 would be expensive, and expense is the weaker reason. The reason
+that holds is that **Phase 1 reaches two live maps, a collider, and all three
+M2-R1 rules**, so the exit gate's words are meetable rather than nominally
+satisfied. Merging would have been right only if they were not. The reframing is
+the review session's.
+
+### What Phase 1 cannot reach, recorded rather than left to the gate
+
+**"Removing a map that still has members refuses" is only reachable through
+`clear_tilemap` here.** Nothing returns a handle to `current`, so the by-handle
+form of that refusal has no caller until Phase 2. The fixes available were both
+worse than saying so: a public accessor for `current` would outlive its reason,
+and widening `set_tilemap`'s return would break `tests/collision.rs`, which
+asserts `Ok(())` on it. So the map-local *success* cases carry the gate and the
+by-handle refusal lands in Phase 2. This is the one place "removal and
+replacement are map-local" is not allowed to speak for itself. The limitation is
+the review session's finding.
+
+**The map-local cell edit is in the same category.** `Kernel::set_map_tile` is
+private and there is no by-handle `set_tile` until Phase 3, so the rule - the
+inherited-mistake one the contract singles out as mattering most - is reached
+only through a private function and a private field. It is implemented and
+genuinely tested, with two controls of its own; what it lacks is a public door,
+exactly like the refusal above. Those doors are Phase 3's and Phase 2's
+respectively, and neither absence is visible from the suite.
+
+### Evidence
+
+| Check | Result |
+| --- | --- |
+| Core suite | 90 passed, 0 failed, 20 suites, up from 74 at M1's close |
+| Default suite | 267 passed, 0 failed, 21 suites |
+| Controls | 12 detected with their rule removed, 4 self-tests refused |
+| Storage | 64 maps of 128x64 through the production table measure **1,114,112** bytes live and **1,639,424** with the largest staging candidate |
+| Clippy, fmt | clean on both configurations |
+
+Control receipts in
+[evidence](evidence/tilemap-m2-phase1-controls.txt).
+
+**Phase 0's storage figures were recorded as properties of a prototype, and they
+now hold through the production path.** The probe measured a `Vec<TileMap>`;
+`the_full_aggregate_measures_what_the_phase_0_probe_predicted` measures the slot
+table, generations and free list, and lands on both numbers to the byte. That
+closes the gap a Phase 0 receipt normally leaves open, and it was the reviewer
+who checked the arithmetic by hand before running it.
+
+Writing that test corrected a claim inside it. The first version asserted the
+largest staging candidate is refused by the *aggregate*; it is refused by the
+*count*, which is checked first, so the peak is only reachable through a
+replacement. The test now says that, and the precedence is pinned rather than
+left to whichever check an implementation happens to write first.
+
+### Controls
+
+Twelve, in the harness style Phases 3 and 4 established - one rule removed, one
+test run, a *named* assertion required to fail, four gates, four self-tests the
+harness must refuse.
+
+Three concern identity: the generation check removed (M2's required control),
+the session check removed, and `require_active` reordered behind the identity
+checks. Two concern allocation and admission: a first-in-first-out free list, and
+admission charging `live + candidate`. Four concern M2-R1: a cell edit scanning
+every collider, the same edit scanning none, replacement revalidating every map,
+and removal scanning every collider. Three cover the public surface: a
+replacement that advances its slot's generation, and each of the two accounting
+accessors delegating to a neighbouring quantity.
+
+Those last three run against `tests/tilemap_registry.rs` rather than the library,
+so a control names its own suite instead of the harness inferring one. They exist
+because the assertions the review's finding 11 asked for were new guards, and a
+new guard with no control is the shape this plan keeps catching - the reviewer
+asked for two assertions and stopped there, which was the right scope for a
+finding and the wrong scope for the fix.
+
+**The first of them failed on its first run for a reason worth keeping.** The
+fixture read `kernel.tilemap_info(&handle).unwrap().columns`, so an invalidated
+handle panicked at the `unwrap` and never reached the assertion message the
+control had to hit. The harness refused it as "failed at *X*, not at your
+marker", which is the gate that exists for exactly this and had not fired before.
+A named marker is only reachable if nothing before it can panic first; the
+comparison is now on the `Result`.
+
+**The session control is the review session's, and it is the one that would have
+been written blind.** The obvious foreign-handle fixture - kernel A's handle
+presented to kernel B - passes against a kernel with *no session check at all*,
+because `TileMapId` carries no session, both tables allocate from slot 0, and an
+empty table refuses on its own. It tests what it claims only when both kernels
+hold a live map at the same slot and generation, so that a missing `Rc::ptr_eq`
+succeeds and reads the wrong map. That is M2-1's own argument for the reuse
+fixture, one level up, and neither the contract nor the Phase 1 design had
+noticed it applied twice.
+
+**Four of the twelve pass today for a reason Phase 2 removes, and they will not
+announce it.** The Phase 1 invariant is what makes the three M2-R1 rules
+trivially map-local: only `current` can have members, so "scan the edited map's
+members" and "scan `current`'s members" are the same scan. Once membership is a
+real component and two maps can both have members, that identity breaks - and
+`removal-scans-all-colliders`, `replacement-revalidates-every-map` and the
+cell-edit pair would all keep passing against a Phase 2 implementation that had
+quietly reverted to a global scan, because their fixtures put bodies on one map
+only. **Each has to be re-earned against a state where two maps both have
+members**; inheriting them is the failure mode, and it is invisible from a green
+suite. Likewise the two entries in "What Phase 1 cannot reach" are Phase 2's and
+Phase 3's to close, and each should be watched failing before it is deleted from
+that section. The prior is the review session's, recorded here rather than
+carried unwritten into a phase that will not think to look for it.
+
+**The two cell-edit controls are a pair on purpose.** Scanning every collider
+breaks map-locality; scanning none passes the map-local assertion for the wrong
+reason. Only pairing each map-local success in the fixture with the same
+operation on `current` refusing catches the second, which is why the fixture is
+written that way rather than as four successes.
 
 ## The one failure mode this document has produced
 
