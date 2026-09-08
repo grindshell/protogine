@@ -1488,9 +1488,14 @@ So the generalisation to carry is narrower and less comfortable than "check the
 prose too". **A control's scope is itself a claim, and it lives inside the
 harness where everything looks green.** A guard that detects tells you it covers
 *something*; it never tells you it covers everything the rule beside it says.
-Nothing in this repository's machinery reads either the reasons or the scopes. A
-second reader does, which is the argument for this being a pair of sessions
-rather than for a better harness. The formulation is the review session's.
+Nothing in this repository's machinery reads either the reasons or the scopes, so
+**the detection has to be a reader - and the fix was a better harness.** No tool
+can notice that a rule has two clauses; but once someone has, the remedy is not a
+clearer paragraph, it is two controls with opposite expected verdicts, so the
+next person reads the coverage off a run. Both halves matter and an earlier draft
+of this sentence kept only the first, which reads as an argument against
+improving the harness. The formulation and that correction are the review
+session's.
 
 `tests/script_tilemap.rs` gains the phase's high-speed fixture: one tick of a
 million pixels per second, sixteen thousand pixels of travel across a
@@ -1506,6 +1511,29 @@ none, and measured nothing that would justify revisiting one. `KernelError::Capa
 with no coverage claim, and Phase 2's accepted latency limitation stands
 unchanged: the fixed pass is bounded in cells and not in time, and the sample's
 one body says nothing about the mandated maximum load.
+
+**Phase 3's harness lock fired in anger for the first time, on a genuine crossed
+run rather than its own self-test.** While the review session started its
+verification pass, a `run_sprites_controls` run of mine was still in flight, and
+theirs was refused by name: `another sprites-controls run is already using
+target\sprites-controls (process 28712, started 2026-09-08T13:16:41...)`. Without
+it the two runs would have overwritten each other's patches mid-control and each
+cleared the other's saved cargo output, which is exactly the mechanism Phase 3
+identified and closed. That is better evidence for the lock than its five
+self-tests are, because nobody arranged it.
+
+**The stop discipline failed a third time this phase, and the fix was on the
+reviewing side rather than the implementing one.** A stop was declared naming
+`TILEMAP_COLLISION_PLAN.md` and its hash; then an accepted finding was applied to
+that file, `docs/DEVELOPMENT.md` and the harness, and the receipt regenerated
+fifteen seconds after the run that justified it - all during the review session's
+measuring pass. Applying an accepted finding is right and the receipt had to move
+because the harness did; what was wrong was not re-declaring. Two phases of
+"declare a stop and name every directory" have not stopped this happening, so the
+countermeasure that worked is the other one: **the sign-off names hashes, and
+verifying it is a script rather than a reading.** Seventeen of the eighteen files
+matched on the first check and the eighteenth was a paragraph added after the
+measurement, which a prose exchange would have called agreement.
 
 This phase changed three closed phases' harness scripts, so all three were
 re-run here in both profiles and produce their recorded conclusions unchanged:
