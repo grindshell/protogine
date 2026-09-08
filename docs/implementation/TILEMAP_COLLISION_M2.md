@@ -286,8 +286,30 @@ move.** M1's ceilings are explicitly not aggregate multi-map limits.
 | Region output | unchanged: 4,096 per call, 262,144 per callback | Now aggregate across maps |
 
 Solid-flag storage is at most 32 x 1,024 flags. Map count and aggregate cells are
-both checked before allocation, and admission is charged against the aggregate
-before a candidate is built, not after.
+both checked before allocation.
+
+**Admission is checked against `live - replaced + candidate`**, where `replaced`
+is zero for `create_tilemap` and the outgoing map's cell count for
+`replace_tilemap`. The description's info carries `columns` and `rows`, so the
+candidate's size is known before its cells are copied and the check happens
+before the allocation rather than after it.
+
+That subtraction is the whole rule and an earlier draft omitted it, leaving two
+sentences pointing opposite ways: this one read as `live + candidate`, while the
+staging row's "peak storage is the aggregate plus one map" only makes sense if
+the candidate is *not* counted in the aggregate. Charging `live + candidate`
+would mean **a session using the budget it was granted could never replace any
+map, including with an identical one** - a game holding 524,288 cells could not
+swap a room, and a game holding one full-size map plus 262,145 cells elsewhere
+could not replace that map at all. The cliff appears only at full utilisation,
+which is the same shape as M1's region-charging cliff: a contract that
+contradicts itself exactly for the games that use what it offers. Found by the
+review session.
+
+The candidate's own storage is staging, not live, which is why peak storage is
+the aggregate plus one map rather than the aggregate. Replacing a map while the
+aggregate is full therefore succeeds when the replacement is no larger and
+refuses when it is larger, and the evidence table below carries both cases.
 
 ## M2-8. Failure classification
 
@@ -329,6 +351,14 @@ factor of 32. So the probe asserts:
 That has a single right answer, fails loudly the moment a per-map cost appears,
 and is the check the ceiling actually needs. The framing is the review session's.
 
+**"Still fits" is not an acceptable restatement of it anywhere**, and an earlier
+draft left that older phrasing in the evidence table where Phase 2's exit gate
+reads it. The two differ exactly where it matters: one accidental unit per map
+per body is 1,024 x 32 = 32,768, landing at 11,829,248 against a 16,777,216
+ceiling. "Still fits" passes. The equality fails. A small accidental per-map cost
+is the realistic shape of the mistake, not a 32-fold one, so the weaker phrasing
+would have been satisfied by precisely the defect the check exists to catch.
+
 ## Required behavioural evidence
 
 | Area | Cases |
@@ -337,7 +367,7 @@ and is the check the ceiling actually needs. The framing is the review session's
 | Independence | Two maps with overlapping coordinate ranges and different walls; a body on each; each stops at its own wall and neither sees the other's |
 | Lifecycle | Removing a map with members refuses; removing one without members succeeds while unrelated bodies keep moving; replacing one map's contents revalidates only its members |
 | Transfer | Between overlapping maps; between disjoint maps, which needs the position; refused for an illegal destination box, an illegal extent against a smaller tile size, and a stale destination handle - each leaving membership, geometry and position untouched |
-| Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; the fixed pass still fits with bodies spread across the maximum map count |
+| Budgets | The 33rd map refuses; the aggregate cell budget refuses before allocation; a refused admission leaves the count and storage unchanged; replacing a map while the aggregate is full succeeds when the replacement is no larger and refuses when it is larger; and a fixed pass with 1,024 bodies across 32 maps charges **exactly** what the same bodies charge on one map, which is the Phase 0 equality and not "still fits" |
 | Migration | Every renamed call refuses its M1 argument shape rather than guessing; `set_position` on a body validates against its member map and refuses a destination that is legal only on another |
 | Membership integrity | A collider and its membership are attached, transferred, removed and despawned together, with no observable state where one exists without the other |
 
@@ -386,3 +416,32 @@ uninferable from position, so a read that omits it leaves a script with no way
 to observe which map a body is on at all. That is not ergonomics, it is whether
 the state this document just made authoritative is readable. The argument is the
 review session's.
+
+## The one failure mode this document has produced
+
+Worth stating because it is the same every time, and because the next person to
+edit this file will produce it again.
+
+**Every finding across two review rounds - the review session's and the ones
+caught here - was a sentence that was true when it was written and became false
+when something beside it changed.** The cell-edit clause was correct M1 prose
+that M2-3 falsified. "All of them" covered every map call there was when the
+list was made. The probe phrasing was right until the equality replaced it in
+one place and not the other. The admission rule and the staging row were each
+right about the case their author had in mind. Not one was a reasoning error,
+and reading harder would not have found them, because each is only wrong
+relative to a sentence somewhere else.
+
+So the freeze got a mechanical pass rather than another reading: every number in
+this document was located in every place that restates it, and the restatements
+checked against each other. Two disagreed - the admission rule against the
+staging row, and the equality against the evidence table - and both are fixed
+above. Everything else agreed. **Do that pass again after any edit that changes a
+number or a rule**, in preference to re-reading the prose around it. The
+suggestion is the review session's.
+
+A first draft of this paragraph listed how many times each number appears, and
+the counts were stale before the edit finished, because adding the paragraph
+added occurrences. Recording a count here creates one more restatement to keep
+in step, which is the failure mode this section is about - so the method is
+written down and the tally deliberately is not.
