@@ -301,16 +301,26 @@ archive HEAD` into a scratch directory and run there. The harness script is a
 live file like any other, so two invocations of it taken while tooling is being
 edited can run different control lists; the committed state cannot move.
 
-**Extract to a short path.** A harness builds under
-`<root>/target/<harness>/tree/target/`, which adds about 130 characters before
-cargo's own build directories, and `cl.exe` is not long-path aware whatever
-`LongPathsEnabled` says. Extracting the Phase 4 commit into a 133-character
-scratch directory put the Luau object file at 261 characters - one over
-`MAX_PATH` - and the build failed inside `mlua-sys` with `fatal error C1083:
-Cannot open compiler generated file`. Every conclusion in that run was *refused*
-rather than reported, which is the gates behaving correctly on a class they were
-not designed for, but the output reads like ten broken controls. Re-running from
-a 37-character root reproduced the recorded counts exactly.
+**Extract to a root of 120 characters or fewer.** `cl.exe` is not long-path aware
+whatever `LongPathsEnabled` reports, and the longest path it is asked to write is
+a Luau object under
+`<root>/target/<harness>/tree/target/debug/build/mlua-sys-<hash>/out/luau-build/<hash>-IrValueLocationTracking.o`.
+The harness name is in that path, so the limit is per harness: the tail past the
+extraction root measures 132 characters for `sprites-controls` and
+`tilemap-controls`, 134 for `collision-controls` and **139 for
+`script-tilemap-controls`**, which is the binding one. A 120-character root keeps
+all four under `MAX_PATH`.
+
+That margin is thinner than it looks and the near-miss is the useful part. A
+Phase 4 extraction into a 133-character directory put one of those objects at 261
+characters and `mlua-sys` failed with `fatal error C1083: Cannot open compiler
+generated file`; every conclusion in the run was *refused* rather than reported,
+which is the gates holding on a class nobody designed them for, but the output
+reads like ten simultaneously broken controls. What made it look like an
+unreachable case for so long is that the scratch directory this repository's
+tooling defaults to is 117 characters, three inside the tightest limit, so
+extracting straight into it succeeds and only naming a subdirectory pushes it
+over.
 
 Markers must never be a bare `assertion` or `panicked` substring: those match any
 failure at all, which would reduce a harness to "something broke" and silently
