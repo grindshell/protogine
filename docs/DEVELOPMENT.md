@@ -206,11 +206,15 @@ read-back establishes that the patch was still in place when cargo exited, which
 is slightly weaker than "cargo compiled it". The copy also stamps every file it writes, because
 `Copy-Item` preserves source timestamps and the copy reuses its own `target/`.
 
-Each harness carries two self-tests it must *refuse*: a control naming a test
-that does not exist, and one whose edit compiles and changes nothing the test
-observes. Both used to be accepted as ordinary results, and either would have
-reported every guard as covered while proving nothing. They fail loudly and name
-the gate if one is ever removed, so the gates above are themselves controlled.
+Each harness carries one self-test per gate, which it must *refuse*: a source
+clobbered after cargo exits, a source backdated so cargo skips the rebuild and
+runs the previous binary, a control naming a test that does not exist, and an
+edit that compiles and changes nothing the test observes. All four were accepted
+as ordinary results at some point, and any of them would have reported every
+guard as covered while proving nothing. Each is built on a genuine instance of
+what its gate catches rather than a synthetic stand-in, and each fails naming the
+gate if one is removed, so the gates are themselves controlled. They run last,
+because the backdated one needs a previous build in the copy's target directory.
 
 **Re-run serially before believing a red result.** Isolation from the working
 tree is proven by the fingerprint; isolation from concurrent `cargo` is not.

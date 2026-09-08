@@ -32,22 +32,6 @@ $controlSources = @('src/tilemap.rs', 'src/kernel.rs')
 $controlFingerprint = Get-SourceFingerprint -Repo $controlRepo -Files $controlSources
 
 $controls = @(
-    # --- Self-tests: controls the harness must refuse ------------------------
-    #
-    # There is otherwise no control on the controls. Both of these used to be
-    # accepted as ordinary results, and either would have reported every guard
-    # as covered while proving nothing.
-
-    @{ Name = 'self-test-missing-test'; File = 'src/tilemap.rs'
-       Test = 'a_test_name_that_does_not_exist'; Marker = 'unused'
-       Expect = 'did not execute exactly one test'
-       Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
-
-    @{ Name = 'self-test-inert-edit'; File = 'src/tilemap.rs'
-       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
-       Expect = 'did not fail with the guard removed'
-       Edits = @(@{ F = 'pub const MAX_REGION_CELLS: u32 = 4_096;'; R = 'pub const MAX_REGION_CELLS: u32 = 4_097;' }) }
-
     @{ Name = 'stop-keeps-map'; File = 'src/kernel.rs'; Test = 'stopping_releases_map_storage'
        Marker = 'stop must release map storage'
        Edits = @(@{ F = "self.active = false;`n        self.tilemap = None;"; R = 'self.active = false;' }) }
@@ -139,6 +123,33 @@ $controls = @(
     @{ Name = 'kernel-precheck-covers-edit-bounds'; File = 'src/tilemap.rs'
        Test = 'single_cell_edits_apply_immediately'; Marker = 'PASSES'
        Edits = @(@{ F = "if !self.contains(column, row) {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()"; R = "if false {`n            return Err(TileMapError::Bounds);`n        }`n        if id > self.highest_id()" }) }
+
+    # --- Self-tests: controls the harness must refuse ------------------------
+    #
+    # One per gate, on the same reasoning as the collision harness: a gate that
+    # cannot be observed failing is not covered, harness gates included. They run
+    # last because the stale-binary one needs a previous build to exist in the
+    # copy's target directory.
+
+    @{ Name = 'self-test-clobbered-source'; File = 'src/tilemap.rs'
+       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
+       Clobber = $true; Expect = 'the patched source changed under the run'
+       Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
+
+    @{ Name = 'self-test-stale-binary'; File = 'src/tilemap.rs'
+       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
+       Backdate = $true; Expect = 'cargo did not rebuild'
+       Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
+
+    @{ Name = 'self-test-missing-test'; File = 'src/tilemap.rs'
+       Test = 'a_test_name_that_does_not_exist'; Marker = 'unused'
+       Expect = 'did not execute exactly one test'
+       Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
+
+    @{ Name = 'self-test-inert-edit'; File = 'src/tilemap.rs'
+       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
+       Expect = 'did not fail with the guard removed'
+       Edits = @(@{ F = 'pub const MAX_REGION_CELLS: u32 = 4_096;'; R = 'pub const MAX_REGION_CELLS: u32 = 4_097;' }) }
 )
 
 $controlTree = New-ControlTree -Repo $controlRepo -Name 'tilemap-controls'
@@ -181,11 +192,30 @@ try {
         foreach ($file in $controlSources) {
             [IO.File]::WriteAllText((Join-Path $controlTree $file), $patched[$file], (New-Object Text.UTF8Encoding $false))
         }
+        if ($control.Backdate) {
+            # Self-test for the rebuild gate. Cargo decides freshness by
+            # modification time, so sources that look older than the last build
+            # are skipped and the previous binary runs with the mutation
+            # compiled out entirely. A genuine instance of the failure mode that
+            # gate catches, not a synthetic stand-in for it.
+            $stale = (Get-Date).AddDays(-30)
+            foreach ($file in $controlSources) {
+                (Get-Item -LiteralPath (Join-Path $controlTree $file)).LastWriteTime = $stale
+            }
+        }
         $arguments = @('test', '--manifest-path', $controlManifest)
         if ($Release) { $arguments += '--release' }
         $arguments += @('--test', 'tilemap', '--no-default-features', '--', $control.Test)
         $output = & cargo @arguments 2>&1 | Out-String
         $code = $LASTEXITCODE
+        if ($control.Clobber) {
+            # Self-test for the patch-survival gate. The cargo result is
+            # identical to a real detection; only the evidence chain is broken,
+            # so the harness must discard a conclusion that looks correct.
+            foreach ($file in $controlSources) {
+                [IO.File]::WriteAllText((Join-Path $controlTree $file), $controlOriginals[$file], (New-Object Text.UTF8Encoding $false))
+            }
+        }
         # Read back before restoring. This establishes that the patch was still
         # in place when cargo exited, which is weaker than "cargo compiled it" -
         # a clobber reverted mid-run would pass - but there is no cheap way to

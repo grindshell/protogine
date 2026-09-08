@@ -62,23 +62,6 @@ $validatePass = @'
 '@ -replace "`r`n", "`n"
 
 $controls = @(
-    # --- Self-tests: controls the harness must refuse ------------------------
-    #
-    # There is otherwise no control on the controls. Both of these used to be
-    # accepted as ordinary results, and either would have reported every guard
-    # as covered while proving nothing. They cost two cargo runs and they fail
-    # loudly if a gate is ever removed from the block below.
-
-    @{ Name = 'self-test-missing-test'; File = 'src/collision.rs'
-       Test = 'a_test_name_that_does_not_exist'; Marker = 'unused'
-       Expect = 'did not execute exactly one test'
-       Edits = @(@{ F = '    for across in first..=last {'; R = '    for across in [first, last] {' }) }
-
-    @{ Name = 'self-test-inert-edit'; File = 'src/collision.rs'
-       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'; Marker = 'unused'
-       Expect = 'did not fail with the rule removed'
-       Edits = @(@{ F = 'pub const MAX_SPAN_CELLS: i32 = 9;'; R = 'pub const MAX_SPAN_CELLS: i32 = 10;' }) }
-
     # --- The four controls the plan names for this phase ----------------------
 
     @{ Name = 'endpoint-only'; File = 'src/collision.rs'
@@ -287,6 +270,35 @@ $controls = @(
     @{ Name = 'unsorted-bodies'; File = 'src/kernel.rs'
        Test = 'replay_is_independent_of_insertion_order'; Passes = $true
        Edits = @(@{ F = '        bodies.sort_unstable_by_key(|candidate| candidate.entity.id());'; R = '' }) }
+
+    # --- Self-tests: controls the harness must refuse ------------------------
+    #
+    # There is otherwise no control on the controls, and this harness's own rule
+    # applies to itself: a gate that cannot be observed failing is not covered.
+    # One per gate, each built on a genuine instance of what that gate catches
+    # rather than a synthetic stand-in, and each fails naming the gate if it is
+    # ever removed. They run last because the stale-binary one needs a previous
+    # build to exist in the copy's target directory.
+
+    @{ Name = 'self-test-clobbered-source'; File = 'src/collision.rs'
+       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'; Marker = 'unused'
+       Clobber = $true; Expect = 'the patched source changed under the run'
+       Edits = @(@{ F = '    for across in first..=last {'; R = '    for across in [first, last] {' }) }
+
+    @{ Name = 'self-test-stale-binary'; File = 'src/collision.rs'
+       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'; Marker = 'unused'
+       Backdate = $true; Expect = 'cargo did not rebuild'
+       Edits = @(@{ F = '    for across in first..=last {'; R = '    for across in [first, last] {' }) }
+
+    @{ Name = 'self-test-missing-test'; File = 'src/collision.rs'
+       Test = 'a_test_name_that_does_not_exist'; Marker = 'unused'
+       Expect = 'did not execute exactly one test'
+       Edits = @(@{ F = '    for across in first..=last {'; R = '    for across in [first, last] {' }) }
+
+    @{ Name = 'self-test-inert-edit'; File = 'src/collision.rs'
+       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'; Marker = 'unused'
+       Expect = 'did not fail with the rule removed'
+       Edits = @(@{ F = 'pub const MAX_SPAN_CELLS: i32 = 9;'; R = 'pub const MAX_SPAN_CELLS: i32 = 10;' }) }
 )
 
 $controlTree = New-ControlTree -Repo $controlRepo -Name 'collision-controls'
@@ -333,11 +345,30 @@ try {
         foreach ($file in $controlSources) {
             [IO.File]::WriteAllText((Join-Path $controlTree $file), $patched[$file], (New-Object Text.UTF8Encoding $false))
         }
+        if ($control.Backdate) {
+            # Self-test for the rebuild gate. Cargo decides freshness by
+            # modification time, so sources that look older than the last build
+            # are skipped and the previous binary runs with the mutation
+            # compiled out entirely. A genuine instance of the failure mode that
+            # gate catches, not a synthetic stand-in for it.
+            $stale = (Get-Date).AddDays(-30)
+            foreach ($file in $controlSources) {
+                (Get-Item -LiteralPath (Join-Path $controlTree $file)).LastWriteTime = $stale
+            }
+        }
         $arguments = @('test', '--manifest-path', $controlManifest)
         if ($Release) { $arguments += '--release' }
         $arguments += @('--test', 'collision', '--no-default-features', '--', $control.Test)
         $output = & cargo @arguments 2>&1 | Out-String
         $code = $LASTEXITCODE
+        if ($control.Clobber) {
+            # Self-test for the patch-survival gate. The cargo result is
+            # identical to a real detection; only the evidence chain is broken,
+            # so the harness must discard a conclusion that looks correct.
+            foreach ($file in $controlSources) {
+                [IO.File]::WriteAllText((Join-Path $controlTree $file), $controlOriginals[$file], (New-Object Text.UTF8Encoding $false))
+            }
+        }
         # Read back before restoring. This establishes that the patch was still
         # in place when cargo exited, which is weaker than "cargo compiled it" -
         # a clobber reverted mid-run would pass - but there is no cheap way to

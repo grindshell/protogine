@@ -609,15 +609,29 @@ serially before believing a red result. This is recorded as an open limitation
 rather than a fixed defect, because it has not been reproduced on demand and no
 mechanism has been established.
 
-Those gates are themselves controlled. Each harness carries two self-tests it
-must *refuse*: a control naming a test that does not exist, and one whose edit
-compiles and changes nothing the test observes. Both were accepted as ordinary
-results before this phase, and either would have reported every guard as covered
-while proving nothing. Removing a gate makes the corresponding self-test fail and
-name it, which was verified by removing one. The review session independently
-built the same three-case check against a frozen extraction of the commit and
-confirmed the harness refuses the two it should and still detects the third;
-committing them means the property cannot rot.
+Those gates are themselves controlled, and getting there took the phase's own
+rule applied to the harness. The first two self-tests covered the two older
+gates; the review session then removed each gate in turn and found that the two
+*newest* ones - patch survival and cargo actually rebuilding, both added in
+response to the concurrency fault - were exercised by nothing. The gates whose
+correctness was least established were the ones with no witness, which is the
+same shape as `edit-skips-bounds` going quietly redundant in Phase 1 and the work
+budget sitting uncovered among twenty-five controls earlier in this one.
+
+Each harness now carries one self-test per gate, all of which it must *refuse*: a
+source clobbered after cargo exits, a source backdated so cargo skips the rebuild
+and runs the previous binary, a control naming a test that does not exist, and an
+edit that compiles and changes nothing the test observes. Each is built on a
+genuine instance of what its gate catches rather than a synthetic stand-in, and
+removing a gate makes the corresponding self-test fail and name it, verified by
+removing each of the four.
+
+The backdated one deserves a precise reading. It is a deterministic reproduction
+of the stale-binary *failure mode* - the mutation is compiled out entirely and
+the previous binary runs - and **not** of the concurrency *trigger*. It shows
+that cargo's modification-time freshness check is a real and reachable path to
+running a binary built from different code; it does not show that this is what
+happened in the five observed failures, and the trigger remains open.
 
 One residual hazard is reader-side and deliberately not engineered around: the
 harness *script* is a live file, so two invocations taken while tooling is being
