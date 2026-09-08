@@ -10,7 +10,7 @@ describes current behavior; [AGENTS](../../AGENTS.md) owns contribution rules an
 
 | Plan | Status |
 | --- | --- |
-| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required. M1 Phases 0-3 complete, Phase 4 unstarted |
+| [Engine-owned tilemaps and solid-tile collision](../../TILEMAP_COLLISION_PLAN.md) | T1-T8 accepted with scope clarifications; M1-M4 required. M1 complete through Phase 4, including the migrated sprite sample; M2-M4 unstarted and their contracts unfrozen |
 
 Active plans live at the repository root and move here when complete. A closed
 phase of an active plan is filed under Completed below, as the PNG/sprite Phase 0

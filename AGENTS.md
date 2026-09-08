@@ -33,9 +33,10 @@ the shared library also builds with `--no-default-features`.
 [tilemap/collision plan](TILEMAP_COLLISION_PLAN.md) records accepted T1-T8 and
 its [Phase 0 record](docs/implementation/TILEMAP_COLLISION_PHASE0.md) freezes the
 M1 API/schema, numerical and refusal contracts. Phase 1 delivered the kernel's
-checked map, Phase 2 the colliders, swept solver and placement guards, and
-Phase 3 the nine scoped `ctx.world` calls that reach them; the sample migration
-remains unstarted, so the sprite sample still runs its own collision.
+checked map, Phase 2 the colliders, swept solver and placement guards, Phase 3
+the nine scoped `ctx.world` calls that reach them, and Phase 4 the sample
+migration, so M1 is complete: the sprite sample installs the engine's map, moves
+by velocity through the fixed pass, and owns no collision code of its own.
 Single-map collision is the first milestone;
 simultaneous maps, independent layers and streaming are required before full
 plan completion. Colliders are hecs components; T6's first-milestone lifecycle

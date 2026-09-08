@@ -10,9 +10,12 @@ Phase 2 completed 2026-09-07: entities may carry a tile collider, the swept
 solver and every T5/T6 placement guard are in place, and the fixed pass resolves
 all candidates before committing any. M1 Phase 3 completed 2026-09-07: a Luau
 game reaches all of it through nine scoped `ctx.world` calls with copied input,
-owned reads and three enforced aggregate ceilings. Phase 4 is unstarted, so the
-sprite sample still runs its own collision. Later milestone designs remain to be
-frozen. Acceptance is not execution evidence.
+owned reads and three enforced aggregate ceilings. M1 Phase 4 completed
+2026-09-08, which completes M1: the sprite sample installs the engine's map,
+carries a tile collider, moves by velocity through the fixed pass and owns no
+collision code, and its live probe reads engine-resolved positions. M2, M3 and
+M4 remain required core scope and their designs remain to be frozen, so the
+overall feature and this plan stay open. Acceptance is not execution evidence.
 **Date:** 2026-09-07. **Inspected baseline:** `e87a243`; Phase 0 ran against `508266c`.
 **Backlog:** [TODO.md](TODO.md). Completed predecessor contracts:
 [scripting/C API](docs/implementation/SCRIPTING_C_API_PLAN.md) and
@@ -324,7 +327,7 @@ log anchor. Keep a separate headless assertion of post-step kernel position.
 | 1. Kernel map ownership **(complete)** | Checked map types, install/replace/clear, info/regions/cell edits; dependency-free exports and owned inspection. | Met on 2026-09-07 by `src/tilemap.rs`, its kernel integration and `tests/tilemap.rs`. Rectangular maps and tiles, negative-origin conversion, malformed size/ID/array input by reason, owned reads and snapshots, region and edit bounds, and a refused replacement leaving the installed map whole are all proven; the suite runs in the core configuration. `tools/run_tilemap_controls.ps1` carries eighteen mutation controls: thirteen fail at a named assertion, three are labelled crash controls because the library panics on its own bounds check before a test assertion is reached, and two are expected to keep passing because the rules they remove are redundant with others. Phase 2 grew that harness by one: `Kernel::set_tile`'s new read of the previous ID refuses out-of-bounds coordinates on its own, so `edit-skips-bounds` now removes both rules and a companion control records the redundancy. |
 | 2. Colliders and fixed systems **(complete)** | Optional hecs collider, placement guards, pure axis solver and bounded all-candidate commit. Extend all Phase 1 mutations to enforce collider invariants. | Met on 2026-09-07 by `src/collision.rs`, its kernel integration and `tests/collision.rs`. Sweeps, teleports, attachment, map replacement, cell edits and clearing obey T3-T6; a session with no collider keeps today's allocation-free integration; a late refusal moves no entity; replay is independent of insertion order. `tools/run_collision_controls.ps1` carries twenty-eight mutation controls: twenty-six fail at a named assertion, one is recorded as redundant, and one is a crash control in debug and a recorded redundancy in release. `tools/run_collision_stress.ps1` runs the mandated max-load configuration under an independent watchdog: the long-sweep arrangement charges 11,386,880 of 16,777,216 units, the Phase 0 probe's figure to the unit, and completes rather than faulting. |
 | 3. Luau integration **(complete)** | Scoped world extensions, raw validation/copying, shared attempts and new work/output budgets; real runtime fixtures. | Met on 2026-09-07 by `src/scripting/tilemap.rs`, the nine `ctx.world` calls in `src/scripting/world.rs` and `tests/script_tilemap.rs`. Phase, expiry and slot-reuse refusals, malformed calls of every schema shape, the three aggregate ceilings latching outside `pcall`, callback ordering, systems faults and zero-tick/catch-up frames all pass headlessly; a foreign-session handle is refused by the unit harness beside the bindings, which is the only place one can be produced. `tools/run_script_tilemap_controls.ps1` carries thirty-two mutation controls, all detected in both profiles, plus four recorded redundancies and four self-tests the harness must refuse. |
-| 4. Sample and release proof | Replace sample collision, adapt its probe, add tile-edit/high-speed fixtures, update authoring docs and development checks. | Original room/art/control expectations preserved; collision during loading/unload, same-tick edits, 30/60/144 FPS replay, copied Player captures and injected-input probe pass. Record M1 completion and limits; leave the plan active for M2-M4. |
+| 4. Sample and release proof **(complete)** | Replace sample collision, adapt its probe, add tile-edit/high-speed fixtures, update authoring docs and development checks. | Met on 2026-09-08 by `examples/games/sprites/main.luau`, `tests/sprites_sample.rs`, `tools/run_sprites_probe.ps1` and `tools/run_sprites_controls.ps1`. The sample installs the engine's map from the same authored `room.luau`, carries a 32x32 tile collider and moves at 120 pixels per second through the fixed pass, with no solver of its own; all five pre-existing sample fixtures pass unchanged, which is what preserves the original room, art, timing and coordinates. New fixtures cover the same-tick edit through both draw paths, walls holding while art loads and after it is evicted, repeated draws and zero-tick frames, and the exact 2.0 pixels per tick the replay comparison rests on. `tools/run_sprites_controls.ps1` carries nine mutation controls - seven detected in both profiles and two recorded redundancies - plus four self-tests the harness must refuse. |
 
 Do not start the next phase with an unmet exit gate. Keep implementation slices
 focused and reviewable. M1 completion may close only its own TODO item. Do not
@@ -1189,6 +1192,337 @@ fixture and its stale-grid negative control, and the 30/60/144 FPS replay and
 copied-Player evidence.
 
 The next unmet gate is Phase 4.
+
+Phase 4 exit, 2026-09-08, against baseline `880560e`:
+`examples/games/sprites/main.luau` converts the authored room into a numeric
+description once in init, installs it, gives the character a 32x32 tile collider
+and sets velocity; the fixed pass does the rest. Added paths:
+`tools/run_sprites_controls.ps1` and its
+[receipt](docs/implementation/evidence/tilemap-phase4-controls.txt); modified:
+`examples/games/sprites/main.luau`, `tests/sprites_sample.rs`,
+`tests/script_tilemap.rs`, `tools/run_sprites_probe.ps1`,
+`tools/run_tilemap_controls.ps1`, `tools/run_collision_controls.ps1`,
+`tools/run_script_tilemap_controls.ps1`, `README.md`, `AGENTS.md`,
+`docs/DEVELOPMENT.md`, `docs/implementation/README.md`, `TODO.md` and this plan.
+
+Commands and results: `cargo fmt --all -- --check` and `cargo clippy --workspace
+--all-targets -- -D warnings` with default features, `--no-default-features`,
+`--no-default-features --features scripting` and `--all-features`, all clean.
+`cargo test --workspace` reports 255 passing and 6 ignored across 24 targets, up
+from 249 and 6; the core `--no-default-features` run reports 78 passing and 1
+ignored across 23 targets, unchanged, because every one of the six new tests
+needs a VM. The release subset from
+[DEVELOPMENT](docs/DEVELOPMENT.md#scripting) reports 220 passing and 1 ignored
+across 13 targets. `pwsh -NoProfile -File tools/run_sprites_controls.ps1` reports
+seven guards detected, two confirmed redundant and four self-tests refused,
+identically in debug and `-Release`.
+
+The delivery gates ran rather than being recorded as blocked. `cargo test --test
+player_capture -- --ignored` passes all three, including
+`captures_the_shipped_sprite_sample_from_a_copied_player`, which launches a
+copied Player from an unrelated working directory and checks the loading frame,
+the loaded frame, byte-identical repeated captures, a replaced character PNG, a
+replaced tileset at a different size and art that resolves but cannot decode.
+`pwsh -NoProfile -File tools/run_sprites_probe.ps1` passes against a live Player
+driven by real `WM_KEYDOWN`/`WM_KEYUP` events: `moved 448 -> 640 over 263 ticks,
+turned to face -1, teleported home to 448,256, reloaded at tick 246`. Both walk
+frames appeared, releasing restored the idle frame, and the row never changed
+while holding Right.
+
+**The probe's new strictness was watched failing rather than assumed.** Making
+its inserted log emit `p.x + 0.5` and running it end to end produces
+`Unreadable probe line, so this harness cannot see the sample's state: 'probe 0
+448.5 256 0 1'`, which is the case the old silent filter would have turned into
+an empty sample and a confusing downstream failure. The edit was reverted and the
+file confirmed byte-identical afterwards.
+
+**No engine source changed.** `src/` is byte-identical to `880560e`, and so is
+`examples/games/sprites/room.luau`: the authored room is the migration's input,
+not something the migration reshaped. That is the phase's most useful single
+result. A real game with real art, real input and a frozen set of expected
+coordinates moved onto the kernel's map, collider and solver without needing one
+new binding, one relaxed bound or one extra kernel entry point, which is the
+strongest available statement that Phases 1 to 3 froze the right surface. The one
+Rust file this phase touches at all, `src/runtime.rs`, is touched only by a
+mutation control.
+
+The evidence that the original room, art, control scheme and coordinates survived
+is that **all five pre-existing sample fixtures pass unchanged** - the readiness
+schedule, the room's cells, border and draw order, unload and reload, the
+image-identity mapping, and the 30/60/144 FPS replay with its exact `(508, 316)`
+and its second animation frame. "Unchanged" is checkable rather than asserted:
+`tests/sprites_sample.rs` is `+293/-0`, so not one of their lines moved. Five
+more were added for what the migration introduces.
+
+`room.luau` becomes tile IDs by sorting the legend's keys into byte order: `#` is
+1, `.` is 2, `T` is 3, `c` is 4 and `f` is 5, with the engine's ID 0 unused
+because the room has no empty cells. Sorted rather than `pairs` order, which is a
+hash order and would hand the same room different IDs on different runs; derived
+rather than authored, so `room.luau` stays the pure data it already was; and
+compared by `string.byte` rather than by the default string comparison, because
+some Lua implementations resolve that through the C locale, which could order `c`
+before `T` and make the documented IDs wrong on someone else's machine.
+Installing it plus
+attaching one collider charges exactly **516** units of the callback's tile-work
+budget - 510 cells, five solid flags and the single cell the character's box
+covers - which `installing_the_room_costs_exactly_what_its_cells_and_flags_cost`
+asserts. That is the one place in the suite where a real authored room states the
+unit price the 1,048,576-unit ceiling is denominated in.
+
+Backspace is now a fallible `set_position` where it used to be an assignment, and
+the migration takes the plan's second option: **it documents the reliance rather
+than handling a refusal.** The reliance is provable from the sample's own code
+rather than assumed, in three steps rather than the two an earlier draft gave.
+`check_placement` refuses on the box leaving the map, on any solid cell in its
+whole **footprint**, and on the work budget; init asserts that one *cell* is not
+solid, which is sufficient only because the spawn is tile-aligned and the
+collider is exactly one tile at zero offset, so the footprint is that cell - a
+premise separately measured by the `+ 1` in the install-cost figure above. Move
+the spawn off the tile grid and the assertion still passes while no longer being
+enough, so the comment beside the call names that step rather than leaving it to
+be reconstructed. The third step is that the only edit the sample makes replaces
+a solid ID with the floor, so no cell it can touch becomes solid.
+
+`set_tile` is fallible and unhandled for the same class of reason, and an earlier
+draft documented only the teleport. It is provably safe here - an edit is refused
+only if it would trap a body, and turning a solid cell into floor cannot; the
+coordinates are bounds-checked by the game itself; and `FLOOR` is an ID the
+installed description defines - and it now carries its own note. A game whose
+edits can make a cell solid owes a refusal path for both calls. Both findings are
+the review session's.
+
+The live probe presses Backspace and reads the teleport back out, which is the
+only place a real key event exercises T5.
+
+**The sample gained one mechanic, and the reason is worth stating because it is a
+constraint rather than a preference.** The plan requires the sample itself to
+demonstrate a map edit reaching both drawing and collision, so the edit has to
+come from the game; and T8 requires the sample's input to be retained, while all
+six logical buttons were already spoken for. The edit therefore could not have a
+key of its own and had to be a consequence of an existing action. Pushing into a
+crate is that consequence, and it uses only the arrows.
+
+**Where the crates sit is not what keeps the inherited fixtures safe, and the
+first draft of this record said it was.** The mechanic can only fire on a refused
+push, so what matters is whether those five ever reach one - which is a stronger
+question, and it survives someone editing the room later, where "no crate lies on
+their paths" does not. Making the refused-push branch raise instead of edit and
+re-running the target answers it: all five pass, and the two fixtures that fail
+are both new ones, the crate test and the loading/unload test that presses the
+fence for two hundred ticks. None of the five reaches the branch at all. The
+reformulation is the review session's.
+
+The rule the game applies is that it was **pushed along an axis and did not
+move**, comparing two positions the solver produced rather than an intent. Both
+come out of the same solver, which returns the identical clamped position for
+every tick a body presses the same face - Phase 2's `moving into a touching face
+yields zero displacement, never a push` - so the comparison is exact and needs no
+tolerance. `push-detection-ignores-the-refusal` removes the position half and is
+detected: without it the game breaks the crate three ticks before reaching its
+face, and the character never stops there at all.
+
+The cell it then looks at is one whole tile from the box's **centre**, not one
+step beyond its leading edge. N5 leaves a clamped box on the free side of the
+face it stopped against, with a gap of up to 2^-28 of a pixel, so `x + width`
+can floor into the cell the box is already in when pressing right or down. Half a
+tile of margin puts that out of reach in every direction.
+
+**That rule guards two different things, so it has one control per half.** The
+first draft approached the crate tile-aligned and the single combined control was
+not detected at all: with the box exactly on row 10, the top edge and the centre
+name the same row. The fixture now approaches at y = 304, straddling rows 9 and
+10 with the crate in the lower one, where the top edge alone names an empty cell,
+and `ahead-perpendicular-uncentred` is detected.
+
+`ahead-pressed-axis-uncentred` is a **recorded redundancy, and the reason is
+arithmetic rather than a missing fixture.** The rule fires only when that axis
+did not move, which means the box is flush against a face. The clamp's ideal
+position is `(face - size) - offset` moving forward, in `clamp_below`, and
+`face - offset` moving back, in `clamp_above`, which carries no size term at all;
+with this collider's zero offset, 32-pixel extent and 32-pixel tiles both are
+exact, the repair never runs, and the committed coordinate *is* the face - so a
+coordinate exactly on a face floors to the same cell under both forms of the
+cell-ahead rule, in every direction, for every crate, in any room anyone could
+author for this sample. The fixtures' exact `assert_eq!` already span the pair,
+which was pointed out rather than noticed: 256.0 and 192.0 are `clamp_above`
+stops and 640.0 is a `clamp_below` one. The 2^-28 gap is real in the general
+contract and identically zero for this collider. The centring stays because the
+sample should be written to the contract rather than to its own arithmetic;
+witnessing it needs a non-zero offset or a non-integer extent, not a different
+room.
+
+**The first draft of this record got that wrong in both directions, and the
+follow-up it left behind would have produced a green nobody could trust.** It
+claimed the shipped room offers no crate a saturating key hold can press from the
+west or the north, and filed a TODO to build such a fixture. Both halves are
+false. Every crate at (5,6), (25,6), (5,10) and (25,10) has floor on all four
+sides, and the review session wrote the walks: Left 96, Down 48, Left 120, Up 16,
+Right 49 puts the box at exactly `(128.0, 320.0)`, flush on the west face of the
+crate at (5,10), and one more tick breaks it and moves to 130.0. That walk was
+reproduced here, and then run again with the pressed-axis centring removed, where
+it still passes - so the fixture the TODO asked for would have been a control
+that cannot fail. The finding, the walks and the arithmetic are the review
+session's, and running them here is the smaller half of the fix. The larger half
+is the shape of the remedy: rather than reclassify the gap in prose, the one
+control became two with opposite expected verdicts, so the next reader takes the
+coverage off a run instead of off a paragraph. That is the part still worth
+having once this exchange is forgotten.
+
+Draw reads the map back with one `tiles_region(0, 0, 30, 17)` per frame: 510 IDs
+against 4,096 per call and 262,144 per callback, so the room fits in a single
+read and a larger one would need the visible chunk instead. Both draw paths index
+that same array through the same palette, so an edit reaches both, and
+`stale-luau-grid` and `stale-placeholder-grid` are separate controls because they
+are separate branches - the first draft controlled only the tileset path, which
+would have left the pre-tileset placeholder free to keep a stale grid with
+nothing to catch it.
+
+The probe was adapted rather than patched. Its log moved from the end of update
+to the top, because movement now happens in the fixed pass after update returns:
+at the old anchor the coordinates would have been a tick older than the animation
+state beside them and the label would have named the wrong tick. At the new one
+all five fields describe the last completed tick, which is the plan's "previous
+completed position at the next update boundary, with the matching completed-tick
+label". The format is frozen as `probe <ticks> <x> <y> <frame> <facing>`, every
+field whole, and `Get-ProbeStates` now **throws** on a `probe` line it cannot read
+instead of skipping it - whole pixels used to be guaranteed by the script that
+wrote them and are now a property of the solver's clamp, so a rounding regression
+would print a fraction and the old filter would have gone on reading an empty or
+stale sample. It trims a trailing partial line first, because the Player is still
+writing while it reads, so the strictness applies only to lines that are complete.
+
+Every target the probe drives to is one the character saturates against, which is
+why holding a key a hundred milliseconds too long cannot change its answers. No
+crate is such a target: the committed fixture reaches one in three legs and the
+two other routes walked during review take five and six, so a probe that pressed
+a crate would have to release keys on a timer and its assertions would depend on
+wall-clock scheduling. **The map edit is therefore proven headlessly and not
+live**, which is recorded as a gap rather than worked around, because that is
+better evidence than a live run whose stop position is a race.
+
+`tools/run_sprites_controls.ps1` carries nine controls - seven detected in both
+profiles and two recorded redundancies - plus four self-tests it must refuse. Two
+of the seven are the ones this plan names for the phase: `stale-luau-grid` must
+fail the tile-edit fixture, and `fixed-pass-in-draw` must fail the
+repeated-draw/zero-tick fixture. The first redundancy is the sample's bounds
+check before `ctx.world.tile`: the room's border is solid, so the character can
+never stand in it and the cell one tile from its centre is always inside the
+grid. It stays because `tile` refuses an outside index rather than answering it
+and a sample should not hand an engine call an argument it has not checked, but
+nothing can reach the branch and saying so is better than implying a fixture
+covers it. The second is the pressed-axis half of the cell-ahead rule, above.
+
+**One gate had to be made conditional, and the reason is a real difference rather
+than an exemption.** Most rules in this harness live in Luau, and the sample is
+data the test bundle loads at run time, so patching it makes cargo rebuild
+nothing at all: the existing binary reads the copy's current file and behaves
+differently, which is exactly what the control wants. The rebuild gate therefore
+applies only to controls that edit a `.rs` source, where a binary built from
+different code really is a reachable way to report a live guard as dead. A file
+read at run time has no compiled copy to go stale, and
+`self-test-backdated-source` is deliberately built on the one Rust control, since
+it is the only conclusion here that depends on cargo having rebuilt.
+
+What rules out the opposite mistake - a run in which the tests never read the
+patched bundle - is **not** the patch-survival read-back, and an earlier draft of
+this paragraph said it was. That read-back establishes only that the file on disk
+was still patched when cargo exited, not that the test process opened it. What
+actually establishes it is the rest of the same run: six other Luau controls have
+to be detected, and a bundle nobody read would make every one of them fail to
+detect at once. The run cannot come back quietly wrong in the one place it would
+matter, which is a redundancy that is supposed to pass. The correction is the
+review session's.
+
+**The phase's own defect was in a reporting line, and it is the same shape as
+everything Phase 3 found.** The harness summary counted its redundancies with
+`($controls | Where-Object { $_.Passes }).Count`. A pipeline that matches one
+control returns that control rather than a one-element array, and PowerShell
+answers `.Count` with 1 only for an object that has no `Count` member of its own
+- a hashtable has one, its number of keys - so a single recorded redundancy
+reported itself as **five**, which is how many fields that entry happens to
+carry. A measured, plausible number about the wrong object, in the line whose
+whole purpose is to stop the counts being misquoted. It was caught by the same
+question as before: the number was checked against what the harness had actually
+printed, control by control.
+
+**The hazard is the element type, not the match count**, which the first
+statement of this in `docs/DEVELOPMENT.md` blurred into "a filter that matches
+exactly one" - readable as "a filter that cannot match one is safe", which would
+be right by accident. `tools/run_sprites_probe.ps1` has such a filter over
+`[pscustomobject]` rows, which carry no `Count` of their own, so it was never at
+risk; measured here as 1 for a single `[pscustomobject]` against 3 for a
+three-key hashtable. All four harnesses and the probe now wrap their filters in
+`@()`, including the three older harnesses, whose counts cannot reach one *today*
+- a property of their contents rather than of their code. The mechanism and the
+probe line are the review session's.
+
+That is Phase 3's closing prediction holding, and then going one better than it
+said: **not one defect this phase produced was in the sample.** They were in a
+harness summary, in a fixture that could not fail, and - the two the review
+session had to find - in this record. The migrated sample passed the five
+inherited fixtures on its first run and has needed no correction since; the only
+edits it has taken are comments naming reliances it already had. The prediction
+deserves the credit with one qualification: this is three hundred lines of Luau
+written directly against contracts frozen three phases ago and re-read
+immediately beforehand, which is about the most favourable case new code can have.
+
+**Most of what the review raised was in this document rather than in the tree**: a
+premise about the room's geometry that was false in all four directions, a link
+to a receipt that did not exist yet, a reason recorded for the conditional
+rebuild gate that was weaker than the true one, and two reliances stated in one
+step where they take three. None of those can fail a test, because prose has no
+failing mode - and the first was about to become code, since the follow-up it
+carried would have had a future session build a passing control and trust it.
+
+**But "all of it was prose" is the flattering version, and the review corrected
+it.** The geometry finding also landed inside the harness: `ahead` guards two
+different things and carried **one** control, so that entry misdescribed its own
+scope, and no run could go red on it because the control it did have kept
+detecting. That is machine-readable and still wrong. It is the same shape as
+Phase 3's rule enforced at four call sites with a control on the shared helper
+only, and the fix is the same - split it, one control per half - which is why
+this phase now has `ahead-perpendicular-uncentred` beside
+`ahead-pressed-axis-uncentred`.
+
+So the generalisation to carry is narrower and less comfortable than "check the
+prose too". **A control's scope is itself a claim, and it lives inside the
+harness where everything looks green.** A guard that detects tells you it covers
+*something*; it never tells you it covers everything the rule beside it says.
+Nothing in this repository's machinery reads either the reasons or the scopes. A
+second reader does, which is the argument for this being a pair of sessions
+rather than for a better harness. The formulation is the review session's.
+
+`tests/script_tilemap.rs` gains the phase's high-speed fixture: one tick of a
+million pixels per second, sixteen thousand pixels of travel across a
+192-pixel map, stopping on the first solid face of each axis. `tests/collision.rs`
+already pins that against the kernel and owns the endpoint-only control; what this
+adds is that the script path cannot get round it, because a game sets velocity and
+never a position, so the binding layer has its own opportunity to sidestep the
+solver.
+
+Limits unchanged from the Phase 0 record; this phase added no bound, relaxed
+none, and measured nothing that would justify revisiting one. `KernelError::Capacity`,
+`TileMapError::Capacity` and `CollisionError::Unconverged` remain defensive code
+with no coverage claim, and Phase 2's accepted latency limitation stands
+unchanged: the fixed pass is bounded in cells and not in time, and the sample's
+one body says nothing about the mandated maximum load.
+
+This phase changed three closed phases' harness scripts, so all three were
+re-run here in both profiles and produce their recorded conclusions unchanged:
+eighteen map guards, twenty-eight collision guards, and thirty-six binding guards
+as thirty-two detected plus four redundant, each with four self-tests refused,
+plus the five control-lock cases. The `@()` fix cannot change a conclusion - the
+exit code is gated on the failure list, not on the summary line - and it did not
+change a count either, which is what those runs establish. The
+[Phase 4 receipt](docs/implementation/evidence/tilemap-phase4-controls.txt)
+carries the sample harness verbatim in both profiles alongside those re-checks.
+
+M1 is complete. **The feature is not, and this plan stays active**: M2's
+simultaneous maps, M3's independent layers and M4's streaming are required core
+scope, their contracts are unfrozen, and the single-map singleton, the implicit
+current-map calls and T6's detach-everything transition recipe are first-milestone
+restrictions that M2 must revise rather than inherit. The next unmet gate is M2's
+contract freeze.
 
 Decision update, 2026-09-07: the owner accepted T2-T8, explicitly required the
 collider to be a hecs component, accepted T1's first milestone while making

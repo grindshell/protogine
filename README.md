@@ -59,7 +59,19 @@ Copy-Item examples/games/sprites/assets/*.png target/sprites-demo/game/assets/
 Both images are requested from the first update, so the first frames show a
 loading state with a progress bar per image while input already works. Arrows
 move, Backspace returns to the spawn, and Space unloads both images so the next
-tick requests them again and the loading state runs live. Replacing either PNG
+tick requests them again and the loading state runs live. Pushing into a crate
+breaks it into floor, which is the shortest demonstration that one grid backs
+both drawing and collision: the sample changes a single cell and the next frame
+draws it and the next tick walks through it.
+
+The room is the engine's map rather than the script's.
+[`room.luau`](examples/games/sprites/room.luau) is still the authored source, but
+the game converts its legend into a numeric palette once during init, installs
+the description, and gives the character a tile collider; movement is entity
+velocity resolved by the fixed collision pass, and draw reads the committed
+position and a region of authoritative tile IDs back out. Nothing in the sample
+keeps a second copy of the grid, which is why editing a cell needs no
+bookkeeping. Replacing either PNG
 in the copied bundle changes the artwork without rebuilding anything; see
 [examples/README.md](examples/README.md) for their provenance and the shapes a
 replacement has to keep.

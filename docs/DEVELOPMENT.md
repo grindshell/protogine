@@ -145,9 +145,27 @@ selects another build; inherited capture/window overrides are excluded.
 Capture uses neutral input and cannot prove key reactions. The sprite probe
 posts real Windows key events and reads the sample's position/animation log:
 movement stops at the first solid tile, both walk frames appear, release restores
-idle, Left turns, and Space unloads/reloads both images. It adds one position-log
-statement to the committed sample and fails if its insertion anchor no longer
-matches. This is injected-event evidence, not a manual keyboard playtest.
+idle, Left turns, Backspace teleports home, and Space unloads/reloads both
+images. It adds one position-log statement to the committed sample and fails if
+its insertion anchor no longer matches. This is injected-event evidence, not a
+manual keyboard playtest.
+
+The log moved when the sample stopped owning its position. Movement now happens
+in the fixed pass after update returns, so a log at the end of update would pair
+this tick's animation state with last tick's coordinates and label the pair with
+the wrong number. It sits at the top of update instead, where all five fields
+describe the last completed tick, and the frozen format is
+`probe <ticks> <x> <y> <frame> <facing>` with every field whole.
+`Get-ProbeStates` now throws on a `probe` line it cannot read rather than
+skipping it: whole pixels used to be guaranteed by the script that wrote them and
+are now a property of the solver's clamp, so a rounding regression would print a
+fraction, and the old filter would have returned an empty or stale sample instead
+of reporting anything wrong. Every target the probe drives to is one the
+character saturates against, so holding a key longer than intended cannot change
+the answer. No crate is reachable by a single key hold from the spawn: the
+headless fixture reaches one in three legs, and the two other routes that have
+been walked take five and six. So the probe does not exercise the map edit, which
+is proven headlessly instead of by timing key presses.
 
 ## Coverage and watchdogs
 
@@ -161,11 +179,11 @@ Keep subprocess watchdogs independent of the subsystem under test:
 | `kernel`, `runtime` | Handles, immediate writes, systems, latched limits, fixed-input replay and catch-up edges |
 | `tilemap` | Checked map schema and storage, row-major IDs, rectangular tiles and negative origins, saturated world-to-cell conversion, region and edit bounds, refused replacement, and map release on stop; runs in the core configuration with no decoder, VM or window |
 | `collision` | Colliders and the swept solver: approach directions and flush contact, interior cells missed by corners, offsets, smallest and maximum boxes, multi-tile sweeps, nearest wall, boundary clamping, X-before-Y, teleport/attach/install/edit/clear guards, all-candidate atomicity and insertion-order independence. Face selection is checked against an independent 1/256-pixel integer oracle across the geometry domain, and clamp rounding against four batteries: both map boundaries, an interior face at the domain edge, and ordinary content, where about a third of random draws need the repair. Core configuration; the max-load stress is `#[ignore]`d and runs through its own harness |
-| `script_tilemap` | The `ctx.world` map and collider calls through the real runtime: schema refusals and copying, owned snapshots, phase gating, handle expiry and slot reuse, T5/T6 guards reaching Lua unchanged, the shared attempt budget and the three aggregate ceilings, systems faults and zero-tick/catch-up frames |
+| `script_tilemap` | The `ctx.world` map and collider calls through the real runtime: schema refusals and copying, owned snapshots, phase gating, handle expiry and slot reuse, T5/T6 guards reaching Lua unchanged, the shared attempt budget and the three aggregate ceilings, systems faults and zero-tick/catch-up frames. A tick of enormous velocity is swept here as well as in `collision`, because a game sets velocity and never a position, so the script path has its own chance to get round the solver |
 | `drawing` | Owned publication/validation, expired bindings, faults and seeded sample state without graphics |
 | `assets` | Rooting, coalescing, staged grants, independent pixels, storage/admission bounds, eviction/cancellation at each stage and worker teardown; adversarial decoders have a 10-second child watchdog because non-preemptible decode plus join can outlast an in-process drain deadline |
 | `script_assets` | Canonical wrappers, publication boundaries, budgets/phases, failed jobs, retained terminal status, sprite options/refusals/order, stop/fault/drop; foreign handles and failed wrapper publication use unit harnesses in `src/scripting/assets.rs` |
-| `sprites_sample` | Committed bundle: independent image readiness while moving, room cells/border/order, unload/reload, equal state/animation at 30/60/144 FPS after preload; IDs map to paths through the two distinct logged image sizes |
+| `sprites_sample` | Committed bundle: independent image readiness while moving, room cells/border/order, unload/reload, equal state/animation at 30/60/144 FPS after preload; IDs map to paths through the two distinct logged image sizes. Since the migration it also pins the engine-resolved movement: 120 pixels per second is asserted to be exactly two per tick, a pushed crate is one edit that changes both the drawn cell and what blocks, walls hold while the art is loading and after it is evicted, and repeated draws and zero-tick frames move nothing. Positions come from `kernel().snapshot()` as well as from the draw commands |
 | `rendering` | Validation/admission without a context: `new` allocates nothing, empty `attach` touches no texture, `validate` is the check used by `render` |
 | `player_capture` | Copied Player from unrelated cwd; source/PNG replacement without rebuild, repeated seeded PNGs, movement/compositing, loading/loaded sample texels, recoverable decode failure and missing-asset fault |
 | `manifest`, `plugins` | Schema/layout/dependencies, startup/rollback/reverse teardown, buffers/aliasing/zero lengths, failure publication, poison, deadlines/limits, expiry and distance parity; native child watchdog is 15 seconds |
@@ -248,6 +266,22 @@ is refused by name, a lock whose process is gone is taken over, a recycled
 process identifier with a different start time is not the same run, and a
 malformed lock is taken over rather than crashing the run that finds it. Run it
 whenever `control_tree.ps1` changes.
+
+Every harness wraps its summary filters in `@(...)`, and that is not style. A
+`Where-Object` pipeline that matches one item returns that item rather than a
+one-element array, and PowerShell answers `.Count` with 1 only for an object
+with no `Count` member of its own. A hashtable has one - its number of keys - so
+a single matching control reports how many fields that control happens to carry.
+The sample harness has a single recorded redundancy and first reported it as
+five: a measured, plausible number about the wrong object.
+
+**The hazard is the element type, not the match count**, which is why the fix is
+to wrap rather than to reason about how many items a filter can select. The
+three older harnesses never misreported, because none of their counts can reach
+one *today* - a property of their current contents, not of their code - so they
+are wrapped too. `tools/run_sprites_probe.ps1` counts `[pscustomobject]` rows,
+which carry no `Count` of their own and so were never at risk; it is wrapped for
+uniformity rather than because it was wrong.
 
 Each case also asserts that an acquisition returns exactly one usable path, which
 is not type pedantry. The first version of the lock wrote its takeover note to
@@ -373,6 +407,62 @@ runs after the kernel call, on a read that mutates nothing, so a deadline
 expiring during output conversion leaves no state that differs from one expiring
 after it. It is kept because the contract requires the observation, and recorded
 as uncovered rather than left looking covered.
+
+### Sample migration guards
+
+```text
+pwsh -NoProfile -File tools/run_sprites_controls.ps1
+pwsh -NoProfile -File tools/run_sprites_controls.ps1 -Release
+```
+
+Nine controls over `examples/games/sprites/main.luau` and `src/runtime.rs`:
+seven that must be detected and two recorded redundancies, plus four self-tests,
+in both profiles. They cover the two the tilemap plan names for this phase - a
+stale Luau grid must fail the tile-edit fixture, and collision in draw must fail
+the repeated-draw/zero-tick fixture - plus the rest of what the migration
+asserts: the character is stopped by the engine rather than by the script, the
+placeholder room follows the same edit the tileset room does, and the game breaks
+a cell only when it identified that cell and only after a push was actually
+refused.
+
+**Most of these rules live in Luau, and that changes one gate.** The sample is
+data the test bundle loads at run time, so patching it makes cargo rebuild
+nothing: the existing binary reads the copy's current file and behaves
+differently, which is what the control wants. The rebuild gate therefore applies
+only to controls that edit a `.rs` source, where a binary built from different
+code is a reachable way to report a live guard as dead; a file read at run time
+has no compiled copy to go stale.
+
+What rules out the opposite mistake - a run where the tests never read the
+patched bundle at all - is not the patch-survival read-back, which only
+establishes that the file on disk was still patched when cargo exited. It is the
+other six Luau controls in the same run: a bundle nobody read would make every
+one of them fail to detect, loudly, so the run cannot come back quietly wrong in
+the one place it would matter, which is a redundancy that is supposed to pass.
+
+The two redundancies are the sample's bounds check before `ctx.world.tile` and
+the pressed-axis half of its cell-ahead rule. The room's border is solid, so the
+character can never stand in it and the cell one tile from its centre is always
+inside the grid; the check stays because `tile` refuses an outside index rather
+than answering it, and a sample should not hand an engine call an argument it has
+not checked.
+
+The second needs its arithmetic stated, because the obvious way to "close" it
+builds a control that cannot fail. `ahead` takes the cell one tile from the box's
+centre rather than one step past its leading edge, which guards two different
+things and so has one control per half.
+`ahead-perpendicular-uncentred` is detected: the character presses the crate
+while straddling rows 9 and 10 with the crate in the lower one, so the top edge
+alone names an empty cell. `ahead-pressed-axis-uncentred` passes, and cannot do
+otherwise. The rule fires only when that axis did not move, meaning the box is
+flush against a face; the clamp's ideal is `(face - size) - offset` moving
+forward and `face - offset` moving back, and for this collider's zero offset,
+32-pixel extent and 32-pixel tiles both are exact, so the committed coordinate
+*is* the face - and a coordinate exactly on a face floors to the same cell under
+both forms of the cell-ahead rule, in every direction. Pressing a crate from the
+west or the north is reachable in this room and both walks were run; both pass
+with the centring removed. Witnessing that half needs a non-zero collider offset
+or a non-integer extent, not a different approach.
 
 ### Collision max-load stress
 
