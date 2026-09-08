@@ -309,7 +309,16 @@ The harness name is in that path, so the limit is per harness: the tail past the
 extraction root measures 132 characters for `sprites-controls` and
 `tilemap-controls`, 134 for `collision-controls` and **139 for
 `script-tilemap-controls`**, which is the binding one. A 120-character root keeps
-all four under `MAX_PATH`.
+all four under `MAX_PATH` - and 120 rather than 121 because `MAX_PATH` is 260
+*including the terminating null*, so 259 is the longest usable path and the
+subtraction is `259 - 139`. Redoing it from 260 gives 121, which puts
+`script-tilemap-controls` at exactly one character too many.
+
+Shortening the harness directory names would be optimising the wrong leg. The
+deepest paths in a built copy are not `cl.exe`'s at all: cargo's incremental
+fragments reach a tail of 158, which exceeds the C++ limit under any root that
+works, and they are fine because rustc is long-path aware. Only the C++ leg is
+fragile.
 
 That margin is thinner than it looks and the near-miss is the useful part. A
 Phase 4 extraction into a 133-character directory put one of those objects at 261
