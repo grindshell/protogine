@@ -607,7 +607,7 @@ arrangement charging a tenth of M1's units takes roughly a tenth of its time.
 That is still the first evidence in this plan that the charged work unit tracks
 time at all, and the plan has treated the two as unrelated on purpose since Phase
 2 recorded that the ceiling bounds cells and not latency - but a derived figure
-whose input varies 8.5% between runs on one machine is an observation, and
+whose input varies that much between runs on one machine is an observation, and
 reading anything finer out of it is reading the noise. The spread is the review
 session's finding; they measured 1.8226 where this had recorded 1.7794 and asked
 what that did to the sequence.
@@ -623,12 +623,7 @@ arrangement changes that had nothing to do with the relationship being tested.
 The closeness is a coincidence of this arrangement until something establishes
 otherwise, and establishing it would need a deliberate sweep across shapes and
 loads rather than a second data point. Recorded here so the temptation arrives
-pre-answered; the caution is the review session's. That is a single point of comparison
-across different map shapes, different arrangements and different runs, so it is
-an observation and not a model - but it is the first evidence in this plan that
-the charged work unit tracks time at all, and the plan has been treating the two
-as unrelated on purpose since Phase 2 recorded that the ceiling bounds cells and
-not latency.
+pre-answered; the caution is the review session's.
 
 **The probe's own assertions were watched failing**, because a mode that reports
 a plausible number while measuring the wrong arrangement is this plan's most
