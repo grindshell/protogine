@@ -644,19 +644,6 @@ impl Kernel {
         })
     }
 
-    /// A handle to the implicit map, for the un-migrated Luau bindings alone.
-    ///
-    /// Crate-visible and retired in Phase 3 with the rest of that surface. A
-    /// binding is callback-scoped and cannot hold a handle between callbacks,
-    /// so it has to ask; a game gets one from [`Self::set_tilemap`] instead.
-    #[cfg(feature = "scripting")]
-    pub(crate) fn current_handle(&self) -> Option<TileMapHandle> {
-        self.current.map(|id| TileMapHandle {
-            session: self.session.clone(),
-            id,
-        })
-    }
-
     /// Remove the implicit map, succeeding when none is installed.
     ///
     /// T6 refuses while a collider is a member of it, which under M2-R1 is a
@@ -677,24 +664,52 @@ impl Kernel {
             .map(|id| self.maps.get(id).expect("current names a live map").info()))
     }
 
-    pub fn tile(&self, column: i32, row: i32) -> Result<u16, KernelError> {
-        Ok(self.map()?.tile(column, row)?)
+    /// The map a public handle names (M2-6).
+    ///
+    /// The by-handle successor to [`Self::map`], and the difference between
+    /// them is where a bad map becomes a refusal. `map` resolves `current` and
+    /// asserts the table agrees, because `current` is the kernel's own
+    /// bookkeeping and a table that refuses it is an invariant break. Here the
+    /// handle came from a caller, so every way it can be wrong - foreign
+    /// session, removed map, reused slot - is an ordinary `InvalidTileMap`, and
+    /// only the lookup *after* validation is asserted.
+    fn named_map(&self, handle: &TileMapHandle) -> Result<&TileMap, KernelError> {
+        let id = self.validate_map(handle)?;
+        Ok(self
+            .maps
+            .get(id)
+            .expect("a validated handle names a live map"))
     }
 
-    /// Whether a tile blocks. Outside the installed map is solid (T3).
-    pub fn tile_solid(&self, column: i32, row: i32) -> Result<bool, KernelError> {
-        Ok(self.map()?.is_solid(column, row))
+    pub fn tile(&self, handle: &TileMapHandle, column: i32, row: i32) -> Result<u16, KernelError> {
+        Ok(self.named_map(handle)?.tile(column, row)?)
+    }
+
+    /// Whether a tile blocks. Outside *this* map is solid (T3).
+    ///
+    /// M2-3's trap in one line: the sentence is unchanged from M1 and means
+    /// something narrower, because "outside the map" is now outside the map the
+    /// caller named and says nothing about any other live map covering the same
+    /// world coordinates.
+    pub fn tile_solid(
+        &self,
+        handle: &TileMapHandle,
+        column: i32,
+        row: i32,
+    ) -> Result<bool, KernelError> {
+        Ok(self.named_map(handle)?.is_solid(column, row))
     }
 
     /// An owned row-major copy of a wholly in-bounds rectangle.
     pub fn tiles_region(
         &self,
+        handle: &TileMapHandle,
         column: i32,
         row: i32,
         columns: u32,
         rows: u32,
     ) -> Result<Vec<u16>, KernelError> {
-        Ok(self.map()?.region(column, row, columns, rows)?)
+        Ok(self.named_map(handle)?.region(column, row, columns, rows)?)
     }
 
     /// Change one cell immediately, refusing an edit that would trap a body (T6).
@@ -702,9 +717,14 @@ impl Kernel {
     /// Only a transition to solid can introduce overlap, so an edit that leaves
     /// the cell non-solid, or replaces one solid ID with another, skips the
     /// collider scan entirely and charges one unit.
-    pub fn set_tile(&mut self, column: i32, row: i32, id: u16) -> Result<(), KernelError> {
-        self.require_active()?;
-        let target = self.current.ok_or(KernelError::NoTileMap)?;
+    pub fn set_tile(
+        &mut self,
+        handle: &TileMapHandle,
+        column: i32,
+        row: i32,
+        id: u16,
+    ) -> Result<(), KernelError> {
+        let target = self.validate_map(handle)?;
         self.set_map_tile(target, column, row, id)
     }
 
@@ -714,9 +734,9 @@ impl Kernel {
     /// collider set** (M2-R1). M1's global collider query was correct while
     /// there was one map and every collider was on it; under one shared
     /// coordinate space a body on another map standing over these world
-    /// coordinates would make the edit refuse. Under the Phase 1 invariant the
-    /// members of a map that is not `current` are none, so the scan is skipped
-    /// entirely rather than filtered.
+    /// coordinates would make the edit refuse. The scan is scoped to the target
+    /// map's members rather than filtered afterwards, so an edit to a map with
+    /// no members costs nothing beyond its one charged unit.
     fn set_map_tile(
         &mut self,
         target: TileMapId,
@@ -730,14 +750,16 @@ impl Kernel {
             callback_work,
             ..
         } = self;
-        // The fifth `current` resolution, and it takes the same treatment as
-        // the other four. Production reaches this only from `set_tile` with
-        // `target = current`, and Phase 3's by-handle form will reach it with a
-        // target `validate_map` has already resolved, so a failure here is an
-        // invariant break rather than a refusal - and surfacing it as
-        // `InvalidTileMap` on M1's `set_tile` is exactly the plausible
-        // substitution this rule exists to prevent.
-        let map = maps.get_mut(target).expect("current names a live map");
+        // Both callers resolve the target before calling: `set_tile` through
+        // `validate_map`, `replace_map` from an id it already holds. So a
+        // failure here is an invariant break rather than a refusal, and
+        // answering `InvalidTileMap` instead would be the plausible wrong error
+        // this rule exists to prevent - it is the refusal `set_tile` gives for a
+        // handle that names nothing, and it would arrive for a handle that
+        // validated.
+        let map = maps
+            .get_mut(target)
+            .expect("a resolved target names a live map");
         // Schema first: a malformed edit is refused before anything is scanned
         // or charged.
         let previous = map.tile(column, row)?;
@@ -1380,7 +1402,7 @@ mod tests {
             "while a body on the edited map still refuses"
         );
         assert_eq!(
-            kernel.set_tile(0, 0, 1),
+            kernel.set_tile(&implicit, 0, 0, 1),
             Err(KernelError::Collision(CollisionError::Placement)),
             "and so does the implicit map's own body"
         );

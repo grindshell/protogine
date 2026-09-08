@@ -13,7 +13,7 @@
 
 use super::utilities::{UtilityBudget, plain};
 use crate::{collision::TileCollider, tilemap::MAX_SOLID_IDS, tilemap::TileMapInfo};
-use mlua::{Lua, Table, Value};
+use mlua::{AnyUserData, Lua, Table, Value};
 
 /// Exactly the fields a description carries. All eight are required.
 ///
@@ -33,11 +33,14 @@ const DESCRIPTION_FIELDS: &[&str] = &[
 /// The reported subset of the above, which is every field but the two arrays.
 const INFO_FIELDS: usize = 6;
 const COLLIDER_FIELDS: &[&str] = &["offset_x", "offset_y", "width", "height"];
+/// The map, then the box. `map` is first so the refusal a caller most often
+/// earns names the field that is new to them.
+const PLACEMENT_FIELDS: &[&str] = &["map", "offset_x", "offset_y", "width", "height"];
 
 /// Elements copied between two observations of the deadline and the work
 /// budget. The plan caps this at 256 so that a maximum description - 262,144
 /// cells - cannot run to completion unobserved.
-const CONVERSION_BATCH: usize = 256;
+pub(super) const CONVERSION_BATCH: usize = 256;
 
 /// Read the six info fields as exact integers and check them.
 ///
@@ -115,13 +118,39 @@ pub(super) fn cell_ids(
     )
 }
 
-/// Collider options: exactly the four fields, all real numbers.
+/// A placement: the map, then the four box fields (M2-6).
+///
+/// The box half is [`COLLIDER_FIELDS`] unchanged, so an M1 options table with
+/// `map` added is a valid placement, and one without it is refused by name
+/// rather than attached to a map the engine picked. M2-6 forbids the second
+/// behaviour specifically: an implicit fallback would work until a game created
+/// a second map and then change what existing calls mean, silently.
+///
+/// The handle comes back as raw userdata rather than a resolved
+/// `TileMapHandle`, because this module holds no engine state and borrows no
+/// kernel; the binding does the borrow.
+pub(super) fn placement(options: &Table) -> mlua::Result<(AnyUserData, TileCollider)> {
+    plain(options, PLACEMENT_FIELDS, "collider placement")?;
+    let map = match options.raw_get::<Value>(PLACEMENT_FIELDS[0])? {
+        Value::UserData(map) => map,
+        Value::Nil => {
+            return Err(mlua::Error::runtime("collider placement map is required"));
+        }
+        _ => {
+            return Err(mlua::Error::runtime(
+                "collider placement map must be a map handle",
+            ));
+        }
+    };
+    Ok((map, collider_box(options)?))
+}
+
+/// The four box fields, all real numbers.
 ///
 /// Range checking belongs to `TileCollider::check`, which the kernel runs
-/// against the installed map's tile sizes. The same box is legal on one map and
+/// against the named map's tile sizes. The same box is legal on one map and
 /// refused on another, so a wrapper with no map in hand cannot decide it.
-pub(super) fn collider(options: &Table) -> mlua::Result<TileCollider> {
-    plain(options, COLLIDER_FIELDS, "collider options")?;
+fn collider_box(options: &Table) -> mlua::Result<TileCollider> {
     let mut values = [0.0f64; 4];
     for (slot, key) in values.iter_mut().zip(COLLIDER_FIELDS) {
         *slot = match options.raw_get::<Value>(*key)? {

@@ -67,6 +67,10 @@ local palette = {}
 local FLOOR, CRATE
 
 local body
+-- The handle the room is installed under. Every map read and edit names it:
+-- there is no implicit "the map" any more, which is what lets a game hold more
+-- than one at a time.
+local map
 local facing, steps, ticks = 1, 0, 0
 -- Where the body was, and which way this game pushed it, at the previous
 -- update. Comparing that against the position the fixed pass committed is how
@@ -155,7 +159,7 @@ return {
                 cells[row * room.columns + column + 1] = ids[string.sub(line, column + 1, column + 1)]
             end
         end
-        ctx.world.set_tilemap({
+        map = ctx.world.create_tilemap({
             columns = room.columns,
             rows = room.rows,
             tile_width = SIZE,
@@ -173,7 +177,7 @@ return {
         body = ctx.world.spawn(SPAWN_X, SPAWN_Y)
         -- One tile, anchored at the sprite's own top left, so the drawn frame
         -- and the collision box are the same rectangle.
-        ctx.world.set_tile_collider(body, {offset_x = 0, offset_y = 0, width = SIZE, height = SIZE})
+        ctx.world.set_tile_collider(body, {map = map, offset_x = 0, offset_y = 0, width = SIZE, height = SIZE})
         ctx.log(`room {room.columns}x{room.rows} tiles at {SIZE} pixels`)
     end,
 
@@ -261,13 +265,13 @@ return {
             -- answering, and a sample should not rely on an argument it has not
             -- checked.
             if column >= 0 and column < room.columns and row >= 0 and row < room.rows then
-                if world.tile(column, row) == CRATE then
+                if world.tile(map, column, row) == CRATE then
                     -- Fallible and unhandled, for the same kind of reason as
                     -- the teleport above: an edit is refused if it would trap a
                     -- body, and this one can only turn a solid cell into the
                     -- floor. The coordinates were bounds-checked here and FLOOR
                     -- is an ID the installed description defines.
-                    world.set_tile(column, row, FLOOR)
+                    world.set_tile(map, column, row, FLOOR)
                     ctx.log(`broke the crate at {column},{row} on tick {ticks}`)
                 end
             end
@@ -292,7 +296,7 @@ return {
         -- The authoritative grid, read back once per frame. This room is 510
         -- cells, comfortably inside the 4,096 a single region call may return;
         -- a larger map would have to ask for the visible chunk instead.
-        local cells = ctx.world.tiles_region(0, 0, room.columns, room.rows)
+        local cells = ctx.world.tiles_region(map, 0, 0, room.columns, room.rows)
         if tiles.ready then
             for row = 0, room.rows - 1 do
                 for column = 0, room.columns - 1 do

@@ -6,7 +6,7 @@
 //! window.
 
 use protogine::{
-    kernel::{Kernel, KernelError, Position},
+    kernel::{Kernel, KernelError, Position, TileMapHandle},
     tilemap::{
         Axis, GEOMETRY_LIMIT, MAX_CELLS, MAX_DIMENSION, MAX_REGION_CELLS, MAX_SOLID_IDS,
         MAX_TILE_SIZE, TileMap, TileMapError, TileMapInfo,
@@ -46,10 +46,14 @@ fn map() -> TileMap {
     TileMap::new(info(), SOLIDS.to_vec(), CELLS.to_vec()).expect("the fixture map should validate")
 }
 
-fn installed() -> Kernel {
+/// A session with the fixture map installed, and the handle that names it.
+///
+/// The handle comes back because M2-6 gives every read and edit an explicit
+/// map: a session alone is no longer enough to address one.
+fn installed() -> (Kernel, TileMapHandle) {
     let mut kernel = Kernel::new();
-    kernel.set_tilemap(map()).unwrap();
-    kernel
+    let map = kernel.set_tilemap(map()).unwrap();
+    (kernel, map)
 }
 
 /// A uniform map of the given shape, for bounds and storage checks.
@@ -408,14 +412,17 @@ fn regions_copy_a_bounded_rectangle_and_refuse_everything_else() {
 
 #[test]
 fn returned_reads_are_owned_copies_of_kernel_state() {
-    let mut kernel = installed();
+    let (mut kernel, map) = installed();
 
     // Mutating a returned region cannot reach the map.
-    let mut region = kernel.tiles_region(0, 0, COLUMNS, ROWS).unwrap();
+    let mut region = kernel.tiles_region(&map, 0, 0, COLUMNS, ROWS).unwrap();
     region[0] = 2;
     region.clear();
-    assert_eq!(kernel.tiles_region(0, 0, COLUMNS, ROWS).unwrap(), CELLS);
-    assert_eq!(kernel.tile(0, 0).unwrap(), 0);
+    assert_eq!(
+        kernel.tiles_region(&map, 0, 0, COLUMNS, ROWS).unwrap(),
+        CELLS
+    );
+    assert_eq!(kernel.tile(&map, 0, 0).unwrap(), 0);
 
     // A retained info snapshot does not track a later replacement.
     let before = kernel.tilemap().unwrap().unwrap();
@@ -428,21 +435,21 @@ fn returned_reads_are_owned_copies_of_kernel_state() {
 
 #[test]
 fn single_cell_edits_apply_immediately_and_refuse_bad_input() {
-    let mut kernel = installed();
-    assert!(!kernel.tile_solid(0, 0).unwrap());
-    kernel.set_tile(0, 0, 2).unwrap();
-    assert_eq!(kernel.tile(0, 0).unwrap(), 2);
-    assert!(kernel.tile_solid(0, 0).unwrap());
+    let (mut kernel, map) = installed();
+    assert!(!kernel.tile_solid(&map, 0, 0).unwrap());
+    kernel.set_tile(&map, 0, 0, 2).unwrap();
+    assert_eq!(kernel.tile(&map, 0, 0).unwrap(), 2);
+    assert!(kernel.tile_solid(&map, 0, 0).unwrap());
     // The edit is visible to a bulk read in the same session, not only to the
     // single-cell one.
-    assert_eq!(kernel.tiles_region(0, 0, 1, 1).unwrap(), vec![2]);
+    assert_eq!(kernel.tiles_region(&map, 0, 0, 1, 1).unwrap(), vec![2]);
 
     // Clearing back to empty, and to a defined non-solid ID.
-    kernel.set_tile(0, 0, 0).unwrap();
-    assert!(!kernel.tile_solid(0, 0).unwrap());
-    kernel.set_tile(0, 0, 1).unwrap();
-    assert_eq!(kernel.tile(0, 0).unwrap(), 1);
-    assert!(!kernel.tile_solid(0, 0).unwrap());
+    kernel.set_tile(&map, 0, 0, 0).unwrap();
+    assert!(!kernel.tile_solid(&map, 0, 0).unwrap());
+    kernel.set_tile(&map, 0, 0, 1).unwrap();
+    assert_eq!(kernel.tile(&map, 0, 0).unwrap(), 1);
+    assert!(!kernel.tile_solid(&map, 0, 0).unwrap());
 
     // Refusals leave the cell alone.
     for (column, row, id, expected) in [
@@ -453,13 +460,13 @@ fn single_cell_edits_apply_immediately_and_refuse_bad_input() {
         (0, 0, u16::MAX, TileMapError::TileId),
     ] {
         assert_eq!(
-            kernel.set_tile(column, row, id),
+            kernel.set_tile(&map, column, row, id),
             Err(KernelError::TileMap(expected)),
             "{column},{row} id {id}"
         );
     }
     assert_eq!(
-        kernel.tile(0, 0).unwrap(),
+        kernel.tile(&map, 0, 0).unwrap(),
         1,
         "a refused edit changed a cell"
     );
@@ -467,9 +474,9 @@ fn single_cell_edits_apply_immediately_and_refuse_bad_input() {
 
 #[test]
 fn a_refused_replacement_leaves_the_installed_map_whole() {
-    let mut kernel = installed();
-    kernel.set_tile(2, 1, 2).unwrap();
-    let before = kernel.tiles_region(0, 0, COLUMNS, ROWS).unwrap();
+    let (mut kernel, map) = installed();
+    kernel.set_tile(&map, 2, 1, 2).unwrap();
+    let before = kernel.tiles_region(&map, 0, 0, COLUMNS, ROWS).unwrap();
     let info_before = kernel.tilemap().unwrap().unwrap();
     let bytes_before = kernel.tilemap_storage_bytes();
 
@@ -486,7 +493,10 @@ fn a_refused_replacement_leaves_the_installed_map_whole() {
     ] {
         assert!(TileMap::new(description, solids, cells).is_err());
         // The map is unchanged and still completely readable after each refusal.
-        assert_eq!(kernel.tiles_region(0, 0, COLUMNS, ROWS).unwrap(), before);
+        assert_eq!(
+            kernel.tiles_region(&map, 0, 0, COLUMNS, ROWS).unwrap(),
+            before
+        );
         assert_eq!(kernel.tilemap().unwrap().unwrap(), info_before);
         assert_eq!(kernel.tilemap_storage_bytes(), bytes_before);
     }
@@ -497,31 +507,109 @@ fn a_refused_replacement_leaves_the_installed_map_whole() {
     replacement.columns = COLUMNS + 1;
     kernel.set_tilemap(uniform(replacement)).unwrap();
     assert_eq!(kernel.tilemap().unwrap().unwrap().columns, COLUMNS + 1);
-    assert_eq!(kernel.tile(COLUMNS as i32, 0).unwrap(), 0);
+    // The handle survives the replacement: `set_tilemap` on a live session
+    // replaces the map in its slot rather than taking a new one.
+    assert_eq!(kernel.tile(&map, COLUMNS as i32, 0).unwrap(), 0);
 }
 
 #[test]
-fn map_operations_require_an_installed_map() {
+fn every_read_and_edit_answers_for_the_map_it_names_and_no_other() {
+    // The whole claim of the by-handle migration, and nothing else in this file
+    // can see it: with one live map, "reads the named map" and "reads the only
+    // map" are the same behaviour. Two maps that differ at the same coordinates
+    // are what separates them.
+    let mut kernel = Kernel::new();
+    // `set_tilemap` rather than `create_tilemap`, deliberately: it makes this
+    // map `current`, so an entry point that resolved the session's implicit map
+    // instead of its argument would **succeed and answer wrongly** here. With
+    // no `current` the same defect refuses, the fixture dies at an unwrap
+    // rather than at a named assertion, and the failure names nothing. Arrange
+    // the state where the missing check succeeds, never the one where something
+    // else refuses on its behalf.
+    let first = kernel.set_tilemap(map()).unwrap();
+    // Same shape, every cell ID 1, so a wrong resolution is a wrong value and
+    // never a bounds refusal.
+    let other = TileMap::new(info(), SOLIDS.to_vec(), [1u16; 15].to_vec()).unwrap();
+    let second = kernel.create_tilemap(other).unwrap();
+    assert_ne!(first, second);
+
+    let named = "a read answered for a map its argument did not name";
+    assert_eq!(kernel.tile(&first, 0, 0), Ok(0), "{named}");
+    assert_eq!(kernel.tile(&second, 0, 0), Ok(1), "{named}");
+    assert_eq!(kernel.tile(&first, 1, 0), Ok(2), "{named}");
+    assert_eq!(kernel.tile(&second, 1, 0), Ok(1), "{named}");
+    // ID 2 is solid and ID 1 is not, so solidity separates the two maps as well
+    // as the raw ID does.
+    assert_eq!(kernel.tile_solid(&first, 1, 0), Ok(true), "{named}");
+    assert_eq!(kernel.tile_solid(&second, 1, 0), Ok(false), "{named}");
+    assert_eq!(
+        kernel.tiles_region(&first, 0, 0, 2, 1),
+        Ok(vec![0, 2]),
+        "{named}"
+    );
+    assert_eq!(
+        kernel.tiles_region(&second, 0, 0, 2, 1),
+        Ok(vec![1, 1]),
+        "{named}"
+    );
+
+    // An edit lands on the named map alone. Edited through the *non*-current
+    // handle, so an implicit resolution writes to the wrong map rather than to
+    // the one it was told.
+    assert_eq!(kernel.set_tile(&second, 0, 0, 4), Ok(()));
+    assert_eq!(
+        kernel.tile(&second, 0, 0),
+        Ok(4),
+        "an edit did not land on the map it named"
+    );
+    assert_eq!(
+        kernel.tile(&first, 0, 0),
+        Ok(0),
+        "an edit through one handle reached another map"
+    );
+
+    // Removing one leaves the other whole and still readable.
+    kernel.remove_tilemap(&second).unwrap();
+    assert_eq!(kernel.tile(&second, 0, 0), Err(KernelError::InvalidTileMap));
+    assert_eq!(kernel.tile(&first, 0, 0), Ok(0), "{named}");
+}
+
+#[test]
+fn map_operations_refuse_once_the_map_they_name_is_gone() {
     let mut kernel = Kernel::new();
     assert_eq!(kernel.tilemap().unwrap(), None);
     assert_eq!(kernel.tilemap_storage_bytes(), 0);
-    assert_eq!(kernel.tile(0, 0), Err(KernelError::NoTileMap));
-    assert_eq!(kernel.tile_solid(0, 0), Err(KernelError::NoTileMap));
-    assert_eq!(kernel.tiles_region(0, 0, 1, 1), Err(KernelError::NoTileMap));
-    assert_eq!(kernel.set_tile(0, 0, 0), Err(KernelError::NoTileMap));
+    // The two calls still on the implicit map keep M1's refusal. The four that
+    // M2-6 moved to handles have no "no map installed" state left to report at
+    // all: a caller names a map, so the successor to `NoTileMap` for them is a
+    // handle that no longer names a live one, asserted below rather than here.
+    // There is nothing to pass them on an empty session, which is the point.
     assert_eq!(kernel.tile_face(Axis::X, 0), Err(KernelError::NoTileMap));
     assert_eq!(kernel.tile_at(Axis::X, 0.0), Err(KernelError::NoTileMap));
     // Clearing an absent map succeeds, and entities are unaffected either way.
     kernel.clear_tilemap().unwrap();
     let entity = kernel.spawn(Position { x: 1.0, y: 2.0 }).unwrap();
-    kernel.set_tilemap(map()).unwrap();
+    let map = kernel.set_tilemap(map()).unwrap();
     assert_eq!(
         kernel.position(&entity).unwrap(),
         Position { x: 1.0, y: 2.0 }
     );
+    // Live first, so the refusals below are the map going away and not the
+    // handle having been wrong from the start.
+    assert_eq!(kernel.tile(&map, 0, 0).unwrap(), 0);
     kernel.clear_tilemap().unwrap();
     assert_eq!(kernel.tilemap().unwrap(), None);
-    assert_eq!(kernel.tile(0, 0), Err(KernelError::NoTileMap));
+    for (what, refusal) in [
+        ("tile", kernel.tile(&map, 0, 0).map(|_| ())),
+        ("tile_solid", kernel.tile_solid(&map, 0, 0).map(|_| ())),
+        (
+            "tiles_region",
+            kernel.tiles_region(&map, 0, 0, 1, 1).map(|_| ()),
+        ),
+        ("set_tile", kernel.set_tile(&map, 0, 0, 0)),
+    ] {
+        assert_eq!(refusal, Err(KernelError::InvalidTileMap), "{what}");
+    }
     assert!(kernel.position(&entity).is_ok(), "clearing kept the entity");
 }
 
@@ -533,7 +621,7 @@ fn stopping_releases_map_storage_and_refuses_every_map_call() {
         ..info()
     };
     let mut kernel = Kernel::new();
-    kernel.set_tilemap(uniform(largest)).unwrap();
+    let installed = kernel.set_tilemap(uniform(largest)).unwrap();
     // Half a megabyte of cells plus one solid flag.
     assert_eq!(
         kernel.tilemap_storage_bytes(),
@@ -548,10 +636,23 @@ fn stopping_releases_map_storage_and_refuses_every_map_call() {
         "stop must release map storage, not merely deny access to it"
     );
     assert_eq!(kernel.tilemap(), Err(KernelError::Inactive));
-    assert_eq!(kernel.tile(0, 0), Err(KernelError::Inactive));
-    assert_eq!(kernel.tile_solid(0, 0), Err(KernelError::Inactive));
-    assert_eq!(kernel.tiles_region(0, 0, 1, 1), Err(KernelError::Inactive));
-    assert_eq!(kernel.set_tile(0, 0, 0), Err(KernelError::Inactive));
+    // `Inactive` and not `InvalidTileMap`, even though `stop` released the map
+    // this handle names and both refusals are now available. M2-1 fixes the
+    // order: `validate_map` requires an active session before it looks at the
+    // handle at all, so a stopped session never reports a map problem.
+    assert_eq!(kernel.tile(&installed, 0, 0), Err(KernelError::Inactive));
+    assert_eq!(
+        kernel.tile_solid(&installed, 0, 0),
+        Err(KernelError::Inactive)
+    );
+    assert_eq!(
+        kernel.tiles_region(&installed, 0, 0, 1, 1),
+        Err(KernelError::Inactive)
+    );
+    assert_eq!(
+        kernel.set_tile(&installed, 0, 0, 0),
+        Err(KernelError::Inactive)
+    );
     assert_eq!(kernel.set_tilemap(map()), Err(KernelError::Inactive));
     assert_eq!(kernel.clear_tilemap(), Err(KernelError::Inactive));
     assert_eq!(kernel.tile_face(Axis::X, 0), Err(KernelError::Inactive));
@@ -563,7 +664,7 @@ fn a_map_changes_nothing_about_entities_without_colliders() {
     // Phase 1 installs no colliders, so integration must be exactly what it was.
     let mut bare = Kernel::new();
     let mut mapped = Kernel::new();
-    mapped.set_tilemap(map()).unwrap();
+    let grid = mapped.set_tilemap(map()).unwrap();
     for kernel in [&mut bare, &mut mapped] {
         let entity = kernel.spawn(Position { x: 8.0, y: 8.0 }).unwrap();
         kernel
@@ -581,7 +682,8 @@ fn a_map_changes_nothing_about_entities_without_colliders() {
         let row = mapped.tile_at(Axis::Y, position.y).unwrap();
         // `tile` refuses outside the map, so this counts only solid cells the
         // entity was genuinely inside, never the solid exterior.
-        if mapped.tile(column, row).is_ok() && mapped.tile_solid(column, row).unwrap() {
+        if mapped.tile(&grid, column, row).is_ok() && mapped.tile_solid(&grid, column, row).unwrap()
+        {
             entered_a_solid_tile = true;
         }
     }
@@ -605,11 +707,21 @@ fn a_map_changes_nothing_about_entities_without_colliders() {
 
 #[test]
 fn kernel_errors_describe_their_map_cause() {
-    let kernel = Kernel::new();
+    let mut kernel = Kernel::new();
     assert_eq!(
-        kernel.tile(0, 0).unwrap_err().to_string(),
+        kernel.tile_face(Axis::X, 0).unwrap_err().to_string(),
         "no tile map is installed"
     );
+    // The by-handle successor, read through an entry point rather than
+    // constructed, so the message is the one a caller actually receives. It has
+    // to be distinguishable from the sentence above: they are different
+    // failures - nothing installed against a handle naming nothing - and M2-8
+    // classifies them separately.
+    let map = kernel.set_tilemap(map()).unwrap();
+    kernel.clear_tilemap().unwrap();
+    let stale = kernel.tile(&map, 0, 0).unwrap_err().to_string();
+    assert_eq!(stale, "stale or foreign tile map handle");
+    assert_ne!(stale, "no tile map is installed");
     assert_eq!(
         KernelError::TileMap(TileMapError::Bounds).to_string(),
         TileMapError::Bounds.to_string(),

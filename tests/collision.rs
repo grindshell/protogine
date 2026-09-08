@@ -1348,7 +1348,7 @@ fn attaching_and_resizing_check_every_covered_cell() {
 
 #[test]
 fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
-    let (mut kernel, body, _installed) = session(pillar(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, installed) = session(pillar(), (32.0, 32.0), square(32.0));
     // The same room with the body's own cell filled in.
     let trapping = build(
         &["#####", "##..#", "#.#.#", "#...#", "#####"],
@@ -1362,7 +1362,7 @@ fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
         "installation must revalidate every live collider before the swap"
     );
     assert_eq!(
-        kernel.tile(1, 1),
+        kernel.tile(&installed, 1, 1),
         Ok(0),
         "a refused install leaves the installed map whole"
     );
@@ -1390,32 +1390,36 @@ fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
         (0, 0),
     );
     assert!(kernel.set_tilemap(opened).is_ok());
-    assert_eq!(kernel.tile_solid(2, 2), Ok(false));
+    assert_eq!(kernel.tile_solid(&installed, 2, 2), Ok(false));
     assert_eq!(kernel.position(&body), Ok(Position { x: 32.0, y: 32.0 }));
 }
 
 #[test]
 fn a_solid_edit_under_a_body_refuses_and_leaves_the_cell() {
-    let (mut kernel, body, _installed) = session(pillar(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, installed) = session(pillar(), (32.0, 32.0), square(32.0));
     assert_eq!(
-        kernel.set_tile(1, 1, WALL),
+        kernel.set_tile(&installed, 1, 1, WALL),
         Err(KernelError::Collision(CollisionError::Placement)),
         "an edit that would trap the body must refuse"
     );
-    assert_eq!(kernel.tile(1, 1), Ok(0), "the cell keeps its old ID");
+    assert_eq!(
+        kernel.tile(&installed, 1, 1),
+        Ok(0),
+        "the cell keeps its old ID"
+    );
 
     // The same edit one cell over is free, and so is a non-solid edit beneath
     // the body: it cannot introduce overlap.
-    assert_eq!(kernel.set_tile(3, 3, WALL), Ok(()));
-    assert_eq!(kernel.set_tile(1, 1, FLOOR), Ok(()));
-    assert_eq!(kernel.tile(1, 1), Ok(FLOOR));
+    assert_eq!(kernel.set_tile(&installed, 3, 3, WALL), Ok(()));
+    assert_eq!(kernel.set_tile(&installed, 1, 1, FLOOR), Ok(()));
+    assert_eq!(kernel.tile(&installed, 1, 1), Ok(FLOOR));
 
     // Clearing the pillar under nobody, then refilling it, both succeed. The
     // body's high edge is exactly the pillar's near face, and edge contact is
     // not overlap.
-    assert_eq!(kernel.set_tile(2, 2, 0), Ok(()));
+    assert_eq!(kernel.set_tile(&installed, 2, 2, 0), Ok(()));
     assert_eq!(
-        kernel.set_tile(2, 2, WALL),
+        kernel.set_tile(&installed, 2, 2, WALL),
         Ok(()),
         "a body flush against the cell's face does not overlap it"
     );
@@ -1703,11 +1707,11 @@ fn stopping_releases_the_sweep_scratch() {
 
 #[test]
 fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
-    let (mut kernel, body, _installed) = session(room(), (32.0, 32.0), square(32.0));
+    let (mut kernel, body, installed) = session(room(), (32.0, 32.0), square(32.0));
     kernel.begin_callback();
 
     // A cell edit that leaves the map non-solid charges the cell alone.
-    kernel.set_tile(3, 1, FLOOR).unwrap();
+    kernel.set_tile(&installed, 3, 1, FLOOR).unwrap();
     assert_eq!(
         kernel.callback_work(),
         1,
@@ -1717,7 +1721,7 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
     // Nor can replacing one solid ID with another, which is why the scan is
     // conditioned on the transition rather than on the new ID alone.
     kernel.begin_callback();
-    kernel.set_tile(0, 0, WALL).unwrap();
+    kernel.set_tile(&installed, 0, 0, WALL).unwrap();
     assert_eq!(
         kernel.callback_work(),
         1,
@@ -1727,10 +1731,10 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
     // Making a cell solid charges the cell plus one check per live collider,
     // whether or not the edit is accepted.
     kernel.begin_callback();
-    kernel.set_tile(3, 1, WALL).unwrap();
+    kernel.set_tile(&installed, 3, 1, WALL).unwrap();
     assert_eq!(kernel.callback_work(), 2);
     kernel.begin_callback();
-    assert!(kernel.set_tile(1, 1, WALL).is_err());
+    assert!(kernel.set_tile(&installed, 1, 1, WALL).is_err());
     assert_eq!(
         kernel.callback_work(),
         2,
@@ -1754,18 +1758,18 @@ fn tile_work_is_charged_per_visited_cell_and_survives_a_refusal() {
 #[test]
 fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
     let (mut kernel, body, installed) = session(room(), (32.0, 32.0), square(32.0));
-    let before = kernel.tile(3, 1).unwrap();
+    let before = kernel.tile(&installed, 3, 1).unwrap();
     kernel.begin_callback();
     // One unit short of the ceiling: the edit below costs two, so it must be
     // refused part-way rather than allowed one whole call's worth of overrun.
     kernel.charge_callback_work(MAX_CALLBACK_WORK - 1).unwrap();
     assert_eq!(
-        kernel.set_tile(3, 1, WALL),
+        kernel.set_tile(&installed, 3, 1, WALL),
         Err(KernelError::Collision(CollisionError::Work)),
         "set_tile must be budgeted against what the callback has left, not the whole ceiling"
     );
     assert_eq!(
-        kernel.tile(3, 1),
+        kernel.tile(&installed, 3, 1),
         Ok(before),
         "the refused edit changed nothing"
     );
@@ -1819,7 +1823,7 @@ fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
         "set_tilemap must be budgeted against what the callback has left"
     );
     assert_eq!(
-        kernel.tile(3, 1),
+        kernel.tile(&installed, 3, 1),
         Ok(before),
         "the refused installation left the map alone"
     );

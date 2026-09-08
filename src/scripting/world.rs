@@ -5,7 +5,9 @@ use super::utilities::UtilityBudget;
 use crate::{
     collision::CollisionError,
     input::{Button, InputSnapshot},
-    kernel::{ColliderPlacement, EntityHandle, Kernel, KernelError, Position, Velocity},
+    kernel::{
+        ColliderPlacement, EntityHandle, Kernel, KernelError, Position, TileMapHandle, Velocity,
+    },
     tilemap::{MAX_REGION_CELLS, TileMap},
 };
 use mlua::{
@@ -18,6 +20,30 @@ use std::{
 };
 
 impl UserData for EntityHandle {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(MetaMethod::Eq, |_, this, other: AnyUserData| {
+            Ok(other.borrow::<Self>().is_ok_and(|other| *this == *other))
+        });
+    }
+}
+
+/// A map handle a script holds, compared by session, slot and generation.
+///
+/// `Eq` is the whole surface: a handle names a map and is passed back, and
+/// nothing a script can do to one changes what it names. In particular the
+/// comparison is the same [`PartialEq`] the kernel resolves against, so a
+/// handle read back from `tile_collider` equals the one `create_tilemap`
+/// returned, and a handle to a removed map equals nothing live - including a
+/// later map that reused its slot, which differs by generation.
+///
+/// Deliberately without the canonical-wrapper cache [`EntityCache`] gives
+/// entities. That cache exists so a wrapper can be a *table key*, which `__eq`
+/// cannot provide: Lua hashes userdata by identity and never consults the
+/// metamethod. So `{[map_a] = …}` keyed by two separately obtained wrappers for
+/// one map has two entries, while `map_a == map_b` is true. The limitation is
+/// recorded rather than left to be discovered; a game indexing by room should
+/// key on its own room number, which it has and the engine does not.
+impl UserData for TileMapHandle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(MetaMethod::Eq, |_, this, other: AnyUserData| {
             Ok(other.borrow::<Self>().is_ok_and(|other| *this == *other))
@@ -304,13 +330,43 @@ impl<'a> EngineContext<'a> {
 }
 
 impl EngineContext<'_> {
-    /// The nine map and collider calls, beneath the same `ctx.world` table and
+    /// One description table, validated and copied into an owned candidate.
+    ///
+    /// Shared by every call that installs a map, so the schema cannot fork into
+    /// one per entry point - the failure M2-6 has to avoid, since a description
+    /// accepted by `create_tilemap` and refused by `replace_tilemap` would be a
+    /// difference no contract states.
+    ///
+    /// Copying charges the callback's tile-work ceiling as it goes. The borrow
+    /// lives for the length of one addition and is released before the next
+    /// element is read, which is what the no-borrow-across-conversion rule asks
+    /// for: it forbids holding a borrow while the VM runs, not charging between
+    /// batches.
+    fn candidate(&self, desc: &Table, budget: &UtilityBudget<'_>) -> mlua::Result<TileMap> {
+        let info = tilemap::description_info(desc)?;
+        let mut charge = |units: u64| {
+            let result = self.kernel.borrow_mut().charge_callback_work(units);
+            kernel_result(budget, result)
+        };
+        let solids = tilemap::solid_flags(desc, budget, &mut charge)?;
+        let cells = tilemap::cell_ids(desc, info.cell_count(), budget, &mut charge)?;
+        // The candidate is complete and owned before the kernel sees it, so a
+        // refused install cannot leave a partial map behind.
+        TileMap::new(info, solids, cells).map_err(mlua::Error::external)
+    }
+
+    /// The map and collider calls, beneath the same `ctx.world` table and
     /// sharing its attempt budget (T7).
     ///
     /// Every one of them converts its arguments to owned Rust values first,
     /// borrows the kernel for the call alone, and builds any output afterwards,
     /// so no kernel borrow is ever live across VM conversion, VM allocation or
     /// a deadline check.
+    ///
+    /// M1's nine are M2-6's nine plus the three lifecycle names it splits
+    /// `set_tilemap` and `clear_tilemap` into; the count is left out of this
+    /// sentence deliberately, because a number here is a second place to keep
+    /// in step with the table below and the migration table in M2-6.
     fn bind_tilemap<'s>(
         &'s self,
         scope: &'s Scope<'s, '_>,
@@ -323,25 +379,106 @@ impl EngineContext<'_> {
             scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, true, writable)?;
                 let desc = Table::from_lua_multi(args, lua)?;
-                let info = tilemap::description_info(&desc)?;
-                // Copying charges the callback's tile-work ceiling as it goes.
-                // The borrow lives for the length of one addition and is
-                // released before the next element is read, which is what the
-                // no-borrow-across-conversion rule asks for: it forbids holding
-                // a borrow while the VM runs, not charging between batches.
-                let mut charge = |units: u64| {
-                    let result = self.kernel.borrow_mut().charge_callback_work(units);
-                    kernel_result(budget, result)
-                };
-                let solids = tilemap::solid_flags(&desc, budget, &mut charge)?;
-                let cells = tilemap::cell_ids(&desc, info.cell_count(), budget, &mut charge)?;
-                // The candidate is complete and owned before the kernel sees
-                // it, so a refused install cannot leave a partial map behind.
-                let map = TileMap::new(info, solids, cells).map_err(mlua::Error::external)?;
-                // The handle is discarded: Luau still addresses one implicit
-                // map until Phase 3 migrates the surface, and a script that
-                // could hold a map handle would be half-migrated.
+                let map = self.candidate(&desc, budget)?;
+                // The handle is discarded: this call is M1's and addresses the
+                // implicit map. `create_tilemap` below is its M2-6 successor and
+                // the two coexist only until this phase finishes migrating the
+                // surface; a shipped surface carrying both would be exactly the
+                // "two ways to name a map" M2-6 forbids.
                 let result = self.kernel.borrow_mut().set_tilemap(map).map(|_| ());
+                kernel_result(budget, result)
+            })?,
+        )?;
+        world.raw_set(
+            "create_tilemap",
+            scope.create_function(move |lua, args: MultiValue| {
+                self.begin(budget, true, writable)?;
+                let desc = Table::from_lua_multi(args, lua)?;
+                let map = self.candidate(&desc, budget)?;
+                let result = self.kernel.borrow_mut().create_tilemap(map);
+                let handle = kernel_result(budget, result)?;
+                // The first map call that mutates and *then* allocates
+                // something to publish, which is `spawn`'s shape and needs
+                // `spawn`'s rollback: a failure here would leave a map holding
+                // a slot and its cells against both budgets with no handle
+                // anywhere that names it, unremovable for the life of the
+                // session. No game code runs between the insert and this.
+                //
+                // `only_create_tilemap_returns_a_value_that_could_fail_to_allocate`
+                // in `tests/script_tilemap.rs` is the test that says which map
+                // calls have this shape, and it named this one before it was
+                // written.
+                //
+                // **Structurally unexercised, and measured rather than
+                // assumed.** `src/scripting/assets.rs` records that an
+                // unexercised rollback is not behavioural proof, and both
+                // rollbacks that satisfy it are injected at a *table write*
+                // after the userdata already allocated - a seam this call does
+                // not have, because publishing the handle is its last step.
+                // The candidate seam was `Lua::set_memory_limit`, which
+                // `src/scripting.rs` already calls. It does not work: with
+                // 503,176 bytes in use, a limit of 491 still let every
+                // `create_userdata` here succeed, including the first one in
+                // the VM's life, which also builds the metatable. The limit is
+                // enforced - a 400,000-element table under the same limit fails
+                // with "not enough memory" - so small allocations are served
+                // from Luau's existing pool without the allocator being asked.
+                // Giving this call a wrapper cache purely to manufacture that
+                // seam would buy the proof with a second weak table, a session
+                // vector and a staleness invariant, which is the larger debt.
+                // The rule says an unexercised rollback is not proof; it does
+                // not say build machinery until it is.
+                //
+                // **What makes this note stale, so it is a claim and not a
+                // permission.** A record of a measured gap invites the next
+                // reader not to re-measure, which is wrong the moment the
+                // ground moves - so here is the move to watch for: *if any
+                // fallible step is ever added after the `create_userdata`
+                // below, the seam appears for free and this note is void.*
+                // That is exactly what separates this call from `spawn`, whose
+                // rollback is exercised by injecting at the cache write that
+                // follows its allocation, and it is checkable by reading the
+                // twenty lines under it.
+                match lua.create_userdata(handle.clone()) {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        self.kernel
+                            .borrow_mut()
+                            .remove_tilemap(&handle)
+                            .expect("an unpublished map has no members");
+                        Err(error)
+                    }
+                }
+            })?,
+        )?;
+        world.raw_set(
+            "replace_tilemap",
+            scope.create_function(move |lua, args: MultiValue| {
+                self.begin(budget, true, writable)?;
+                let (handle, desc) = <(AnyUserData, Table)>::from_lua_multi(args, lua)?;
+                let handle = map_handle(handle)?;
+                // The description is copied and charged before the handle is
+                // resolved, so replacing through a stale handle pays for the
+                // description it built and then refuses. That ordering is
+                // deliberate and is not the kernel's: `Kernel::replace_map`
+                // admits before it walks the outgoing map's members, because
+                // there it has both in hand. Here, refusing first would mean
+                // probing validity through a second kernel call and classifying
+                // its refusals separately, and it would protect nothing - the
+                // same description costs the same through `create_tilemap`,
+                // which has no handle to check.
+                let map = self.candidate(&desc, budget)?;
+                let result = self.kernel.borrow_mut().replace_tilemap(&handle, map);
+                kernel_result(budget, result)
+            })?,
+        )?;
+        world.raw_set(
+            "remove_tilemap",
+            scope.create_function(move |lua, args: MultiValue| {
+                self.begin(budget, true, writable)?;
+                let handle = AnyUserData::from_lua_multi(args, lua)?;
+                let handle = map_handle(handle)?;
+                let result = self.kernel.borrow_mut().remove_tilemap(&handle);
                 kernel_result(budget, result)
             })?,
         )?;
@@ -355,23 +492,29 @@ impl EngineContext<'_> {
         )?;
         world.raw_set(
             "tilemap_info",
-            scope.create_function(move |lua, ()| {
+            scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, false, writable)?;
-                let result = self.kernel.borrow().tilemap();
-                match kernel_result(budget, result)? {
-                    Some(info) => Ok(Value::Table(tilemap::info_table(lua, info)?)),
-                    None => Ok(Value::Nil),
-                }
+                let map = AnyUserData::from_lua_multi(args, lua)?;
+                let map = map_handle(map)?;
+                // No `nil` arm any more, and the absence is the migration: M1
+                // answered `nil` for "no map is installed", which was a
+                // question about the session. A handle is a question about one
+                // map, and every way it can fail to name a live one is a
+                // refusal rather than an absence.
+                let result = self.kernel.borrow().tilemap_info(&map);
+                let info = kernel_result(budget, result)?;
+                tilemap::info_table(lua, info)
             })?,
         )?;
         world.raw_set(
             "tile",
             scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, false, writable)?;
-                let (column, row) = <(Value, Value)>::from_lua_multi(args, lua)?;
+                let (map, column, row) = <(AnyUserData, Value, Value)>::from_lua_multi(args, lua)?;
+                let map = map_handle(map)?;
                 let column = tilemap::index(&column, "column")?;
                 let row = tilemap::index(&row, "row")?;
-                let result = self.kernel.borrow().tile(column, row);
+                let result = self.kernel.borrow().tile(&map, column, row);
                 Ok(f64::from(kernel_result(budget, result)?))
             })?,
         )?;
@@ -379,12 +522,16 @@ impl EngineContext<'_> {
             "tile_solid",
             scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, false, writable)?;
-                let (column, row) = <(Value, Value)>::from_lua_multi(args, lua)?;
+                let (map, column, row) = <(AnyUserData, Value, Value)>::from_lua_multi(args, lua)?;
+                let map = map_handle(map)?;
                 let column = tilemap::index(&column, "column")?;
                 let row = tilemap::index(&row, "row")?;
                 // The one call that accepts indices outside the grid, because
-                // outside the installed map is solid (T3).
-                let result = self.kernel.borrow().tile_solid(column, row);
+                // outside *the named map* is solid (T3). M2-3: the sentence is
+                // M1's and the meaning is narrower, since another live map may
+                // cover the same world coordinates and this answers nothing
+                // about it.
+                let result = self.kernel.borrow().tile_solid(&map, column, row);
                 kernel_result(budget, result)
             })?,
         )?;
@@ -392,8 +539,9 @@ impl EngineContext<'_> {
             "tiles_region",
             scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, false, writable)?;
-                let (column, row, columns, rows) =
-                    <(Value, Value, Value, Value)>::from_lua_multi(args, lua)?;
+                let (map, column, row, columns, rows) =
+                    <(AnyUserData, Value, Value, Value, Value)>::from_lua_multi(args, lua)?;
+                let map = map_handle(map)?;
                 let column = tilemap::index(&column, "column")?;
                 let row = tilemap::index(&row, "row")?;
                 let columns = tilemap::extent(&columns, "columns")?;
@@ -402,7 +550,7 @@ impl EngineContext<'_> {
                 let result = self
                     .kernel
                     .borrow()
-                    .tiles_region(column, row, columns, rows);
+                    .tiles_region(&map, column, row, columns, rows);
                 let ids = kernel_result(budget, result)?;
                 tilemap::region_table(lua, &ids, budget)
             })?,
@@ -411,11 +559,13 @@ impl EngineContext<'_> {
             "set_tile",
             scope.create_function(move |lua, args: MultiValue| {
                 self.begin(budget, true, writable)?;
-                let (column, row, id) = <(Value, Value, Value)>::from_lua_multi(args, lua)?;
+                let (map, column, row, id) =
+                    <(AnyUserData, Value, Value, Value)>::from_lua_multi(args, lua)?;
+                let map = map_handle(map)?;
                 let column = tilemap::index(&column, "column")?;
                 let row = tilemap::index(&row, "row")?;
                 let id = tilemap::tile_id(&id)?;
-                let result = self.kernel.borrow_mut().set_tile(column, row, id);
+                let result = self.kernel.borrow_mut().set_tile(&map, column, row, id);
                 kernel_result(budget, result)
             })?,
         )?;
@@ -427,30 +577,31 @@ impl EngineContext<'_> {
                 // Lua, so both remove the collider.
                 let (handle, options) = <(AnyUserData, Option<Table>)>::from_lua_multi(args, lua)?;
                 let handle = entity(handle)?;
-                let collider = options.as_ref().map(tilemap::collider).transpose()?;
-                // The script names no map, so this attaches to the implicit
-                // one. Resolved here rather than in the kernel, which has no
-                // implicit-map fallback by design (M2-6): a game creating a
-                // second map would otherwise silently change what an existing
-                // call means. Phase 3 replaces this with a map the script
-                // names, and `current_handle` goes with it.
-                let result = {
-                    let mut kernel = self.kernel.borrow_mut();
-                    match collider {
-                        Some(collider) => match kernel.current_handle() {
-                            Some(map) => kernel.set_tile_collider(
-                                &handle,
-                                Some(ColliderPlacement {
-                                    map,
-                                    collider,
-                                    position: None,
-                                }),
-                            ),
-                            None => Err(KernelError::NoTileMap),
-                        },
-                        None => kernel.set_tile_collider(&handle, None),
-                    }
-                };
+                let placement = options
+                    .as_ref()
+                    .map(tilemap::placement)
+                    .transpose()?
+                    .map(|(map, collider)| Ok::<_, mlua::Error>((map_handle(map)?, collider)))
+                    .transpose()?;
+                // The script names the map, so nothing is resolved here. The
+                // implicit fallback this replaces was the one thing M2-6
+                // forbids by name: it would have worked until a game created a
+                // second map and then changed what existing calls meant.
+                //
+                // `position` is `None` at every attachment. M2-5's transfer is
+                // the only thing that sets it, and it arrives with its own
+                // call rather than as optional fields here - a placement that
+                // could carry a position would make every transfer restate the
+                // box, and a mis-restated box lands in a solid cell only
+                // sometimes, which refuses intermittently and looks tested.
+                let result = self.kernel.borrow_mut().set_tile_collider(
+                    &handle,
+                    placement.map(|(map, collider)| ColliderPlacement {
+                        map,
+                        collider,
+                        position: None,
+                    }),
+                );
                 kernel_result(budget, result)
             })?,
         )?;
@@ -479,6 +630,17 @@ impl EngineContext<'_> {
 
 fn entity(value: AnyUserData) -> mlua::Result<EntityHandle> {
     Ok(value.borrow::<EntityHandle>()?.clone())
+}
+
+/// A map handle argument.
+///
+/// Passing an entity where a map belongs fails here, in the VM's type check,
+/// rather than reaching the kernel - which is the right place for it, because
+/// the kernel cannot tell a wrong *kind* of handle from a stale one and would
+/// have to answer `InvalidTileMap` to both. M2-1's foreign handle is the
+/// session check inside the kernel and is a different refusal from this one.
+fn map_handle(value: AnyUserData) -> mlua::Result<TileMapHandle> {
+    Ok(value.borrow::<TileMapHandle>()?.clone())
 }
 
 fn pair(lua: &Lua, x: f64, y: f64) -> mlua::Result<Table> {
@@ -592,6 +754,63 @@ mod tests {
         assert_eq!(cache.values.pairs::<f64, AnyUserData>().count(), 0);
         assert!(a.position(&handle_a).is_ok());
         assert!(cache.get(&lua, &handle_a).is_ok());
+    }
+
+    /// A one-cell map, which is the smallest thing the table will admit.
+    fn one_cell() -> TileMap {
+        TileMap::new(
+            crate::tilemap::TileMapInfo {
+                columns: 1,
+                rows: 1,
+                tile_width: 8,
+                tile_height: 8,
+                origin_x: 0,
+                origin_y: 0,
+            },
+            vec![false],
+            vec![0],
+        )
+        .expect("a one-cell map is well formed")
+    }
+
+    /// Two wrappers for one map, which is the only shape `__eq` exists for.
+    ///
+    /// **No script-level fixture can reach this yet, and that is worth stating
+    /// rather than discovering.** Every wrapper a script can hold today came
+    /// from its own `create_tilemap` call, so raw identity already separates two
+    /// maps and already agrees with the metamethod on one:
+    /// `a_script_holds_two_map_handles_across_callbacks_and_removes_them_one_at_a_time`
+    /// passes with `__eq` deleted. What makes a second wrapper for a *live* map
+    /// reachable from Lua is `tile_collider` returning the map (M2-6), and until
+    /// that lands this is the only thing that says the metamethod works.
+    #[test]
+    fn two_wrappers_for_one_map_compare_equal_while_staying_distinct_values() {
+        let lua = Lua::new();
+        let mut kernel = Kernel::new();
+        let first = kernel.create_tilemap(one_cell()).unwrap();
+        let other = kernel.create_tilemap(one_cell()).unwrap();
+        let entity = kernel.spawn(Position::default()).unwrap();
+        let globals = lua.globals();
+        for (name, value) in [
+            ("a", lua.create_userdata(first.clone()).unwrap()),
+            ("again", lua.create_userdata(first).unwrap()),
+            ("b", lua.create_userdata(other).unwrap()),
+            ("body", lua.create_userdata(entity).unwrap()),
+        ] {
+            globals.set(name, value).unwrap();
+        }
+        let ask = |source: &str| lua.load(source).eval::<bool>().unwrap();
+        assert!(
+            !ask("return rawequal(a, again)"),
+            "two wrappers, two values"
+        );
+        assert!(ask("return a == again"), "and one map");
+        assert!(!ask("return a == b"), "two maps never compare equal");
+        // Both operands are userdata, so Luau consults `__eq` and the borrow
+        // inside it is what refuses. A metamethod that answered on the pointer
+        // alone would agree here and disagree two lines above.
+        assert!(!ask("return a == body"), "a map is not an entity");
+        assert!(!ask("return body == a"), "in either order");
     }
 
     #[test]
@@ -729,15 +948,33 @@ mod tests {
             kernel.tilemap().unwrap().is_none(),
             "the copy stopped at a batch boundary rather than publishing a map"
         );
-        // Strictly between the two ends, so this says what its comment says. The
-        // solids array alone charges 1, so `> 0` would hold with zero cells
-        // copied; a completed copy of 512 x 512 charges 262,145, so the upper
-        // bound is what says it stopped rather than finished and declined to
-        // publish. Observed around 20,737, or batch 81 of 1,024.
+        // **How far it got is the machine's; that it stopped on a boundary is
+        // the code's, and only the second is asserted.**
+        //
+        // `dense` observes the deadline and *then* charges, once per batch, so a
+        // refused copy has paid for the one-element solids array plus a whole
+        // number of complete cell batches and nothing else. The upper bound is
+        // what says it stopped rather than finished and declined to publish; a
+        // completed 512 x 512 charges 262,145.
+        //
+        // This asserted `charged > 1`, which additionally required at least one
+        // cell batch to fit inside 2 ms. That is a property of the machine, not
+        // of the code: under load the deadline fires at the first check and
+        // `charged` is 1, the solids alone, and the test fails having found
+        // nothing wrong. The review session measured it failing twice in six
+        // runs of the lib suite and reported the value; I could not reproduce it
+        // in forty runs here, which is what a load-dependent flake looks like
+        // from the machine that does not have the load. The old comment carried
+        // "observed around 20,737, or batch 81 of 1,024" - one run's figure,
+        // written where it reads as something the data fixes.
+        //
+        // Pre-existing: this test is unchanged since 7c66540. It is repaired
+        // here rather than left because this commit moved the charging it
+        // measures into the shared `candidate`.
         let charged = kernel.callback_work();
         assert!(
-            charged > 1 && charged < 262_145,
-            "the copy stopped part-way through the cells, not before or after them: {charged}"
+            (charged - 1).is_multiple_of(tilemap::CONVERSION_BATCH as u64) && charged < 262_145,
+            "a refused copy must stop on a batch boundary short of the whole map: {charged}"
         );
         assert_eq!(host.state(), ScriptState::Faulted);
     }
