@@ -153,6 +153,48 @@ fn a_script_installs_a_map_reads_it_back_and_stops_against_its_wall() {
 }
 
 #[test]
+fn one_tick_of_enormous_velocity_stops_at_the_first_face_it_crosses() {
+    // `tests/collision.rs` pins this against the kernel; what this adds is that
+    // the script path cannot get round it, because a game sets velocity and
+    // never a position. One tick at this speed travels 16,666 pixels across a
+    // 192-pixel map, so an endpoint-only solver would land far outside the grid
+    // rather than one tile in, and a per-pixel one would not terminate usefully.
+    let root = room_game(
+        r#"
+        local body
+        return {
+            init = function(ctx)
+                local w = ctx.world
+                w.set_tilemap(room())
+                body = w.spawn(32, 32)
+                w.set_tile_collider(body, box(32))
+                w.set_velocity(body, 1000000, 1000000)
+            end,
+            update = function(ctx)
+                -- Velocity is the requested value even when nothing moved, so
+                -- holding a direction keeps pressing the wall.
+                local v = ctx.world.velocity(body)
+                assert(v.x == 1000000 and v.y == 1000000, 'a blocked body keeps its velocity')
+            end,
+        }
+    "#,
+    );
+    let mut runtime = load(&root);
+    runtime.init().unwrap();
+    step(&mut runtime, 1);
+    assert_eq!(
+        positions(&runtime),
+        [Position { x: 96.0, y: 64.0 }],
+        "one tick must stop at the first solid face on each axis, not at its endpoint"
+    );
+    // Five more ticks of the same speed: a body already flush with a face is
+    // never pushed through it and never nudged back off it either.
+    step(&mut runtime, 5);
+    assert_eq!(positions(&runtime), [Position { x: 96.0, y: 64.0 }]);
+    assert_eq!(runtime.state(), ScriptState::Running);
+}
+
+#[test]
 fn owned_reads_are_snapshots_and_input_tables_are_never_retained() {
     let root = room_game(
         r#"

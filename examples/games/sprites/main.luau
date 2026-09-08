@@ -6,16 +6,28 @@
 -- different, and is reported through `status` below.
 --
 -- Arrows move; Backspace returns to the spawn; Space unloads both images so the
--- next tick requests them again and the loading state runs live.
+-- next tick requests them again and the loading state runs live. Pushing into a
+-- crate breaks it, which is the one thing here that changes the room.
 --
 -- The room's tileset and the character's frames are separate logical images, so
 -- each becomes drawable on its own. Nothing here waits for both.
+--
+-- **The engine owns the grid and the movement.** `room.luau` is still the
+-- authored source, but init converts it once into a numeric description and
+-- installs it, the character is an entity carrying a tile collider, and the
+-- fixed pass resolves every move: there is no solver in this file. Draw reads
+-- the committed position and the authoritative tile IDs back out, so the cell
+-- this game breaks during update is the same cell the next frame draws and the
+-- next tick collides against. Nothing here keeps a second copy of the grid.
 local room = require("./room")
 
 local CELL = 16 -- Source cell size in both PNGs.
 local SCALE = 2 -- Integer scale, so nearest sampling lands on exact texels.
 local SIZE = CELL * SCALE -- Screen pixels per tile and per character frame.
-local SPEED = 2 -- Pixels per tick.
+-- Pixels per second, not per tick: the engine integrates at a fixed 60 Hz, and
+-- 120 * (1/60) is exactly 2.0 in binary floating point. That exactness is what
+-- keeps the positions below whole numbers at every presentation frame rate.
+local SPEED = 120
 local FRAME_TICKS = 8 -- Ticks per animation frame.
 local FRAMES = 2
 local BAND = 56 -- Height of the status strip below the room.
@@ -24,6 +36,7 @@ local WIDTH, BAND_TOP = room.columns * SIZE, room.rows * SIZE
 local BAR_MARGIN = 24
 local BAR_WIDTH = (WIDTH - BAR_MARGIN * 3) // 2
 local BAR_HEIGHT = 16
+local SPAWN_X, SPAWN_Y = room.spawn.column * SIZE, room.spawn.row * SIZE
 
 -- One entry per shipped PNG. `encoded` is the committed file size and only
 -- scales the read segment of the progress bar; a replaced PNG of a different
@@ -38,28 +51,27 @@ local sheets = {
 }
 local hero, tiles = sheets[1], sheets[2]
 
-local x, y = room.spawn.column * SIZE, room.spawn.row * SIZE
+-- The authored legend, turned into the engine's numeric tile IDs. `palette[id]`
+-- is the art the ID stands for: the sheet cell, the tint, and the solidity the
+-- installed description was built from. It is immutable lookup data, not a
+-- second grid - every cell ID drawn below comes back from the engine, never
+-- from here - so breaking a crate changes what is drawn without this file
+-- tracking the change at all.
+--
+-- IDs are the legend's keys in byte order, which makes them the same on every
+-- run and every machine: '#' is 1, '.' is 2, 'T' is 3, 'c' is 4 and 'f' is 5.
+-- Byte order rather than the default string comparison, which some Lua
+-- implementations resolve through the C locale and which could put 'c' before
+-- 'T'. The engine's ID 0 means an empty cell and this room never uses it.
+local palette = {}
+local FLOOR, CRATE
+
+local body
 local facing, steps, ticks = 1, 0, 0
-
-local function entry(column, row)
-    if column < 0 or row < 0 or column >= room.columns or row >= room.rows then
-        return nil
-    end
-    return room.legend[string.sub(room.tiles[row + 1], column + 1, column + 1)]
-end
-
-local function solid(px, py)
-    local tile = entry(px // SIZE, py // SIZE)
-    return tile == nil or tile.solid
-end
-
--- The character occupies exactly one tile, so its four corners decide the move.
--- Positions stay whole pixels, which is what lets a capture assert the sprite's
--- exact texels.
-local function blocked(left, top)
-    local right, bottom = left + SIZE - 1, top + SIZE - 1
-    return solid(left, top) or solid(right, top) or solid(left, bottom) or solid(right, bottom)
-end
+-- Where the body was, and which way this game pushed it, at the previous
+-- update. Comparing that against the position the fixed pass committed is how
+-- the crate rule below learns that a wall stopped the character.
+local last_x, last_y, last_dx, last_dy = SPAWN_X, SPAWN_Y, 0, 0
 
 -- Progress for one bar. The last tenth is GPU residency, which is tracked
 -- separately from CPU readiness: a headless host never reports it, so treat
@@ -101,6 +113,13 @@ local function bar(ctx, index, sheet)
     ctx.draw.rect(left, top, BAR_WIDTH * progress(sheet), BAR_HEIGHT, r, g, b, 1)
 end
 
+-- The cell one whole tile ahead of the character's centre. A tile away from any
+-- face, so the sub-pixel gap the engine leaves when it clamps a body against a
+-- wall cannot select the neighbouring cell instead.
+local function ahead(px, py, dx, dy)
+    return (px + SIZE / 2 + dx * SIZE) // SIZE, (py + SIZE / 2 + dy * SIZE) // SIZE
+end
+
 return {
     init = function(ctx)
         for row, line in ipairs(room.tiles) do
@@ -111,13 +130,60 @@ return {
             end
         end
         assert(#room.tiles == room.rows, "room height does not match its rows")
-        assert(not blocked(x, y), "the spawn tile is solid")
+
+        local keys = {}
+        for key in pairs(room.legend) do
+            table.insert(keys, key)
+        end
+        table.sort(keys, function(a, b)
+            return string.byte(a) < string.byte(b)
+        end)
+        local ids, solids = {}, {}
+        for id, key in ipairs(keys) do
+            ids[key], palette[id] = id, room.legend[key]
+            -- `solids` is dense and one-based: element i defines tile ID i.
+            solids[id] = room.legend[key].solid
+        end
+        FLOOR, CRATE = ids["."], ids["c"]
+
+        -- Row-major, one ID per cell, in the engine's zero-based tile
+        -- coordinates. Luau arrays are one-based, hence the trailing + 1.
+        local cells = {}
+        for row = 0, room.rows - 1 do
+            local line = room.tiles[row + 1]
+            for column = 0, room.columns - 1 do
+                cells[row * room.columns + column + 1] = ids[string.sub(line, column + 1, column + 1)]
+            end
+        end
+        ctx.world.set_tilemap({
+            columns = room.columns,
+            rows = room.rows,
+            tile_width = SIZE,
+            tile_height = SIZE,
+            origin_x = 0,
+            origin_y = 0,
+            solids = solids,
+            cells = cells,
+        })
+
+        assert(
+            not palette[cells[room.spawn.row * room.columns + room.spawn.column + 1]].solid,
+            "the spawn tile is solid"
+        )
+        body = ctx.world.spawn(SPAWN_X, SPAWN_Y)
+        -- One tile, anchored at the sprite's own top left, so the drawn frame
+        -- and the collision box are the same rectangle.
+        ctx.world.set_tile_collider(body, {offset_x = 0, offset_y = 0, width = SIZE, height = SIZE})
         ctx.log(`room {room.columns}x{room.rows} tiles at {SIZE} pixels`)
     end,
 
     update = function(ctx)
+        local input, world = ctx.input, ctx.world
+        -- The fixed pass runs after this callback returns, so this is where the
+        -- body finished the previous tick, not where it will finish this one.
+        -- Draw is a tick ahead of it, because it reads after the pass has run.
+        local p = world.position(body)
         ticks += 1
-        local input = ctx.input
 
         for _, sheet in ipairs(sheets) do
             if sheet.handle == nil then
@@ -158,33 +224,79 @@ return {
             ctx.log(`unloaded both images at tick {ticks}`)
         end
         if input.pressed("cancel") then
-            x, y = room.spawn.column * SIZE, room.spawn.row * SIZE
+            -- A teleport the engine may refuse, unlike the assignment this used
+            -- to be. It cannot refuse here, in three steps rather than one: the
+            -- engine checks every cell the box covers, and this box covers
+            -- exactly the spawn cell because the spawn is tile-aligned and the
+            -- collider is one tile at zero offset; init proves that cell is not
+            -- solid; and the only edit below replaces a solid ID with the
+            -- floor, so no cell this game touches can ever become solid. Move
+            -- the spawn off the tile grid and the middle step stops being
+            -- enough. A game that can make its own spawn solid, or that spawns
+            -- straddling cells, has to handle the refusal instead.
+            world.set_position(body, SPAWN_X, SPAWN_Y)
+            p = {x = SPAWN_X, y = SPAWN_Y}
             facing, steps = 1, 0
         end
 
         local dx = (if input.held("right") then 1 else 0) - (if input.held("left") then 1 else 0)
         local dy = (if input.held("down") then 1 else 0) - (if input.held("up") then 1 else 0)
-        if dx ~= 0 then
-            facing = dx
-            if not blocked(x + dx * SPEED, y) then
-                x += dx * SPEED
+
+        -- The body was pushed along an axis and did not move, so a solid tile
+        -- stopped it. Both coordinates come out of the same solver, which
+        -- returns the identical clamped position for every tick a body presses
+        -- the same face, so this compares exactly rather than within a
+        -- tolerance. X wins a tie, matching the order the sweep resolves in.
+        local sx, sy = 0, 0
+        if last_dx ~= 0 and p.x == last_x then
+            sx = last_dx
+        elseif last_dy ~= 0 and p.y == last_y then
+            sy = last_dy
+        end
+        if sx ~= 0 or sy ~= 0 then
+            local column, row = ahead(p.x, p.y, sx, sy)
+            -- The room's border is solid, so the character can never stand in
+            -- it and this cell is always inside the grid; the bounds test is
+            -- here because `tile` refuses an outside index rather than
+            -- answering, and a sample should not rely on an argument it has not
+            -- checked.
+            if column >= 0 and column < room.columns and row >= 0 and row < room.rows then
+                if world.tile(column, row) == CRATE then
+                    -- Fallible and unhandled, for the same kind of reason as
+                    -- the teleport above: an edit is refused if it would trap a
+                    -- body, and this one can only turn a solid cell into the
+                    -- floor. The coordinates were bounds-checked here and FLOOR
+                    -- is an ID the installed description defines.
+                    world.set_tile(column, row, FLOOR)
+                    ctx.log(`broke the crate at {column},{row} on tick {ticks}`)
+                end
             end
         end
-        if dy ~= 0 and not blocked(x, y + dy * SPEED) then
-            y += dy * SPEED
+
+        if dx ~= 0 then
+            facing = dx
         end
+        -- Velocity, not a position: the fixed pass sweeps it against the map
+        -- after this callback returns and clamps it at the first solid face.
+        -- Holding a direction into a wall keeps pressing, which is what the
+        -- animation below and the crate rule above both read.
+        world.set_velocity(body, dx * SPEED, dy * SPEED)
         -- Animation advances here, in update, so which frame a draw shows
         -- depends on completed ticks and not on the presentation frame rate.
         steps = if dx ~= 0 or dy ~= 0 then steps + 1 else 0
+        last_x, last_y, last_dx, last_dy = p.x, p.y, dx, dy
     end,
 
     draw = function(ctx)
         ctx.draw.clear(0.04, 0.05, 0.08, 1)
+        -- The authoritative grid, read back once per frame. This room is 510
+        -- cells, comfortably inside the 4,096 a single region call may return;
+        -- a larger map would have to ask for the visible chunk instead.
+        local cells = ctx.world.tiles_region(0, 0, room.columns, room.rows)
         if tiles.ready then
             for row = 0, room.rows - 1 do
-                local line = room.tiles[row + 1]
                 for column = 0, room.columns - 1 do
-                    local tile = room.legend[string.sub(line, column + 1, column + 1)]
+                    local tile = palette[cells[row * room.columns + column + 1]]
                     local tint = tile.tint
                     ctx.draw.sprite(tiles.handle, column * SIZE, row * SIZE, {
                         source = {
@@ -201,19 +313,22 @@ return {
             end
         else
             -- The room keeps its shape before the sheet arrives, so the game is
-            -- playable and the walls are where they will be.
+            -- playable and the walls are where they will be. Solidity comes
+            -- from the palette rather than one `tile_solid` call per cell: the
+            -- IDs above are already the engine's answer.
             ctx.draw.rect(0, 0, WIDTH, BAND_TOP, 0.10, 0.12, 0.16, 1)
             for row = 0, room.rows - 1 do
                 for column = 0, room.columns - 1 do
-                    if entry(column, row).solid then
+                    if palette[cells[row * room.columns + column + 1]].solid then
                         ctx.draw.rect(column * SIZE, row * SIZE, SIZE, SIZE, 0.20, 0.22, 0.28, 1)
                     end
                 end
             end
         end
 
+        local p = ctx.world.position(body)
         if hero.ready then
-            ctx.draw.sprite(hero.handle, x, y, {
+            ctx.draw.sprite(hero.handle, p.x, p.y, {
                 source = {x = (steps // FRAME_TICKS) % FRAMES * CELL, y = 0, width = CELL, height = CELL},
                 width = SIZE,
                 height = SIZE,
@@ -221,7 +336,7 @@ return {
                 tint = {r = 0.98, g = 0.86, b = 0.42, a = 1},
             })
         else
-            ctx.draw.rect(x, y, SIZE, SIZE, 0.98, 0.86, 0.42, 1)
+            ctx.draw.rect(p.x, p.y, SIZE, SIZE, 0.98, 0.86, 0.42, 1)
         end
 
         ctx.draw.rect(0, BAND_TOP, WIDTH, BAND, 0.07, 0.08, 0.11, 1)

@@ -6,6 +6,12 @@
 //! the committed bundle is what is under test. Expected positions, frames and
 //! sheet cells are stated here from the sample's documented layout, not read
 //! back out of it.
+//!
+//! Since the sample moved onto the engine's map and collider, the character's
+//! position is kernel state rather than script state. Fixtures that care where
+//! it is read it from `kernel().snapshot()` as well as from the draw commands,
+//! because those are two different claims: one about the simulation and one
+//! about what the game chose to draw.
 
 use protogine::{
     assets::ImageId,
@@ -24,9 +30,31 @@ const ROWS: u32 = 17;
 const CELL: u32 = 16;
 const SIZE: f32 = 32.0;
 const SPAWN: (f32, f32) = (448.0, 256.0);
+/// Pixels per tick. The sample sets 120 pixels per second and the engine
+/// integrates at a fixed 60 Hz; the test below asserts that product rather than
+/// restating it, because every exact position here depends on it.
 const SPEED: f32 = 2.0;
+const SAMPLE_SPEED: f64 = 120.0;
 /// Walking right from the spawn stops here, against the fence at column 21.
 const FENCE_X: f32 = 640.0;
+/// Walking left from the spawn stops here, against the fence ending at column
+/// 7, whose far face is the left edge of column 8.
+const FENCE_LEFT_X: f64 = 256.0;
+/// The crate at tile (5, 10) and the corridor that reaches it: left to the
+/// fence, down the corridor, then left again. Read off `room.luau`'s own rows.
+const CRATE: (u32, u32) = (5, 10);
+/// The character presses the crate from a position that straddles rows 9 and
+/// 10, deliberately. A tile-aligned approach would let a game pick the crate's
+/// row from the box's top edge alone and still be right; from here the top edge
+/// names row 9, which holds no crate, so the fixture can tell the two apart.
+const CRATE_APPROACH_Y: f64 = 304.0;
+/// Where the crate stops the character: the left edge of column 6.
+const CRATE_FACE_X: f64 = 192.0;
+/// A cell the room keeps solid, so the placeholder assertions below can show
+/// that the path they are checking still draws something.
+const WALL_TILE: (u32, u32) = (9, 10);
+/// The rectangle the placeholder room fills a solid tile with.
+const PLACEHOLDER_WALL: [f32; 4] = [0.20, 0.22, 0.28, 1.0];
 /// The committed art. These are what tie an image ID back to a logical path,
 /// so they are stated here and must differ from each other.
 const TILES_SIZE: (u32, u32) = (784, 352);
@@ -37,6 +65,7 @@ const PLACEHOLDER_HERO: [f32; 4] = [0.98, 0.86, 0.42, 1.0];
 /// Sheet cells the room's legend names, as (column, row) in `tiles.png`.
 const WALL_CELL: (u32, u32) = (8, 5);
 const FLOOR_CELL: (u32, u32) = (2, 0);
+const CRATE_CELL: (u32, u32) = (6, 1);
 const LEGEND_ENTRIES: usize = 5;
 /// One clear, one sprite per tile, the character, the band and two bars.
 const READY_COMMANDS: usize = 1 + (COLUMNS * ROWS) as usize + 1 + 5;
@@ -61,6 +90,49 @@ fn sprites(runtime: &GameRuntime) -> Vec<Sprite> {
             _ => None,
         })
         .collect()
+}
+
+/// The character's committed position, straight out of the kernel.
+///
+/// This is deliberately not the drawn sprite: the sample now owns no position
+/// of its own, so a fixture that only checked the draw command would be reading
+/// the same value through the one place that could paper over a simulation
+/// mistake. Both are asserted where the distinction matters.
+fn body(runtime: &GameRuntime) -> (f64, f64) {
+    let mut entities = runtime.kernel().snapshot().expect("a live kernel");
+    assert_eq!(entities.len(), 1, "the sample owns exactly one entity");
+    let position = entities.pop().expect("the character").position;
+    (position.x, position.y)
+}
+
+/// The sheet cell the room drew for one tile coordinate, as (column, row).
+fn room_cell(runtime: &GameRuntime, (column, row): (u32, u32)) -> (u32, u32) {
+    let drawn = sprites(runtime);
+    assert_eq!(
+        drawn.len(),
+        (COLUMNS * ROWS) as usize + 1,
+        "the room draws one sprite per tile, then the character"
+    );
+    let source = drawn[(row * COLUMNS + column) as usize].source;
+    (source.x / CELL, source.y / CELL)
+}
+
+/// Whether the placeholder room filled one tile as a solid wall.
+///
+/// The room draws this path only before its tileset arrives, and it takes its
+/// solidity from the same authoritative IDs the sprite path draws, so an edit
+/// has to reach both.
+fn placeholder_wall(runtime: &GameRuntime, (column, row): (u32, u32)) -> bool {
+    let corner = (column as f32 * SIZE, row as f32 * SIZE);
+    runtime.draw_commands().iter().any(|command| {
+        matches!(
+            command,
+            DrawCommand::Rect { x, y, width, height, color }
+                if (*x, *y) == corner
+                    && (*width, *height) == (SIZE, SIZE)
+                    && *color == PLACEHOLDER_WALL
+        )
+    })
 }
 
 /// The dimensions the sample logged for each logical path when it became ready.
@@ -131,6 +203,18 @@ fn tap(button: Button) -> InputSnapshot {
 fn tick(runtime: &mut GameRuntime, input: InputSnapshot, logs: &mut Vec<String>) {
     runtime.step(input).expect("update should succeed");
     logs.extend(runtime.take_logs());
+    runtime.draw(0.0).expect("draw should succeed");
+    logs.extend(runtime.take_logs());
+}
+
+/// Hold one button for whole ticks, then draw once, keeping every log line.
+fn hold(runtime: &mut GameRuntime, button: Button, ticks: u32, logs: &mut Vec<String>) {
+    for _ in 0..ticks {
+        runtime
+            .step(InputSnapshot::held([button]))
+            .expect("update should succeed");
+        logs.extend(runtime.take_logs());
+    }
     runtime.draw(0.0).expect("draw should succeed");
     logs.extend(runtime.take_logs());
 }
@@ -457,4 +541,213 @@ fn unloading_restores_the_placeholder_and_the_next_tick_requests_again() {
         "a reload issues a new logical image"
     );
     assert_eq!(reloaded.image.session(), first.image.session());
+}
+
+#[test]
+fn the_samples_speed_is_exactly_two_pixels_per_tick() {
+    // The sample sets pixels per second and the engine integrates at a fixed
+    // 60 Hz, so every exact coordinate in this file rests on this product being
+    // exact rather than merely close. It is asserted rather than commented,
+    // because a rate that only nearly divides would move each position a few
+    // ULPs per tick and the equalities below would fail somewhere unrelated.
+    assert_eq!(SAMPLE_SPEED * FIXED_DT, 2.0);
+    assert_eq!(f64::from(SPEED), SAMPLE_SPEED * FIXED_DT);
+}
+
+#[test]
+fn installing_the_room_costs_exactly_what_its_cells_and_flags_cost() {
+    let mut runtime = load();
+    runtime.init().expect("init should succeed");
+    // One unit of the callback's tile-work budget per description element
+    // copied and validated, plus one per cell the attached collider covers: 510
+    // cells, five solid flags and the single tile the character stands on.
+    // Pinned rather than reported, because the 1,048,576-unit ceiling above it
+    // only means something if the unit price does, and this is the one place a
+    // real authored room states that price.
+    assert_eq!(
+        runtime.kernel().callback_work(),
+        u64::from(COLUMNS * ROWS) + LEGEND_ENTRIES as u64 + 1,
+        "an install and one attachment should cost cells + flags + covered cells"
+    );
+    assert_eq!(runtime.kernel().live_colliders(), 1);
+}
+
+#[test]
+fn pushing_into_a_crate_breaks_the_one_cell_that_both_draws_and_blocks() {
+    let mut runtime = load();
+    preload(&mut runtime);
+    let mut logs = Vec::new();
+
+    // Left along row 8 until the fence stops the box on the face at x = 256.
+    hold(&mut runtime, Button::Left, 96, &mut logs);
+    assert_eq!(body(&runtime), (FENCE_LEFT_X, f64::from(SPAWN.1)));
+
+    // Three more ticks, which is enough for the game to see a push it made no
+    // progress on. The fence is not a crate, so nothing happens to it.
+    hold(&mut runtime, Button::Left, 3, &mut logs);
+    assert_eq!(
+        body(&runtime),
+        (FENCE_LEFT_X, f64::from(SPAWN.1)),
+        "only a crate may break under a refused push"
+    );
+
+    // Down the corridor until the box straddles rows 9 and 10.
+    hold(&mut runtime, Button::Down, 24, &mut logs);
+    assert_eq!(body(&runtime), (FENCE_LEFT_X, CRATE_APPROACH_Y));
+
+    // Left again into the crate. Thirty-two ticks reach its face, and the
+    // thirty-third is the first the solver refuses to move at all.
+    hold(&mut runtime, Button::Left, 33, &mut logs);
+    assert_eq!(
+        body(&runtime),
+        (CRATE_FACE_X, CRATE_APPROACH_Y),
+        "the crate must stop the character at its face"
+    );
+    assert_eq!(
+        room_cell(&runtime, CRATE),
+        CRATE_CELL,
+        "an unbroken crate draws as a crate"
+    );
+    assert!(
+        !logs.iter().any(|line| line.starts_with("broke the crate")),
+        "nothing may break before a push has actually been refused: {logs:?}"
+    );
+
+    // One more tick. The game sees a push that moved nothing, replaces the cell
+    // ahead of the character with floor, and the same tick's fixed pass walks
+    // into it: one edit, changing both what is drawn and what blocks.
+    hold(&mut runtime, Button::Left, 1, &mut logs);
+    assert_eq!(
+        room_cell(&runtime, CRATE),
+        FLOOR_CELL,
+        "the broken crate must draw as floor"
+    );
+    assert_eq!(
+        body(&runtime).0,
+        CRATE_FACE_X - f64::from(SPEED),
+        "the broken cell must stop blocking on the tick it changed"
+    );
+    let broke = format!("broke the crate at {},{} on tick", CRATE.0, CRATE.1);
+    assert!(
+        logs.iter().any(|line| line.starts_with(&broke)),
+        "the sample should name the cell it edited: {logs:?}"
+    );
+
+    // Fifteen more ticks put the box in the column the crate used to occupy.
+    hold(&mut runtime, Button::Left, 15, &mut logs);
+    assert_eq!(
+        body(&runtime),
+        (f64::from(CRATE.0 * SIZE as u32), CRATE_APPROACH_Y),
+        "the character must end up standing where the crate was"
+    );
+    assert_eq!(
+        room_cell(&runtime, CRATE),
+        FLOOR_CELL,
+        "the edit belongs to the engine, so it outlives the tick that made it"
+    );
+
+    // The placeholder room reads the same IDs, so it has to have followed the
+    // same edit. Space evicts both images and drops the room back to it.
+    tick(&mut runtime, tap(Button::Action), &mut logs);
+    assert!(
+        sprites(&runtime).is_empty(),
+        "unloaded images cannot draw, so this is the placeholder path"
+    );
+    assert!(
+        placeholder_wall(&runtime, WALL_TILE),
+        "the placeholder room must still be filling its solid tiles"
+    );
+    assert!(
+        !placeholder_wall(&runtime, CRATE),
+        "the broken crate must leave no placeholder wall behind"
+    );
+}
+
+#[test]
+fn repeated_draws_and_zero_tick_frames_move_nothing() {
+    let mut runtime = load();
+    preload(&mut runtime);
+    // Stepped without drawing, so the position below is what the fixed pass
+    // committed and nothing else has had a chance to touch it.
+    for _ in 0..10 {
+        runtime
+            .step(InputSnapshot::held([Button::Right]))
+            .expect("update should succeed");
+    }
+    let settled = runtime.completed_ticks();
+    let moved = body(&runtime);
+    assert_eq!(
+        moved,
+        (f64::from(SPAWN.0 + 10.0 * SPEED), f64::from(SPAWN.1)),
+        "ten ticks of Right move twenty pixels"
+    );
+
+    // Movement belongs to the fixed pass, so repeated draws under the same held
+    // input must not advance it. Both the kernel and the drawn sprite are
+    // checked: the sample keeps no position of its own any more, so a draw that
+    // ran the pass would move them together, and one of the two assertions
+    // would then be holding for the wrong reason.
+    runtime.draw(0.0).expect("draw should succeed");
+    assert_eq!(body(&runtime), moved, "a draw must not run the fixed pass");
+    let hero = *sprites(&runtime).last().expect("a character sprite");
+    for _ in 0..19 {
+        runtime.draw(0.0).expect("draw should succeed");
+        assert_eq!(body(&runtime), moved, "a draw must not run the fixed pass");
+        let redrawn = *sprites(&runtime).last().expect("a character sprite");
+        assert_eq!(
+            (redrawn.x, redrawn.y),
+            (hero.x, hero.y),
+            "a redraw must not move the character"
+        );
+    }
+
+    // Frames too short to complete a tick draw and do nothing else. Six
+    // sixteenths of a tick stays clear of the accumulator's rounding snap.
+    for _ in 0..6 {
+        let report = runtime
+            .frame(FIXED_DT / 16.0, InputSnapshot::held([Button::Right]))
+            .expect("frame should succeed");
+        assert_eq!(report.ticks, 0, "a sixteenth of a tick completes none");
+        assert_eq!(body(&runtime), moved, "a zero-tick frame must not move");
+    }
+    assert_eq!(
+        runtime.completed_ticks(),
+        settled,
+        "neither draws nor zero-tick frames may complete a tick"
+    );
+}
+
+#[test]
+fn collision_holds_while_the_room_image_is_loading_and_after_it_is_unloaded() {
+    // While the art is still arriving. The map is installed in init and the
+    // fixed pass resolves movement, and neither waits for a PNG.
+    let mut runtime = load();
+    let mut logs = Vec::new();
+    runtime.init().expect("init should succeed");
+    logs.extend(runtime.take_logs());
+    // Two hundred ticks is four hundred pixels of intent across a hundred and
+    // ninety-two pixels of corridor, so a character the engine was not stopping
+    // would end up somewhere else entirely rather than a couple of pixels out.
+    hold(&mut runtime, Button::Right, 200, &mut logs);
+    assert_eq!(
+        body(&runtime),
+        (f64::from(FENCE_X), f64::from(SPAWN.1)),
+        "the fence must stop the character while its art is still loading"
+    );
+
+    // And after both images are evicted mid-session, which drops the room back
+    // to placeholder rectangles and draws no sprite at all.
+    let mut runtime = load();
+    preload(&mut runtime);
+    let mut logs = Vec::new();
+    hold(&mut runtime, Button::Left, 96, &mut logs);
+    assert_eq!(body(&runtime).0, FENCE_LEFT_X);
+    tick(&mut runtime, tap(Button::Action), &mut logs);
+    assert!(sprites(&runtime).is_empty(), "unloaded images cannot draw");
+    hold(&mut runtime, Button::Right, 200, &mut logs);
+    assert_eq!(
+        body(&runtime),
+        (f64::from(FENCE_X), f64::from(SPAWN.1)),
+        "unloading the tileset cannot move a wall"
+    );
 }
