@@ -277,26 +277,32 @@ $controls = @(
     # applies to itself: a gate that cannot be observed failing is not covered.
     # One per gate, each built on a genuine instance of what that gate catches
     # rather than a synthetic stand-in, and each fails naming the gate if it is
-    # ever removed. They run last because the stale-binary one needs a previous
-    # build to exist in the copy's target directory.
+    # ever removed.
+    #
+    # They run last because the stale-binary one needs a previous build in the
+    # copy's target directory to be skipped in favour of. The copy keeps its
+    # target between runs, so the constraint only bites on the very first control
+    # of a first run in a fresh checkout - and when it bites it fails loudly
+    # rather than passing vacuously. Moving them to the top reads better and is
+    # why this note exists.
 
     @{ Name = 'self-test-clobbered-source'; File = 'src/collision.rs'
-       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'; Marker = 'unused'
+       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'
        Clobber = $true; Expect = 'the patched source changed under the run'
        Edits = @(@{ F = '    for across in first..=last {'; R = '    for across in [first, last] {' }) }
 
     @{ Name = 'self-test-stale-binary'; File = 'src/collision.rs'
-       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'; Marker = 'unused'
+       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'
        Backdate = $true; Expect = 'cargo did not rebuild'
        Edits = @(@{ F = '    for across in first..=last {'; R = '    for across in [first, last] {' }) }
 
     @{ Name = 'self-test-missing-test'; File = 'src/collision.rs'
-       Test = 'a_test_name_that_does_not_exist'; Marker = 'unused'
+       Test = 'a_test_name_that_does_not_exist'
        Expect = 'did not execute exactly one test'
        Edits = @(@{ F = '    for across in first..=last {'; R = '    for across in [first, last] {' }) }
 
     @{ Name = 'self-test-inert-edit'; File = 'src/collision.rs'
-       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'; Marker = 'unused'
+       Test = 'an_interior_solid_cell_cannot_hide_between_clear_corners'
        Expect = 'did not fail with the rule removed'
        Edits = @(@{ F = 'pub const MAX_SPAN_CELLS: i32 = 9;'; R = 'pub const MAX_SPAN_CELLS: i32 = 10;' }) }
 )
@@ -410,7 +416,7 @@ try {
             else { $note = "REDUNDANT RULE CONFIRMED: $($control.Name)" }
         } elseif ($code -eq 0) {
             $verdict = "$($control.Name): $($control.Test) still passed with the rule removed"
-        } elseif ($output -notmatch [regex]::Escape($control.Marker)) {
+        } elseif (-not $control.Expect -and $output -notmatch [regex]::Escape($control.Marker)) {
             $verdict = "$($control.Name): failed at '$where', not '$($control.Marker)'"
         } elseif ($control.Crash) {
             # The library panicked on its own check before a test assertion was
@@ -425,7 +431,7 @@ try {
             # A self-test: the harness is supposed to refuse this one. Reaching a
             # verdict at all, or the wrong verdict, means a gate is not working.
             if (-not $verdict) {
-                $controlFailures += "$($control.Name): the harness accepted a control it must refuse"
+                $controlFailures += "$($control.Name): the harness accepted a control it must refuse; the '$($control.Expect)' gate is not working"
             } elseif ($verdict -notmatch [regex]::Escape($control.Expect)) {
                 $controlFailures += "$($control.Name): refused as '$verdict', not '$($control.Expect)'"
             } else {

@@ -127,27 +127,32 @@ $controls = @(
     # --- Self-tests: controls the harness must refuse ------------------------
     #
     # One per gate, on the same reasoning as the collision harness: a gate that
-    # cannot be observed failing is not covered, harness gates included. They run
-    # last because the stale-binary one needs a previous build to exist in the
-    # copy's target directory.
+    # cannot be observed failing is not covered, harness gates included.
+    #
+    # They run last because the stale-binary one needs a previous build in the
+    # copy's target directory to be skipped in favour of. The copy keeps its
+    # target between runs, so the constraint only bites on the very first control
+    # of a first run in a fresh checkout - and when it bites it fails loudly
+    # rather than passing vacuously. Moving them to the top reads better and is
+    # why this note exists.
 
     @{ Name = 'self-test-clobbered-source'; File = 'src/tilemap.rs'
-       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
+       Test = 'row_major_ids_and_solidity'
        Clobber = $true; Expect = 'the patched source changed under the run'
        Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
 
     @{ Name = 'self-test-stale-binary'; File = 'src/tilemap.rs'
-       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
+       Test = 'row_major_ids_and_solidity'
        Backdate = $true; Expect = 'cargo did not rebuild'
        Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
 
     @{ Name = 'self-test-missing-test'; File = 'src/tilemap.rs'
-       Test = 'a_test_name_that_does_not_exist'; Marker = 'unused'
+       Test = 'a_test_name_that_does_not_exist'
        Expect = 'did not execute exactly one test'
        Edits = @(@{ F = 'id != 0 && self.solids[id as usize - 1]'; R = 'id != 0' }) }
 
     @{ Name = 'self-test-inert-edit'; File = 'src/tilemap.rs'
-       Test = 'row_major_ids_and_solidity'; Marker = 'unused'
+       Test = 'row_major_ids_and_solidity'
        Expect = 'did not fail with the guard removed'
        Edits = @(@{ F = 'pub const MAX_REGION_CELLS: u32 = 4_096;'; R = 'pub const MAX_REGION_CELLS: u32 = 4_097;' }) }
 )
@@ -256,7 +261,7 @@ try {
             else { $note = "REDUNDANT GUARD CONFIRMED: $($control.Name)" }
         } elseif ($code -eq 0) {
             $verdict = "$($control.Name): $($control.Test) still passed with the guard removed"
-        } elseif ($output -notmatch [regex]::Escape($control.Marker)) {
+        } elseif (-not $control.Expect -and $output -notmatch [regex]::Escape($control.Marker)) {
             $verdict = "$($control.Name): failed at '$where', not '$($control.Marker)'"
         } elseif ($control.Crash) {
             $note = "CRASH CONTROL DETECTED: $($control.Name) -> $where"
@@ -268,7 +273,7 @@ try {
             # A self-test: the harness is supposed to refuse this one. Reaching a
             # verdict at all, or the wrong verdict, means a gate is not working.
             if (-not $verdict) {
-                $controlFailures += "$($control.Name): the harness accepted a control it must refuse"
+                $controlFailures += "$($control.Name): the harness accepted a control it must refuse; the '$($control.Expect)' gate is not working"
             } elseif ($verdict -notmatch [regex]::Escape($control.Expect)) {
                 $controlFailures += "$($control.Name): refused as '$verdict', not '$($control.Expect)'"
             } else {
