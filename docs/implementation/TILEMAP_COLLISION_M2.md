@@ -747,8 +747,29 @@ halves, because the first half alone missed something both sessions ran it over:
    a document with a compiler: its comments carry the same load-bearing prose,
    with the added hazard of sitting beside code that *is* current, so they look
    maintained.
+5. **Count repeated figures and phrases inside a section; a spike locates an
+   insertion seam.** Editing this file produced a defect none of the clauses
+   above could see: inserting a paragraph left the tail of the one it displaced
+   spliced on the end, so "That" lost its antecedent, a clause appeared twice
+   twenty lines apart differing only in tense, and the section ended on the
+   temptation it had just spent a paragraph disowning. Every sentence was
+   individually true; the arrangement inverted the point.
 
-   Both clauses are the review session's, each from a second occurrence.
+   The damage is a judgement - nothing counts that a paragraph ends on the claim
+   its own argument disowns - but **the seam is mechanically locatable**, and
+   that is how it was found: `8.5%` three times, `17.7` three times and "point
+   of comparison" twice inside one 33-line window. A section restating one figure
+   three times is either emphasis or a splice, and it costs ten seconds to learn
+   which. Across the three commits the count of `8.5%` ran 4, 4, 3, which is the
+   shape to look for.
+
+   It is a locator and not a verdict, with legitimate false positives: a table
+   row and the prose explaining it will share a figure, which is why lines 582
+   and 599 both carry `8.5%` and should. Mechanical detection of the seam, human
+   judgement on the damage - which is a narrower and more honest claim than
+   either "no pass finds this" or a pretence that reading can be automated.
+
+   All three clauses are the review session's, each from a second occurrence.
 
 **Do both halves again after any edit that changes a number or a rule**, in
 preference to re-reading the prose around them. The method, the second half, and
