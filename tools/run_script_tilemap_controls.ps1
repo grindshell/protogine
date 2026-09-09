@@ -28,6 +28,26 @@
 # it. Sharing the build cache between runs is fine; sharing patched sources never
 # was, and the copy alone only ever protected the working tree.
 #
+# **Markers alias, and no gate here catches it.** Staleness catches a vanished
+# anchor, ambiguity a widened one, and the marker gate a failure that moved -
+# all three check text, so a marker that is a *substring* of another message
+# passes every one of them while witnessing a different rule. The sweep that
+# finds it is: for each control's run log, does it contain any other control's
+# declared marker. Two controls here declared their fixture's
+# `panic!("...: {error}")` wrapper, which is the sentence every failure of that
+# fixture produces, so between them they rendered in seven other controls' logs.
+# Both now name a latch-specific assertion instead, and each names its own rule
+# rather than sharing a tail.
+#
+# Seven aliases remain and every one is understood: `call-budget-is-the-whole-ceiling`
+# and `set-tile-budgeted-against-the-ceiling` share a marker verbatim, which is
+# the shared-helper-and-call-site pair working as designed;
+# `callback-work-unenforced` and `work-limit-catchable` are the recorded
+# shared-verdict pair; the two self-tests carry `array-metatable-accepted`'s
+# marker because they deliberately reuse its edit; and
+# `plain-unknown-names-in-sprite-options` carries `dense-early-exit`'s, which
+# cannot mislead because that control is redundant-by-design and never panics.
+#
 # Every observed instance was in the safe direction - the harness cried wolf
 # rather than passing a control that had not applied - because each conclusion is
 # separately gated on the patch surviving the run, the crate actually
@@ -148,12 +168,22 @@ $controls = @(
 
     # M2-8 puts an illegal transfer on the catchable side. Latching it would let
     # a refusal a script is entitled to `pcall` take the session down instead.
+    # The marker is the latch-specific assertion's, not the fixture's wrapper.
+    # It used to be 'must stay catchable rather than latch', which is a sentence
+    # every failure of that fixture produced - and which is also a substring of
+    # two other fixtures' wrappers, so it rendered in seven other controls' logs.
+    # The patched message ends "limit exceeded" because that is the shape every
+    # latch in this engine has, and the assertion tests the classification
+    # rather than this variant's text.
+    # The two latch markers name their own rule - "illegal transfer" against
+    # "malformed argument" - rather than sharing the tail, because a shared tail
+    # would alias the moment a control targeted the other fixture.
     @{ Name = 'no-collider-latches'; File = 'src/scripting/world.rs'
        Test = 'every_refused_transfer_leaves_membership_geometry_and_position_untouched'
-       Marker = 'must stay catchable rather than latch'
+       Marker = 'an illegal transfer latched a budget'
        Edits = @(@{ F = '        Err(KernelError::NoCollider)
         | Err(KernelError::Inactive)'
-                    R = '        Err(KernelError::NoCollider) => Some("no collider"),
+                    R = '        Err(KernelError::NoCollider) => Some("no collider limit exceeded"),
         Err(KernelError::Inactive)' }) }
 
     # A half-given position is a malformed call, not one axis kept. Silently
@@ -252,11 +282,15 @@ $controls = @(
 
     # --- Phase gating and the shared attempt budget --------------------------
 
+    # Re-earned: the binding this ungated was M1's implicit installer, retired
+    # with the rest of that surface, so the phase gate is now demonstrated on
+    # its successor. Same rule, same fixture; the marker follows the call's name
+    # because the fixture builds it at runtime from the phase and the call.
     @{ Name = 'mutation-phase-ungated'; File = 'src/scripting/world.rs'
        Test = 'only_init_and_update_may_mutate_the_map_or_its_colliders'
-       Marker = 'draw: set_tilemap must refuse'
-       Edits = @(@{ F = "            `"set_tilemap`",`n            scope.create_function(move |lua, args: MultiValue| {`n                self.begin(budget, true, writable)?;"
-                    R = "            `"set_tilemap`",`n            scope.create_function(move |lua, args: MultiValue| {`n                self.begin(budget, false, writable)?;" }) }
+       Marker = 'draw: create_tilemap must refuse'
+       Edits = @(@{ F = "            `"create_tilemap`",`n            scope.create_function(move |lua, args: MultiValue| {`n                self.begin(budget, true, writable)?;"
+                    R = "            `"create_tilemap`",`n            scope.create_function(move |lua, args: MultiValue| {`n                self.begin(budget, false, writable)?;" }) }
 
     @{ Name = 'map-calls-uncounted'; File = 'src/scripting/world.rs'
        Test = 'map_calls_share_the_existing_world_attempt_budget'
@@ -281,7 +315,10 @@ $controls = @(
        # Not the Luau assertion beside the request: the latch escapes `pcall` at
        # the next VM interrupt, so the callback dies before `assert` can report.
        # That is the point of the control and it was the wrong first guess.
-       Marker = 'every argument refusal must stay catchable rather than latch'
+       # As with `no-collider-latches`: the marker is the latch-specific
+       # assertion's, not the fixture's wrapper, which every failure of that
+       # fixture produced.
+       Marker = 'a malformed argument latched a budget'
        Edits = @(@{ F = '        let charged = ids.min(u64::from(MAX_REGION_CELLS));'
                     R = '        let charged = ids;' }) }
 
@@ -413,7 +450,10 @@ $controls = @(
 
     @{ Name = 'install-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
        Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
-       Marker = 'set_tilemap must be budgeted against what the callback has left'
+       # The fixture's install is `replace_tilemap` now: only a map with members
+       # charges a placement check per collider, and only a replacement of a map
+       # that has them reaches that path. The marker follows.
+       Marker = 'replace_tilemap must be budgeted against what the callback has left'
        Edits = @(@{ F = "        let info = map.info();`n        let mut work = Self::remaining_work(*callback_work);"
                     R = "        let info = map.info();`n        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
 
@@ -746,6 +786,91 @@ Exit-ControlLock -Path $controlLock
 
 if ((Get-SourceFingerprint -Repo $controlRepo -Files $controlSources) -ne $controlFingerprint) {
     $controlFailures += 'the working tree changed during the run; controls must only ever patch the copy'
+}
+
+# --- Gate: no control's marker may appear in another control's log -----------
+#
+# The three per-control gates all compare text, so a marker that is a *substring*
+# of another message passes every one of them while witnessing a different rule:
+# anchor matched, patch applied, marker present, verdict recorded, wrong rule
+# named. That is what a `panic!("...: {error}")` wrapper produces, because its
+# own sentence is what every failure of that fixture renders.
+#
+# Found twice by hand before it was mechanised - once at the transfer battery's
+# wrapper, once at the argument battery's - and a class found twice by hand is
+# the signal it wants a gate. Promoted from a sweep someone remembers to run.
+#
+# Declared exceptions rather than a filtered sweep, so an alias is either
+# explained here or it fails. That is the difference between a known residual
+# and an unnoticed one.
+$allowedAliases = @{
+    # One rule enforced in a shared helper and at a call site: two controls, one
+    # marker, verbatim and by design.
+    'call-budget-is-the-whole-ceiling'        = @('set-tile-budgeted-against-the-ceiling')
+    'set-tile-budgeted-against-the-ceiling'   = @('call-budget-is-the-whole-ceiling')
+    # Two genuinely different rules that this fixture cannot tell apart: under
+    # either patch the ceiling is never reported, so both land identically.
+    # Recorded rather than fixed - separating them needs a fixture where the
+    # ceiling is enforced and the classification is wrong.
+    'callback-work-unenforced'                = @('work-limit-catchable')
+    'work-limit-catchable'                    = @('callback-work-unenforced')
+    # The self-tests are built on a genuine control's edit deliberately, so they
+    # render its marker by construction.
+    'self-test-clobbered-source'              = @('array-metatable-accepted')
+    'self-test-stale-binary'                  = @('array-metatable-accepted')
+}
+# There is deliberately **no** entry for `plain-unknown-names-in-sprite-options`
+# rendering `dense-early-exit`'s marker. The sweep compares against *declared*
+# markers, and the four redundant-by-design controls declare none - so that
+# alias can never be reported and an exception for it would never fire.
+#
+# It had one, justified as "redundant by design and never panics", which is the
+# reason the entry is **dead** stated as the reason it is **safe**. That is worse
+# than a dormant assertion: a dormant assertion proves nothing, where a dormant
+# exemption is a loaded permission. Give `dense-early-exit` a marker one day -
+# converting a redundant control into a detecting one is an ordinary edit, and
+# four controls were re-earned that way this phase - and the exception wakes up
+# and permits a real alias, with nobody re-reading a justification written while
+# it was inert. Found by the review session, who also corrected their own
+# alias count downward-then-upward to get here.
+#
+# The guard below is the general form: an exemption naming a control that
+# declares no marker is refused the same way a stale anchor is.
+#
+# **It checks the exemptions' values and not their keys, and that asymmetry is
+# deliberate.** A bad value fails *silently* - the entry sits there looking
+# justified while permitting an alias that can never occur, which is exactly the
+# one just removed. A bad key fails *loudly*: the exemption simply never
+# applies, so the alias it was meant to cover is reported on the next run and
+# reveals itself. One direction needs a gate and the other is self-announcing,
+# so a key check would be harmless and would add nothing. Recorded so the guard
+# is not later "completed" out of symmetry, which is the same reason `Marker` is
+# checked against run output rather than source: saying which half needs the
+# treatment, and why, is what stops the next edit being cargo. The observation is
+# the review session's.
+foreach ($aliasing in $allowedAliases.Keys) {
+    foreach ($aliased in $allowedAliases[$aliasing]) {
+        if (-not ($controls | Where-Object { $_.Name -eq $aliased -and $_.Marker })) {
+            $controlFailures +=
+                "$aliasing's alias exception names $aliased, which declares no marker, so the " +
+                'exception can never fire; delete it rather than leaving a permission that could wake up'
+        }
+    }
+}
+$declaredMarkers = @{}
+foreach ($control in $controls) {
+    if ($control.Marker) { $declaredMarkers[$control.Name] = $control.Marker }
+}
+foreach ($log in Get-ChildItem $controlLogs -Filter *.txt -ErrorAction SilentlyContinue) {
+    $text = [IO.File]::ReadAllText($log.FullName)
+    foreach ($other in $declaredMarkers.Keys) {
+        if ($other -eq $log.BaseName) { continue }
+        if (-not $text.Contains($declaredMarkers[$other])) { continue }
+        if ($allowedAliases[$log.BaseName] -contains $other) { continue }
+        $controlFailures +=
+            "$($log.BaseName): its log renders $other's marker, so that control cannot " +
+            'distinguish its rule from this one; give each a marker only its own assertion produces'
+    }
 }
 
 if ($controlFailures.Count -gt 0) {

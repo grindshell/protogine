@@ -109,14 +109,14 @@ fn on(map: &TileMapHandle, collider: TileCollider) -> Option<ColliderPlacement> 
 /// A kernel with one collider attached to one entity, and the map it joined.
 ///
 /// The map handle is returned because from M2 Phase 2 a collider names its map,
-/// and `set_tilemap`'s return is the only way to name the implicit one.
+/// and `create_tilemap`'s return is the only way to name it.
 fn session(
     map: TileMap,
     at: (f64, f64),
     collider: TileCollider,
 ) -> (Kernel, EntityHandle, TileMapHandle) {
     let mut kernel = Kernel::new();
-    let installed = kernel.set_tilemap(map).expect("install");
+    let installed = kernel.create_tilemap(map).expect("install");
     let body = kernel
         .spawn(Position { x: at.0, y: at.1 })
         .expect("spawn the body");
@@ -1199,7 +1199,7 @@ fn the_sweep_agrees_with_an_integer_oracle_across_the_geometry_domain() {
         );
         // The premise every guard downstream reasons from: what the solver
         // commits is what the placement check accepts. `set_tile`'s solidity
-        // short-circuit, `set_tilemap`'s revalidation and N5's own fallback
+        // short-circuit, `replace_tilemap`'s revalidation and N5's own fallback
         // argument are all unsound without it, so it is asserted rather than
         // argued.
         assert!(
@@ -1294,7 +1294,7 @@ fn attaching_and_resizing_check_every_covered_cell() {
         Err(KernelError::InvalidTileMap),
         "attaching requires a live map"
     );
-    let installed = kernel.set_tilemap(pillar()).unwrap();
+    let installed = kernel.create_tilemap(pillar()).unwrap();
     // (64, 64) is exactly the pillar cell.
     assert_eq!(
         kernel.set_tile_collider(&body, on(&installed, square(32.0))),
@@ -1357,7 +1357,7 @@ fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
         (0, 0),
     );
     assert_eq!(
-        kernel.set_tilemap(trapping),
+        kernel.replace_tilemap(&installed, trapping),
         Err(KernelError::Collision(CollisionError::Placement)),
         "installation must revalidate every live collider before the swap"
     );
@@ -1377,10 +1377,10 @@ fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
         (0, 0),
     );
     assert_eq!(
-        kernel.set_tilemap(fine_grid),
+        kernel.replace_tilemap(&installed, fine_grid),
         Err(KernelError::Collision(CollisionError::Extent))
     );
-    assert_eq!(kernel.tile_face(Axis::X, 1), Ok(32.0));
+    assert_eq!(kernel.tile_face(&installed, Axis::X, 1), Ok(32.0));
 
     // A legal replacement swaps in and the body keeps its position.
     let opened = build(
@@ -1389,7 +1389,7 @@ fn a_map_replacement_that_would_trap_a_body_refuses_without_changing_the_map() {
         32,
         (0, 0),
     );
-    assert!(kernel.set_tilemap(opened).is_ok());
+    assert!(kernel.replace_tilemap(&installed, opened).is_ok());
     assert_eq!(kernel.tile_solid(&installed, 2, 2), Ok(false));
     assert_eq!(kernel.position(&body), Ok(Position { x: 32.0, y: 32.0 }));
 }
@@ -1428,21 +1428,27 @@ fn a_solid_edit_under_a_body_refuses_and_leaves_the_cell() {
 }
 
 #[test]
-fn the_map_can_be_cleared_only_once_every_collider_is_detached() {
-    let (mut kernel, body, _installed) = session(room(), (32.0, 32.0), square(32.0));
+fn the_map_can_be_removed_only_once_every_collider_is_detached() {
+    let (mut kernel, body, installed) = session(room(), (32.0, 32.0), square(32.0));
     assert_eq!(
-        kernel.clear_tilemap(),
+        kernel.remove_tilemap(&installed),
         Err(KernelError::CollidersAttached),
-        "T6 refuses to clear the map beneath a body"
+        "T6 refuses to remove a map beneath its own member"
     );
-    assert!(kernel.tilemap().unwrap().is_some());
+    assert_eq!(kernel.tilemap_count(), 1);
 
-    // The M1 transition recipe: detach, replace, reposition, reattach.
+    // The transition recipe: detach, remove, create, reposition, reattach.
+    // Removing twice is no longer "clearing an absent map succeeds" - the
+    // second call names a handle whose map is gone, which is a refusal.
     assert_eq!(kernel.set_tile_collider(&body, None), Ok(()));
-    assert_eq!(kernel.clear_tilemap(), Ok(()));
-    assert_eq!(kernel.clear_tilemap(), Ok(()), "clearing twice succeeds");
-    assert_eq!(kernel.tilemap(), Ok(None));
-    let reinstalled = kernel.set_tilemap(corridor(&[9])).unwrap();
+    assert_eq!(kernel.remove_tilemap(&installed), Ok(()));
+    assert_eq!(
+        kernel.remove_tilemap(&installed),
+        Err(KernelError::InvalidTileMap),
+        "a removed map cannot be removed again"
+    );
+    assert_eq!(kernel.tilemap_count(), 0);
+    let reinstalled = kernel.create_tilemap(corridor(&[9])).unwrap();
     kernel
         .set_position(&body, Position { x: 64.0, y: 32.0 })
         .unwrap();
@@ -1456,7 +1462,7 @@ fn the_map_can_be_cleared_only_once_every_collider_is_detached() {
 #[test]
 fn the_collider_limit_is_enforced_and_released() {
     let mut kernel = Kernel::new();
-    let installed = kernel.set_tilemap(room()).unwrap();
+    let installed = kernel.create_tilemap(room()).unwrap();
     // Bodies never block one another, so they can all share a cell.
     let mut handles = Vec::new();
     for _ in 0..MAX_LIVE_COLLIDERS {
@@ -1497,7 +1503,7 @@ fn collider_calls_refuse_foreign_stale_and_reused_handles() {
 
     // Another session's handle is not this session's, even at the same slot.
     let mut other = Kernel::new();
-    other.set_tilemap(room()).unwrap();
+    other.create_tilemap(room()).unwrap();
     let foreign = other.spawn(Position { x: 32.0, y: 32.0 }).unwrap();
     assert_eq!(
         kernel.tile_collider(&foreign),
@@ -1539,7 +1545,7 @@ fn entities_without_colliders_integrate_exactly_as_before() {
         .set_velocity(&free, Velocity { x: 1200.0, y: 0.0 })
         .unwrap();
     // A map with a wall directly in the path changes nothing without a collider.
-    kernel.set_tilemap(corridor(&[9])).unwrap();
+    kernel.create_tilemap(corridor(&[9])).unwrap();
     assert_eq!(kernel.live_colliders(), 0);
     for _ in 0..30 {
         kernel.fixed_update().unwrap();
@@ -1636,7 +1642,7 @@ fn replay_is_independent_of_insertion_order() {
     let mut runs = Vec::new();
     for reversed in [false, true] {
         let mut kernel = Kernel::new();
-        let installed = kernel.set_tilemap(corridor(&[9, 14])).unwrap();
+        let installed = kernel.create_tilemap(corridor(&[9, 14])).unwrap();
         let mut handles = Vec::new();
         let order: Vec<usize> = if reversed {
             (0..starts.len()).rev().collect()
@@ -1818,9 +1824,9 @@ fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
     // case where the overrun is material, at up to 81 units per collider.
     exhausted(&mut kernel);
     assert_eq!(
-        kernel.set_tilemap(room()).map(|_| ()),
+        kernel.replace_tilemap(&installed, room()),
         work,
-        "set_tilemap must be budgeted against what the callback has left"
+        "replace_tilemap must be budgeted against what the callback has left"
     );
     assert_eq!(
         kernel.tile(&installed, 3, 1),
@@ -1831,7 +1837,7 @@ fn every_entry_point_is_budgeted_against_what_the_callback_has_left() {
 
 /// One assertion per entry point for the anti-probing half of the same rule.
 ///
-/// `set_tilemap`'s is the one with teeth. A replacement that 1,023 colliders
+/// `replace_tilemap`'s is the one with teeth. A replacement that 1,023 colliders
 /// pass and the 1,024th fails walks about 82,000 cells; uncharged it would cost
 /// two units, and the attempt budget allows 4,096 calls per callback, so a
 /// script could spend hundreds of millions of cell visits against a
@@ -1870,12 +1876,15 @@ fn every_entry_point_charges_the_work_it_performed_before_refusing() {
     kernel.begin_callback();
     assert!(
         kernel
-            .set_tilemap(build(
-                &["#####", "#####", "#####", "#####", "#####"],
-                32,
-                32,
-                (0, 0)
-            ))
+            .replace_tilemap(
+                &installed,
+                build(
+                    &["#####", "#####", "#####", "#####", "#####"],
+                    32,
+                    32,
+                    (0, 0)
+                )
+            )
             .is_err()
     );
     assert!(
@@ -1983,7 +1992,7 @@ fn max_load_stress_completes_inside_the_fixed_pass_ceiling() {
         ),
     ] {
         let mut kernel = Kernel::new();
-        let installed = kernel.set_tilemap(stress_map()).unwrap();
+        let installed = kernel.create_tilemap(stress_map()).unwrap();
         let body = square(8.0);
         let mut handles = Vec::new();
         for index in 0..MAX_LIVE_COLLIDERS {

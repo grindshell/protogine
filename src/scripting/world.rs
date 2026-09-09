@@ -363,10 +363,14 @@ impl EngineContext<'_> {
     /// so no kernel borrow is ever live across VM conversion, VM allocation or
     /// a deadline check.
     ///
-    /// M1's nine are M2-6's nine plus the three lifecycle names it splits
-    /// `set_tilemap` and `clear_tilemap` into; the count is left out of this
-    /// sentence deliberately, because a number here is a second place to keep
-    /// in step with the table below and the migration table in M2-6.
+    /// **Every one of them names the map it acts on.** M1's implicit installer
+    /// and its clear are gone rather than kept alongside: a surface carrying
+    /// both would be the "two ways to name a map" M2-6 forbids, and the reason
+    /// it forbids them is that the implicit one keeps working until a game
+    /// creates a second map and then quietly changes what existing calls mean.
+    ///
+    /// No count in this sentence, deliberately - a number here would be a
+    /// second place to keep in step with the table below and with M2-6's.
     fn bind_tilemap<'s>(
         &'s self,
         scope: &'s Scope<'s, '_>,
@@ -374,21 +378,6 @@ impl EngineContext<'_> {
         writable: bool,
         world: &Table,
     ) -> mlua::Result<()> {
-        world.raw_set(
-            "set_tilemap",
-            scope.create_function(move |lua, args: MultiValue| {
-                self.begin(budget, true, writable)?;
-                let desc = Table::from_lua_multi(args, lua)?;
-                let map = self.candidate(&desc, budget)?;
-                // The handle is discarded: this call is M1's and addresses the
-                // implicit map. `create_tilemap` below is its M2-6 successor and
-                // the two coexist only until this phase finishes migrating the
-                // surface; a shipped surface carrying both would be exactly the
-                // "two ways to name a map" M2-6 forbids.
-                let result = self.kernel.borrow_mut().set_tilemap(map).map(|_| ());
-                kernel_result(budget, result)
-            })?,
-        )?;
         world.raw_set(
             "create_tilemap",
             scope.create_function(move |lua, args: MultiValue| {
@@ -479,14 +468,6 @@ impl EngineContext<'_> {
                 let handle = AnyUserData::from_lua_multi(args, lua)?;
                 let handle = map_handle(handle)?;
                 let result = self.kernel.borrow_mut().remove_tilemap(&handle);
-                kernel_result(budget, result)
-            })?,
-        )?;
-        world.raw_set(
-            "clear_tilemap",
-            scope.create_function(move |_, ()| {
-                self.begin(budget, true, writable)?;
-                let result = self.kernel.borrow_mut().clear_tilemap();
                 kernel_result(budget, result)
             })?,
         )?;
@@ -762,7 +743,6 @@ fn kernel_result<T>(budget: &UtilityBudget<'_>, result: Result<T, KernelError>) 
         | Err(KernelError::Inactive)
         | Err(KernelError::InvalidHandle)
         | Err(KernelError::Nonfinite)
-        | Err(KernelError::NoTileMap)
         | Err(KernelError::InvalidTileMap)
         | Err(KernelError::TileMap(_))
         | Err(KernelError::Collision(_))
@@ -981,7 +961,7 @@ mod tests {
                         origin_x = 0, origin_y = 0, solids = {true}, cells = cells,
                     }
                 end,
-                update = function(ctx) ctx.world.set_tilemap(description) end,
+                update = function(ctx) ctx.world.create_tilemap(description) end,
             }
         "#,
         )
@@ -1021,8 +1001,9 @@ mod tests {
         // boundary assertion exists precisely because that property was once
         // unasserted. Found by the review session, cross-checking every control's
         // declared marker against the panic site in its own run log.
-        assert!(
-            kernel.tilemap().unwrap().is_none(),
+        assert_eq!(
+            kernel.tilemap_count(),
+            0,
             "a refused copy must publish no map"
         );
         // **How far it got is the machine's; that it stopped on a boundary is

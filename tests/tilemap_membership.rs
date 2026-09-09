@@ -282,7 +282,7 @@ fn a_teleport_validates_against_the_member_map_and_no_other() {
     // the session's current map instead of the body's own would then be
     // indistinguishable from a correct one until the body transfers away, which
     // is exactly the substitution M2-R2 exists to forbid.
-    let near = kernel.set_tilemap(walled(3, 32, 0)).unwrap();
+    let near = kernel.create_tilemap(walled(3, 32, 0)).unwrap();
     let far = kernel.create_tilemap(walled(5, 32, 0)).unwrap();
     let entity = body(&mut kernel, &near, (32.0, 32.0), (0.0, 0.0));
 

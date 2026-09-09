@@ -520,9 +520,21 @@ fn arguments_and_collider_options_are_refused_without_narrowing() {
     // them and init returned normally. A malformed argument that latched instead
     // would arrive here rather than at the Luau assertion, because a latch
     // escapes `pcall` at the next VM interrupt and never reaches it.
-    runtime.init().unwrap_or_else(|error| {
-        panic!("every argument refusal must stay catchable rather than latch: {error}")
-    });
+    // Split for the same reason as the transfer battery's: one wrapper naming
+    // "latch" is the sentence *every* failure of this fixture produces, so the
+    // control that declares it cannot distinguish a latch from a Luau assertion
+    // that failed for any other reason - and four other controls targeting this
+    // same fixture rendered it in their logs. The latch now has an assertion
+    // only a latch reaches, keyed on the shape every budget refusal has.
+    let outcome = runtime.init();
+    if let Err(error) = &outcome {
+        assert!(
+            !error.message.contains("limit exceeded"),
+            "a malformed argument latched a budget instead of staying catchable: {}",
+            error.message
+        );
+    }
+    outcome.expect("a refused argument must leave every assertion in this fixture holding");
     assert_eq!(runtime.state(), ScriptState::Running);
     assert_eq!(runtime.kernel().live_colliders(), 0);
 }
@@ -534,8 +546,6 @@ fn only_init_and_update_may_mutate_the_map_or_its_colliders() {
         local body, map
         local function readonly(ctx, phase)
             local w = ctx.world
-            assert(not pcall(w.set_tilemap, room()), phase .. ': set_tilemap must refuse')
-            assert(not pcall(w.clear_tilemap), phase .. ': clear_tilemap must refuse')
             assert(not pcall(w.create_tilemap, room()), phase .. ': create_tilemap must refuse')
             assert(not pcall(w.replace_tilemap, map, room()),
                 phase .. ': replace_tilemap must refuse')
@@ -579,7 +589,7 @@ fn only_init_and_update_may_mutate_the_map_or_its_colliders() {
     // both rather than only denying access to them.
     assert_eq!(runtime.kernel().tilemap_storage_bytes(), 0);
     assert_eq!(runtime.kernel().live_colliders(), 0);
-    assert!(runtime.kernel().tilemap().is_err());
+    assert_eq!(runtime.kernel().tilemap_count(), 0);
 }
 
 #[test]
@@ -610,7 +620,7 @@ fn collider_calls_refuse_stale_reused_and_expired_handles() {
                 local w = ctx.world
                 -- The previous callback's functions are expired, and the new
                 -- ones are scoped exactly as the old ones already were.
-                for _, name in {'set_tilemap', 'clear_tilemap', 'create_tilemap',
+                for _, name in {'create_tilemap', 'transfer_collider',
                                 'replace_tilemap', 'remove_tilemap', 'tilemap_info', 'tile',
                                 'tile_solid', 'tiles_region', 'set_tile', 'set_tile_collider',
                                 'tile_collider'} do
@@ -1058,7 +1068,7 @@ fn a_failed_callback_runs_no_systems_and_releases_the_map_it_was_holding() {
     // Stop releases map and collider storage rather than only denying access.
     assert_eq!(runtime.kernel().tilemap_storage_bytes(), 0);
     assert_eq!(runtime.kernel().live_colliders(), 0);
-    assert!(runtime.kernel().tilemap().is_err());
+    assert_eq!(runtime.kernel().tilemap_count(), 0);
 }
 
 #[test]
@@ -1237,7 +1247,7 @@ fn only_create_tilemap_returns_a_value_that_could_fail_to_allocate() {
     // handle to publish, and a failure between the two would leave an entity
     // nobody can name; `tests/scripting.rs` and the unit harness beside the
     // bindings cover that. This is the fixture that says which map calls have
-    // that shape, and until M2-6 split `set_tilemap` the answer was none.
+    // that shape, and before M2-6 split M1's implicit installer the answer was none.
     //
     // `create_tilemap` is now the one that does, and it carries the same
     // rollback for the same reason: a failure between the insert and the
@@ -1252,16 +1262,18 @@ fn only_create_tilemap_returns_a_value_that_could_fail_to_allocate() {
         return {init = function(ctx)
             local w = ctx.world
             local body = w.spawn(32, 32)
-            assert(select('#', w.set_tilemap(room())) == 0, 'set_tilemap returns nothing')
-            assert(select('#', w.clear_tilemap()) == 0, 'clear_tilemap returns nothing')
             map = w.create_tilemap(room())
+            local other = w.create_tilemap(room())
             assert(select('#', w.set_tile(map, 2, 1, 1)) == 0, 'set_tile returns nothing')
             assert(select('#', w.set_tile_collider(body, box(map, 32))) == 0,
                 'set_tile_collider returns nothing')
+            assert(select('#', w.transfer_collider(body, other)) == 0,
+                'transfer_collider returns nothing')
             assert(select('#', w.set_tile_collider(body, nil)) == 0,
                 'detaching returns nothing')
             assert(select('#', w.replace_tilemap(map, room())) == 0,
                 'replace_tilemap returns nothing')
+            assert(select('#', w.remove_tilemap(other)) == 0, 'remove_tilemap returns nothing')
             -- Exactly one, not "at least one": a second return value would be a
             -- second thing to allocate after the mutation and a second thing to
             -- roll back.
@@ -1886,11 +1898,46 @@ fn every_refused_transfer_leaves_membership_geometry_and_position_untouched() {
     "#,
     );
     let mut runtime = load(&root);
-    // Every refusal above is catchable: M2-8 puts illegal transfers on the
-    // `pcall` side, so a latch would arrive here rather than at a Luau line.
-    runtime.init().unwrap_or_else(|error| {
-        panic!("a refused transfer must stay catchable rather than latch: {error}")
-    });
+    // **Two failures arrive here as `Err`, and a single wrapper naming one of
+    // them wears its name on both.** M2-8 puts illegal transfers on the `pcall`
+    // side, so a latch escapes the script and lands here - but so does a Luau
+    // assertion that failed for any other reason, and this used to be one
+    // `unwrap_or_else` whose message said "must stay catchable rather than
+    // latch". Every control targeting this fixture rendered that sentence,
+    // whatever it had actually broken, so `no-collider-latches` could not
+    // distinguish its rule from any other failure of the same test.
+    //
+    // Split, so the latch has an assertion only a latch reaches.
+    //
+    // **It discriminates on the message convention, not on the classification,
+    // and that is a weaker thing than it looks.** Every latch in this engine
+    // today reads "… limit exceeded", so keying on that is what makes the
+    // assertion reachable at all - but the *realistic* misclassification is an
+    // arm written `Some("no collider")`, because a developer wrongly latching
+    // `NoCollider` would not call it a limit. That version passes the check
+    // below and falls through to the generic expect. So the convention-following
+    // defect gets the specific marker and the convention-breaking one gets the
+    // generic message, which is backwards.
+    //
+    // Coverage is not affected - the expect catches any latch either way - and
+    // the fix is not a better string: it is `kernel_result` returning something
+    // typed instead of `Option<&str>`, so a test can ask whether an error was
+    // classified as latching rather than what its text happens to say. Filed as
+    // a follow-up rather than done here. The reading is the review session's.
+    //
+    // This is Phase 1's marker-reachability rule inverted. There the unwrap
+    // panicked *before* the named assertion; here the unwrap *is* the named
+    // assertion, so every failure wears its name. Found by the review session,
+    // sweeping every control's log for every other control's declared marker.
+    let outcome = runtime.init();
+    if let Err(error) = &outcome {
+        assert!(
+            !error.message.contains("limit exceeded"),
+            "an illegal transfer latched a budget instead of staying catchable: {}",
+            error.message
+        );
+    }
+    outcome.expect("a refused transfer must leave every assertion in this fixture holding");
     assert_eq!(runtime.state(), ScriptState::Running);
     assert_eq!(runtime.kernel().live_colliders(), 1);
 }
