@@ -613,15 +613,54 @@ impl EngineContext<'_> {
                 let handle = entity(handle)?;
                 let result = self.kernel.borrow().tile_collider(&handle);
                 match kernel_result(budget, result)? {
-                    // The map is dropped here and returned alongside the box in
-                    // Phase 3, which is where M2-6 puts it. Until the script
-                    // can name a map, a handle it could read would have nothing
-                    // to be passed to.
-                    Some((_, collider)) => {
-                        Ok(Value::Table(tilemap::collider_table(lua, &collider)?))
+                    // The map comes back as a field of the box rather than as a
+                    // second return value (M2-6). The kernel already hands over
+                    // one `Option<(TileMapHandle, TileCollider)>`, so a field
+                    // mirrors what Rust returns; two values would be a
+                    // Luau-only shape the two surfaces then disagree about.
+                    //
+                    // This is also the first thing that makes `TileMapHandle`'s
+                    // `__eq` reachable from a script: until a read returned a
+                    // map, every wrapper a script held came from its own
+                    // `create_tilemap` and raw identity already answered.
+                    Some((map, collider)) => {
+                        let table = tilemap::collider_table(lua, &collider)?;
+                        table.raw_set("map", lua.create_userdata(map)?)?;
+                        Ok(Value::Table(table))
                     }
                     None => Ok(Value::Nil),
                 }
+            })?,
+        )?;
+        world.raw_set(
+            "transfer_collider",
+            scope.create_function(move |lua, args: MultiValue| {
+                self.begin(budget, true, writable)?;
+                // The box is deliberately absent from this signature: the
+                // kernel carries the body's own forward, so there is no
+                // geometry here to restate wrongly. `x` and `y` are present
+                // together or not at all - a half-given position is a
+                // malformed call rather than one axis kept.
+                let (handle, map, x, y) =
+                    <(AnyUserData, AnyUserData, Option<f64>, Option<f64>)>::from_lua_multi(
+                        args, lua,
+                    )?;
+                let handle = entity(handle)?;
+                let map = map_handle(map)?;
+                let position = match (x, y) {
+                    (Some(x), Some(y)) => Some(Position { x, y }),
+                    (None, None) => None,
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "a transfer position needs both x and y",
+                        ));
+                    }
+                };
+                let result = self
+                    .kernel
+                    .borrow_mut()
+                    .transfer_collider(&handle, &map, position);
+                kernel_result(budget, result)
             })?,
         )?;
         Ok(())
@@ -697,7 +736,30 @@ fn kernel_result<T>(budget: &UtilityBudget<'_>, result: Result<T, KernelError>) 
         // and one the compiler cannot object to because the arm already exists
         // and would only move. Now that the match is total it looks complete,
         // which is exactly when that mistake becomes available.
-        Err(KernelError::Inactive)
+        // `NoCollider` is the first variant added since the catch-all went, and
+        // this arm is what the compiler demanded. M2-8 puts "illegal transfer"
+        // on the catchable side and this is the narrowest case of it: a script
+        // asking to move a body that has nothing to move.
+        //
+        // **Observed rather than assumed, because it could only be observed
+        // once.** The variant was added, the crate built, and the error read
+        // before this arm existed - adding both in one edit would have left the
+        // mechanism untested for the single case that could test it, the way a
+        // control written after the fix proves nothing. What it said:
+        //
+        //   error[E0004]: non-exhaustive patterns:
+        //   `&Err(KernelError::NoCollider)` not covered
+        //      --> src/scripting/world.rs:675:27
+        //
+        // Pointing at `match &result` in this function and at nothing else -
+        // not at the enum, not at a call site. "It errors" and "it errors at
+        // the site you would want to edit" are different claims, and only the
+        // second is the design. No mutation control can cover this, because
+        // removing an arm is a compile error rather than a failing test, so
+        // building and reading is the whole of the coverage. The review session
+        // asked for the observation before the arm was written.
+        Err(KernelError::NoCollider)
+        | Err(KernelError::Inactive)
         | Err(KernelError::InvalidHandle)
         | Err(KernelError::Nonfinite)
         | Err(KernelError::NoTileMap)
@@ -775,14 +837,20 @@ mod tests {
 
     /// Two wrappers for one map, which is the only shape `__eq` exists for.
     ///
-    /// **No script-level fixture can reach this yet, and that is worth stating
-    /// rather than discovering.** Every wrapper a script can hold today came
-    /// from its own `create_tilemap` call, so raw identity already separates two
-    /// maps and already agrees with the metamethod on one:
+    /// **This was the only thing covering the metamethod for one commit, and it
+    /// no longer is.** While every wrapper a script could hold came from its own
+    /// `create_tilemap`, raw identity already separated two maps and already
+    /// agreed with the metamethod on one, so
     /// `a_script_holds_two_map_handles_across_callbacks_and_removes_them_one_at_a_time`
-    /// passes with `__eq` deleted. What makes a second wrapper for a *live* map
-    /// reachable from Lua is `tile_collider` returning the map (M2-6), and until
-    /// that lands this is the only thing that says the metamethod works.
+    /// passed with `__eq` deleted. `tile_collider` returning the map (M2-6) is
+    /// what changed it: `a_transferred_body_is_stopped_by_the_destination_rooms_wall`
+    /// compares a handle read back from a collider against the one
+    /// `create_tilemap` returned, which are two wrappers for one map and cannot
+    /// agree under raw identity.
+    ///
+    /// Kept anyway rather than retired to the fixture: this one reaches the
+    /// wrong-*type* comparison, which no script can - Lua has no other userdata
+    /// to hand `ctx.world` that would get this far.
     #[test]
     fn two_wrappers_for_one_map_compare_equal_while_staying_distinct_values() {
         let lua = Lua::new();
@@ -944,9 +1012,18 @@ mod tests {
             "the copy must outlast a 2 ms budget for this to test anything: {}",
             error.message
         );
+        // Publication only, and the message says so. It used to read "stopped
+        // at a batch boundary rather than publishing a map", which claimed the
+        // property the assertion *below* tests - so `conversion-skips-the-deadline`
+        // detected at this line and read as though it had witnessed the boundary.
+        // It had witnessed a published map, which is a different thing and the
+        // right thing for this line. The confusion had extra force because the
+        // boundary assertion exists precisely because that property was once
+        // unasserted. Found by the review session, cross-checking every control's
+        // declared marker against the panic site in its own run log.
         assert!(
             kernel.tilemap().unwrap().is_none(),
-            "the copy stopped at a batch boundary rather than publishing a map"
+            "a refused copy must publish no map"
         );
         // **How far it got is the machine's; that it stopped on a boundary is
         // the code's, and only the second is asserted.**
@@ -971,9 +1048,28 @@ mod tests {
         // Pre-existing: this test is unchanged since 7c66540. It is repaired
         // here rather than left because this commit moved the charging it
         // measures into the shared `candidate`.
+        // **Zero is legal too, one `dense` call earlier.** `solid_flags` charges
+        // nothing before it calls `dense`, and `dense` observes the deadline
+        // before it charges - the same fact that makes 1 legal - so a deadline
+        // already past at the *first* check of the *first* call leaves this at
+        // 0, with the solids array never charged. Written `charged == 0 || …`
+        // rather than `charged >= 1 && …` deliberately: the second would turn an
+        // overflow panic into a named failure for a state the code can produce,
+        // which is the defect this assertion was rewritten to remove, one call
+        // to the left. Raised by the review session against `3e30eff`, where the
+        // subtraction underflows instead, and carried forward here rather than
+        // rewriting that commit for a rare tail in a test.
+        //
+        // Reachable on demand rather than by argument: set `callback_timeout`
+        // above to `Duration::from_nanos(1)` and the deadline is already past at
+        // the first check. This assertion passes there; `3e30eff`'s form fails
+        // with "attempt to subtract with overflow", which is the panic this
+        // shape exists to avoid and is why the case is admitted rather than
+        // guarded against.
         let charged = kernel.callback_work();
         assert!(
-            (charged - 1).is_multiple_of(tilemap::CONVERSION_BATCH as u64) && charged < 262_145,
+            (charged == 0 || (charged - 1).is_multiple_of(tilemap::CONVERSION_BATCH as u64))
+                && charged < 262_145,
             "a refused copy must stop on a batch boundary short of the whole map: {charged}"
         );
         assert_eq!(host.state(), ScriptState::Faulted);

@@ -104,6 +104,15 @@ const WALL_X: f64 = ((FIRST_SOLID_COLUMN - 1) * TILE) as f64;
 const _: () = assert!((FIRST_SOLID_COLUMN - 1) * TILE == 96);
 /// Matching `SPAWN_X, SPAWN_Y` in the prelude.
 const SPAWN: Position = Position { x: 32.0, y: 32.0 };
+/// The transfer fixture's second room, whose wall is one column further out.
+///
+/// Derived the same way as `WALL_X` and from the same tile size, so the two
+/// rooms differ in exactly one number and the fixture's claim - that a
+/// transferred body is stopped by a *different* wall - cannot quietly become a
+/// claim about the same wall.
+const WIDE_SOLID_COLUMN: u32 = 5;
+const WIDE_WALL_X: f64 = ((WIDE_SOLID_COLUMN - 1) * TILE) as f64;
+const _: () = assert!(WIDE_SOLID_COLUMN > FIRST_SOLID_COLUMN);
 
 fn positions(runtime: &GameRuntime) -> Vec<Position> {
     runtime
@@ -818,9 +827,24 @@ fn a_refused_region_is_charged_for_what_it_could_have_returned() {
             map = w.create_tilemap(room())
             -- A request no map could serve is still charged, before either
             -- allocation, so a refusal is bounded rather than free to repeat.
-            -- 4,096 is the per-call cap, so 64 of them is the whole ceiling.
+            --
+            -- **The request asks for more than the per-call cap, deliberately.**
+            -- This used to ask for 64 x 64 = 4,096, which *is* the cap - so
+            -- `ids.min(MAX_REGION_CELLS)` was a no-op here and nothing in the
+            -- suite could tell the cap's value from its existence. Doubling the
+            -- cap would have left every fixture green: the charge was 4,096
+            -- either way, because that is what the call asked for. 128 x 128
+            -- asks for 16,384 and is charged 4,096, so 64 of them is exactly the
+            -- 262,144 per-callback ceiling and the 65th crosses it. Raise the
+            -- cap and the ceiling is reached inside the loop instead, `64
+            -- refusals` is never logged, and the log assertion below fails.
+            --
+            -- Found by the review session, cross-checking each control against
+            -- the panic site in its own run log: `region-charges-what-was-asked-for`
+            -- detected two steps away, in the catchability fixture, precisely
+            -- because this one could not see the cap at all.
             for _ = 1, 64 do
-                assert(not pcall(w.tiles_region, map, 0, 0, 64, 64), 'past the far edge')
+                assert(not pcall(w.tiles_region, map, 0, 0, 128, 128), 'past the per-call cap')
             end
             ctx.log('64 refusals')
             pcall(w.tiles_region, map, 0, 0, 1, 1)
@@ -837,10 +861,16 @@ fn a_refused_region_is_charged_for_what_it_could_have_returned() {
         "64 refused requests must exhaust the region output ceiling: {}",
         error.message
     );
+    // A distinct message from the `expect_err` above, deliberately. Both
+    // assertions guard this fixture and two different controls land on them -
+    // charging after the refusal instead of before reaches the first, a cap that
+    // charges more than `MAX_REGION_CELLS` reaches this one - so sharing a
+    // marker would make their verdicts indistinguishable in the run logs, which
+    // is the audit dimension that found the cap gap in the first place.
     assert_eq!(
         runtime.take_logs(),
         ["64 refusals"],
-        "64 refused requests must exhaust the region output ceiling"
+        "all 64 refusals must fit under the ceiling, so the cap is what bounds them"
     );
 }
 
@@ -1171,19 +1201,7 @@ fn tile_work_accounting_starts_over_in_every_callback() {
 
     let mut runtime = load(&root);
     runtime.init().unwrap();
-    runtime.step(InputSnapshot::default()).unwrap();
-    // The gate above is arithmetic about numbers written here; this ties them
-    // to the room and the loop the script actually runs. Either the prelude's
-    // room shrinking or the Luau loop count changing breaks it, which is what
-    // the `const _` alone cannot see - it would go on asserting a premise about
-    // a fixture that no longer matches it.
-    assert_eq!(
-        runtime.kernel().callback_work(),
-        INSTALLS_PER_TICK * ROOM_UNITS,
-        "one tick must charge exactly its installs, or the premise above is \
-         arithmetic about a different room"
-    );
-    for tick in 1..TICKS {
+    for tick in 0..TICKS {
         runtime
             .step(InputSnapshot::default())
             .unwrap_or_else(|error| {
@@ -1192,6 +1210,25 @@ fn tile_work_accounting_starts_over_in_every_callback() {
     }
     assert_eq!(runtime.state(), ScriptState::Running);
     assert_eq!(runtime.completed_ticks(), TICKS);
+    // The gate above is arithmetic about numbers written here; this ties them to
+    // the room and the loop the script actually runs, which the `const _` alone
+    // cannot see - it would go on asserting a premise about a fixture that no
+    // longer matched it. A shrunken room leaves the loop green and fails here.
+    //
+    // **After the loop, not before it, and the harness is why.** Placed before,
+    // it read 2,525 under the `callback-work-never-reset` control - `init`'s 25
+    // plus the tick's 2,500 - and failed there, so the control's own marker was
+    // never reached and the guard read as uncovered. That is this repo's rule
+    // about named markers, applied to a fixture I had just written to enforce a
+    // different one: a marker is only reachable if nothing before it can panic
+    // first. Reading the last tick's charge instead costs nothing and leaves the
+    // control's path clear.
+    assert_eq!(
+        runtime.kernel().callback_work(),
+        INSTALLS_PER_TICK * ROOM_UNITS,
+        "one tick must charge exactly its installs, or the premise above is \
+         arithmetic about a different room"
+    );
 }
 
 #[test]
@@ -1260,12 +1297,12 @@ fn a_script_holds_two_map_handles_across_callbacks_and_removes_them_one_at_a_tim
                 -- M2-1 needs and the one a shape-based comparison would lose.
                 --
                 -- Both comparisons here hold under raw identity, so neither
-                -- witnesses the `__eq` metamethod: every wrapper a script can
-                -- hold today comes from its own `create_tilemap`, and no read
-                -- returns a map yet.
-                -- `two_wrappers_for_one_map_compare_equal_while_staying_distinct_values`
-                -- beside the bindings is what covers the metamethod until
-                -- `tile_collider` returns the map and makes it reachable here.
+                -- witnesses the `__eq` metamethod: both wrappers came from this
+                -- fixture's own `create_tilemap` calls.
+                -- `a_transferred_body_is_stopped_by_the_destination_rooms_wall`
+                -- is what witnesses it now, by comparing a handle the *binding*
+                -- built from `tile_collider` against one `create_tilemap`
+                -- returned.
                 assert(a ~= b, 'two maps are two handles')
                 assert(a == a, 'a handle equals itself')
             end,
@@ -1592,6 +1629,270 @@ fn the_aggregate_cell_budget_latches_with_the_map_count_nowhere_near_full() {
     // cells is the largest release either fixture reaches.
     assert_eq!(runtime.kernel().tilemap_count(), 0);
     assert_eq!(runtime.kernel().tilemap_cells(), 0);
+}
+
+#[test]
+fn a_transferred_body_is_stopped_by_the_destination_rooms_wall() {
+    // **The transfer is asserted by a consequence that is not the transfer.**
+    // A fixture that checked `transfer_collider` returned without error, or that
+    // `tile_collider(body).map` had changed, would be a test written after the
+    // decision and would agree with whatever I built. What cannot agree with me
+    // is where the body comes to rest: after the move it is stopped by the
+    // second room's wall, at a coordinate the first room has a *solid cell* at,
+    // so the body could not be there at all if it were still a member of it.
+    // The constraint is the review session's and it is the reason D5 went this
+    // way rather than leaving transfer to the schema battery.
+    //
+    // **Which half catches what, and there are two sites rather than one.**
+    //
+    // A one-edit fault in *writing* membership - `transfer_collider` storing
+    // the wrong map - fails at the Luau `and now of the second`, never reaching
+    // the positions below, because `tile_collider` reads the same stored
+    // component. The cheaper check gets there first, which is the right order.
+    //
+    // A one-edit fault in the sweep's *read* of membership is a different site
+    // and the Luau check cannot see it: `tile_collider` never goes through
+    // `sweep_bodies`, so the assertion passes and the body rests at the wrong
+    // wall. That is what the positions below are for, and it is an established
+    // mutation target rather than a hypothetical - `map: membership.0` is
+    // already patched by `run_tilemap_membership_controls.ps1`. The harness
+    // beside this file exercises it here as `sweep-resolves-one-map-for-all`.
+    //
+    // An earlier version of this note said the consequence was unreachable by
+    // any single edit, on the grounds that membership is the one thing the
+    // sweep reads. That conflated the write with the read, and it claimed less
+    // coverage than the fixture has. Corrected by the review session, who also
+    // supplied the two-body arrangement that makes the patch bite.
+    //
+    // So of the two independent oracles in this file only one stays a backstop:
+    // the fixed-pass check in
+    // `owned_reads_are_snapshots_and_input_tables_are_never_retained` genuinely
+    // cannot be reached by one edit, for the single-storage reason recorded
+    // there. This one can, and is.
+    let root = room_game(
+        r#"
+        local function wide_room()
+            local cells = {}
+            for row = 0, 3 do
+                for column = 0, 5 do
+                    local solid = row == 0 or row == 3 or column == 0 or column >= 5
+                    cells[row * 6 + column + 1] = (solid and 1 or 0)
+                end
+            end
+            return {
+                columns = 6, rows = 4, tile_width = 32, tile_height = 32,
+                origin_x = 0, origin_y = 0, solids = {true}, cells = cells,
+            }
+        end
+        local body, stay, wide, ticks = nil, nil, nil, 0
+        return {
+            init = function(ctx)
+                local w = ctx.world
+                map = w.create_tilemap(room())
+                wide = w.create_tilemap(wide_room())
+                -- The two rooms differ in one column, and it is the column the
+                -- body will be standing in after the move.
+                assert(w.tile_solid(map, 4, 1), 'the first room walls column 4')
+                assert(not w.tile_solid(wide, 4, 1), 'the second leaves it open')
+                -- **Two bodies, and the second one is what makes the sweep-side
+                -- control bite.** With one body the established mutation of
+                -- `map: membership.0` - resolving every candidate against the
+                -- first one's map - is inert, because the first candidate falls
+                -- back to its own membership. A body that stays behind gives the
+                -- patch something to resolve wrongly, in whichever direction the
+                -- query order happens to run.
+                stay = w.spawn(SPAWN_X, SPAWN_Y)
+                w.set_tile_collider(stay, box(map, 32))
+                w.set_velocity(stay, SPEED, 0)
+                -- One row down, so the two never share a cell and neither is
+                -- ever the reason the other stopped.
+                body = w.spawn(SPAWN_X, SPAWN_Y + 32)
+                w.set_tile_collider(body, box(map, 32))
+                w.set_velocity(body, SPEED, 0)
+            end,
+            update = function(ctx)
+                local w = ctx.world
+                ticks += 1
+                if ticks == 41 then
+                    local before = w.tile_collider(body)
+                    -- **This comparison is the first thing that joins the two
+                    -- halves of map identity**, and it is a claim of this
+                    -- fixture rather than a side effect of testing the move.
+                    -- `before.map` is a wrapper the *binding* built from what
+                    -- the kernel returned; `map` is the one `create_tilemap`
+                    -- handed back. Raw identity says they differ, so this holds
+                    -- only if `__eq` is consulted *and* the binding hands back a
+                    -- wrapper the metamethod applies to. The in-crate fixture
+                    -- `two_wrappers_for_one_map_compare_equal_while_staying_distinct_values`
+                    -- builds both wrappers itself, so it witnesses the
+                    -- metamethod and never that join. Named by the review
+                    -- session, who assumed the in-crate one already covered it.
+                    assert(before.map == map, 'a member of the first room')
+                    -- No box argument: the kernel carries the body's own
+                    -- forward, so there is nothing here to restate wrongly.
+                    w.transfer_collider(body, wide)
+                    local after = w.tile_collider(body)
+                    assert(after.map == wide, 'and now of the second')
+                    assert(after.map ~= before.map, 'which are not the same map')
+                    -- The box came through untouched, which is the property the
+                    -- separate call buys over an optional-field placement.
+                    assert(after.width == before.width and after.height == before.height)
+                    assert(after.offset_x == before.offset_x)
+                end
+            end,
+        }
+    "#,
+    );
+    let mut runtime = load(&root);
+    runtime.init().unwrap();
+
+    // Thirty-two ticks to reach the first room's wall, eight pressing against it.
+    let next_row = SPAWN.y + f64::from(TILE);
+    step(&mut runtime, 40);
+    assert_eq!(
+        positions(&runtime),
+        [
+            Position {
+                x: WALL_X,
+                y: SPAWN.y
+            },
+            Position {
+                x: WALL_X,
+                y: next_row
+            }
+        ],
+        "both bodies must be held by the first room's wall before the transfer"
+    );
+
+    // Tick 41 transfers one of them, and the sixteen ticks from there carry it
+    // across the cell the first room walls off while the other stays put.
+    step(&mut runtime, 16);
+    assert_eq!(runtime.state(), ScriptState::Running);
+    assert_eq!(
+        positions(&runtime),
+        [
+            Position {
+                x: WALL_X,
+                y: SPAWN.y
+            },
+            Position {
+                x: WIDE_WALL_X,
+                y: next_row
+            }
+        ],
+        "after the transfer the body must be stopped by the second room's wall"
+    );
+    // Membership is a property of the body and not of position: both maps cover
+    // these world coordinates, so nothing about where either ended up could have
+    // been inferred from the geometry. Asserting *both* is what makes the
+    // sweep-side control order-independent - a patch resolving every candidate
+    // against one body's map leaves whichever body it did not belong to at the
+    // wrong wall, and this fails either way round.
+    assert_eq!(runtime.kernel().tilemap_count(), 2);
+    assert_eq!(runtime.kernel().live_colliders(), 2);
+}
+
+#[test]
+fn every_refused_transfer_leaves_membership_geometry_and_position_untouched() {
+    // M2-5 requires a transfer to succeed or refuse atomically. Each refusal
+    // below is followed by reading the whole observable state back, because
+    // "it returned an error" and "it changed nothing" are different claims and
+    // only the second is what atomic means.
+    let root = room_game(
+        r#"
+        local function tiny()
+            local cells = {}
+            for index = 1, 24 do cells[index] = 0 end
+            return {
+                columns = 6, rows = 4, tile_width = 8, tile_height = 8,
+                origin_x = 0, origin_y = 0, solids = {true}, cells = cells,
+            }
+        end
+        return {init = function(ctx)
+            local w = ctx.world
+            map = w.create_tilemap(room())
+            local body = w.spawn(SPAWN_X, SPAWN_Y)
+            w.set_tile_collider(body, box(map, 32))
+
+            local function unchanged(what)
+                local held = w.tile_collider(body)
+                assert(held.map == map, what .. ': membership moved')
+                assert(held.width == 32 and held.height == 32, what .. ': the box changed')
+                assert(held.offset_x == 0 and held.offset_y == 0, what .. ': the offset changed')
+                local at = w.position(body)
+                assert(at.x == SPAWN_X and at.y == SPAWN_Y, what .. ': the body moved')
+            end
+
+            -- A body with no collider has no box to carry, which is the one
+            -- refusal `tile_collider` cannot supply: it answers nil there,
+            -- right for a read and useless for a move.
+            local bare = w.spawn(64, 32)
+            assert(w.tile_collider(bare) == nil)
+            assert(not pcall(w.transfer_collider, bare, map), 'a body with no collider')
+            -- The `unchanged` idiom, which the six refusals below all use and
+            -- this one had skipped - so a reader following the pattern would
+            -- have assumed it was covered. `bare` has no collider to check, so
+            -- the equivalents are that none was attached and that it did not
+            -- move.
+            --
+            -- Currently unexercisable, and the reason is outside this fixture:
+            -- `transfer_collider` refuses from a pure `tile_collider` read
+            -- before `set_tile_collider` is reached, so no write can precede
+            -- the refusal and there is nothing for it to leave behind. *If that
+            -- read is ever moved below a write, these two lines become live.*
+            assert(w.tile_collider(bare) == nil, 'a body with no collider: one was attached')
+            local bare_at = w.position(bare)
+            assert(bare_at.x == 64 and bare_at.y == SPAWN_Y,
+                'a body with no collider: the body moved')
+
+            -- A destination that is not a live map.
+            local dead = w.create_tilemap(room())
+            w.remove_tilemap(dead)
+            assert(not pcall(w.transfer_collider, body, dead), 'a removed destination')
+            unchanged('a removed destination')
+
+            -- A destination whose tiles are smaller: the same 32-pixel box is
+            -- eight tiles on a 32-pixel grid and thirty-two on an 8-pixel one,
+            -- so it is legal here and refused there without either map moving.
+            local small = w.create_tilemap(tiny())
+            assert(not pcall(w.transfer_collider, body, small), 'an extent against a smaller tile')
+            unchanged('an extent against a smaller tile')
+
+            -- A legal map but an illegal destination box: (0, 0) is the room's
+            -- own solid corner.
+            assert(not pcall(w.transfer_collider, body, map, 0, 0), 'into a wall')
+            unchanged('into a wall')
+
+            -- Half a position is a malformed call rather than one axis kept.
+            assert(not pcall(w.transfer_collider, body, map, 64), 'x without y')
+            assert(not pcall(w.transfer_collider, body, map, nil, 64), 'y without x')
+            unchanged('half a position')
+
+            -- Wrong kinds of handle, in both argument positions.
+            assert(not pcall(w.transfer_collider, map, map), 'a map is not a body')
+            assert(not pcall(w.transfer_collider, body, body), 'a body is not a map')
+            assert(not pcall(w.transfer_collider, body), 'no destination at all')
+            unchanged('a wrong handle')
+
+            -- And the same call succeeds once it is asked for something legal,
+            -- so none of the refusals above passed by breaking transfer itself.
+            local other = w.create_tilemap(room())
+            w.transfer_collider(body, other, 64, 32)
+            local moved = w.tile_collider(body)
+            assert(moved.map == other and moved.map ~= map, 'the legal transfer moved it')
+            assert(w.position(body).x == 64, 'and carried the position with it')
+            assert(moved.width == 32, 'and the box came through untouched')
+        end}
+    "#,
+    );
+    let mut runtime = load(&root);
+    // Every refusal above is catchable: M2-8 puts illegal transfers on the
+    // `pcall` side, so a latch would arrive here rather than at a Luau line.
+    runtime.init().unwrap_or_else(|error| {
+        panic!("a refused transfer must stay catchable rather than latch: {error}")
+    });
+    assert_eq!(runtime.state(), ScriptState::Running);
+    assert_eq!(runtime.kernel().live_colliders(), 1);
 }
 
 #[test]

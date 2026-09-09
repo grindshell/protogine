@@ -218,6 +218,61 @@ fn a_refused_transfer_leaves_membership_geometry_and_position_untouched() {
 }
 
 #[test]
+fn transfer_carries_the_body_s_own_box_and_refuses_a_body_that_has_none() {
+    // `transfer_collider` is M2-5's named entry point and the reason it is a
+    // separate call rather than an optional position on the placement table:
+    // the box is read from the body here instead of being restated by the
+    // caller, so there is no second copy to get wrong. This is what says the
+    // carried box is the body's own and not a default.
+    let mut kernel = Kernel::new();
+    let first = kernel.create_tilemap(walled(4, 32, 0)).unwrap();
+    let second = kernel.create_tilemap(walled(6, 32, 0)).unwrap();
+
+    // Deliberately not a square and not the fixture default, so a transfer that
+    // rebuilt the box from anything but the body's own is a different shape.
+    let odd = TileCollider {
+        offset_x: 3.0,
+        offset_y: 5.0,
+        width: 17.0,
+        height: 29.0,
+    };
+    let entity = kernel.spawn(Position { x: 64.0, y: 64.0 }).unwrap();
+    kernel
+        .set_tile_collider(&entity, joining(&first, odd))
+        .unwrap();
+
+    kernel.transfer_collider(&entity, &second, None).unwrap();
+    let (map, carried) = kernel.tile_collider(&entity).unwrap().unwrap();
+    assert_eq!(map, second, "the transfer moved membership");
+    assert_eq!(
+        carried, odd,
+        "the transfer must carry the body's own box, not rebuild one"
+    );
+    assert_eq!(
+        kernel.position(&entity).unwrap(),
+        Position { x: 64.0, y: 64.0 },
+        "a transfer with no position must not move the body"
+    );
+
+    // The refusal that `tile_collider` cannot give: it answers `Ok(None)` for a
+    // body with no collider, which is right for a read and useless for a move.
+    // M2-5 needed a variant that did not exist, which is the price the review
+    // session put on choosing a separate call.
+    let bare = kernel.spawn(Position { x: 64.0, y: 64.0 }).unwrap();
+    assert_eq!(kernel.tile_collider(&bare), Ok(None));
+    assert_eq!(
+        kernel.transfer_collider(&bare, &first, None),
+        Err(KernelError::NoCollider)
+    );
+    assert_eq!(
+        kernel.live_colliders(),
+        1,
+        "a refused transfer must not have attached anything"
+    );
+    assert_eq!(kernel.tile_collider(&bare), Ok(None));
+}
+
+#[test]
 fn a_teleport_validates_against_the_member_map_and_no_other() {
     // M2-R2. The same sentence as T5 - "reject an overlapping or out-of-map
     // destination" - now means the body's own map, and the two maps here make

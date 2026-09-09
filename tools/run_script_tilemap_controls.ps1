@@ -56,13 +56,19 @@ $features = @('--no-default-features', '--features', 'scripting')
 $bindings = @('--test', 'script_tilemap') + $features
 $kernelTests = @('--test', 'collision') + $features
 $unitTests = @('--lib') + $features
+# `tilemap_membership` is a core suite and carries no feature gate, so it builds
+# under this feature set too. Running it here rather than under
+# `--no-default-features` alone keeps every target on one build, which is what
+# makes the 'Compiling protogine' gate mean the patch rebuilt rather than that
+# the feature set changed.
+$membership = @('--test', 'tilemap_membership') + $features
 
 $regionCharged = @'
                 self.region_output(budget, u64::from(columns) * u64::from(rows))?;
                 let result = self
                     .kernel
                     .borrow()
-                    .tiles_region(column, row, columns, rows);
+                    .tiles_region(&map, column, row, columns, rows);
                 let ids = kernel_result(budget, result)?;
 '@ -replace "`r`n", "`n"
 
@@ -96,10 +102,99 @@ $controls = @(
        Marker = 'an unknown field is refused'
        Edits = @(@{ F = '    plain(desc, DESCRIPTION_FIELDS, "tilemap description")?;'; R = '' }) }
 
-    @{ Name = 'collider-options-unvalidated'; File = 'src/scripting/tilemap.rs'
+    # Re-earned rather than replaced: M2-6 turned the options table into a
+    # placement, so the schema this removes is `PLACEMENT_FIELDS` and the name
+    # follows it. Same rule, same fixture, same marker - which is what makes
+    # "re-earned" a claim about the same control rather than a new one wearing
+    # its number.
+    @{ Name = 'placement-unvalidated'; File = 'src/scripting/tilemap.rs'
        Test = 'arguments_and_collider_options_are_refused_without_narrowing'
        Marker = 'an unknown option'
-       Edits = @(@{ F = '    plain(options, COLLIDER_FIELDS, "collider options")?;'; R = '' }) }
+       Edits = @(@{ F = '    plain(options, PLACEMENT_FIELDS, "collider placement")?;'; R = '' }) }
+
+    # --- M2-5's transfer, and the refusal it needed ---------------------------
+    #
+    # The rules added with `transfer_collider`. The first two are why it is a
+    # separate call rather than an optional position on the placement table: the
+    # destination has to be the one named, and the box has to be the body's own
+    # rather than one the call rebuilds.
+
+    @{ Name = 'transfer-ignores-its-destination'; File = 'src/kernel.rs'
+       Test = 'a_transferred_body_is_stopped_by_the_destination_rooms_wall'
+       Marker = 'and now of the second'
+       # The second anchor carries the line below it. `map: map.clone(),` alone
+       # occurs twice - here and in a `cfg(test)` helper whose deeper
+       # indentation still contains the shorter string - and the ambiguity gate
+       # above now refuses that. The helper's next line is
+       # `collider: TileCollider {`, so including `collider,` names this site
+       # alone.
+       Edits = @(@{ F = '        let Some((_, collider)) = self.tile_collider(entity)? else {'
+                    R = '        let Some((held, collider)) = self.tile_collider(entity)? else {' },
+                 @{ F = "                map: map.clone(),`n                collider,"
+                    R = "                map: held,`n                collider," }) }
+
+    @{ Name = 'transfer-rebuilds-the-box'; File = 'src/kernel.rs'; Target = $membership
+       Test = 'transfer_carries_the_body_s_own_box_and_refuses_a_body_that_has_none'
+       Marker = "the transfer must carry the body's own box"
+       Edits = @(@{ F = '                collider,
+                position,'
+                    R = '                collider: TileCollider { offset_x: 0.0, offset_y: 0.0, width: 32.0, height: 32.0 },
+                position,' }) }
+
+    @{ Name = 'transfer-accepts-a-body-with-no-collider'; File = 'src/kernel.rs'
+       Test = 'every_refused_transfer_leaves_membership_geometry_and_position_untouched'
+       Marker = 'a body with no collider'
+       Edits = @(@{ F = '            return Err(KernelError::NoCollider);'; R = '            return Ok(());' }) }
+
+    # M2-8 puts an illegal transfer on the catchable side. Latching it would let
+    # a refusal a script is entitled to `pcall` take the session down instead.
+    @{ Name = 'no-collider-latches'; File = 'src/scripting/world.rs'
+       Test = 'every_refused_transfer_leaves_membership_geometry_and_position_untouched'
+       Marker = 'must stay catchable rather than latch'
+       Edits = @(@{ F = '        Err(KernelError::NoCollider)
+        | Err(KernelError::Inactive)'
+                    R = '        Err(KernelError::NoCollider) => Some("no collider"),
+        Err(KernelError::Inactive)' }) }
+
+    # A half-given position is a malformed call, not one axis kept. Silently
+    # dropping it would move the body on one axis and leave the other, which is
+    # a wrong position rather than a refusal.
+    @{ Name = 'half-a-transfer-position-accepted'; File = 'src/scripting/world.rs'
+       Test = 'every_refused_transfer_leaves_membership_geometry_and_position_untouched'
+       Marker = 'x without y'
+       Edits = @(@{ F = '                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "a transfer position needs both x and y",
+                        ));
+                    }'
+                    R = '                    _ => None,' }) }
+
+    # The sweep's *read* of membership, which is a different site from the write
+    # above and invisible to every Luau assertion: `tile_collider` reads the
+    # stored component and never goes through `sweep_bodies`, so this fault
+    # leaves the membership checks green and the body resting at the wrong wall.
+    # Only the position assertions can see it.
+    #
+    # The patch is the one `run_tilemap_membership_controls.ps1` already uses -
+    # resolve every candidate against the first one's map - and it is inert with
+    # a single body, because the first candidate falls back to its own
+    # membership. The fixture carries a second body that stays behind for
+    # exactly this reason, and asserts *both* positions, so whichever way the
+    # query order runs, one of them is at the wrong wall. Found by the review
+    # session, correcting a note of mine that had recorded this as unreachable.
+    @{ Name = 'sweep-resolves-one-map-for-all'; File = 'src/kernel.rs'
+       Test = 'a_transferred_body_is_stopped_by_the_destination_rooms_wall'
+       Marker = "after the transfer the body must be stopped by the second room's wall"
+       Edits = @(@{ F = '                map: membership.0,'
+                    R = '                map: bodies.first().map_or(membership.0, |first| first.map),' }) }
+
+    # M2-6 returns the map alongside the box because M2-2 makes membership
+    # uninferable from position. Dropping it leaves a script no way to observe
+    # which map a body is on at all.
+    @{ Name = 'tile-collider-drops-the-map'; File = 'src/scripting/world.rs'
+       Test = 'a_transferred_body_is_stopped_by_the_destination_rooms_wall'
+       Marker = 'a member of the first room'
+       Edits = @(@{ F = '                        table.raw_set("map", lua.create_userdata(map)?)?;'; R = '' }) }
 
     @{ Name = 'array-metatable-accepted'; File = 'src/scripting/tilemap.rs'
        Test = 'the_description_schema_refuses_every_malformed_shape_catchably'
@@ -190,6 +285,20 @@ $controls = @(
        Edits = @(@{ F = '        let charged = ids.min(u64::from(MAX_REGION_CELLS));'
                     R = '        let charged = ids;' }) }
 
+    # The cap's *value*, which nothing witnessed until this phase. Its fixture
+    # used to ask for exactly `MAX_REGION_CELLS`, so `ids.min(…)` was a no-op
+    # there and doubling the cap left every fixture green - the cap's existence
+    # was covered, through latching, two fixtures away; its value was covered
+    # nowhere. The fixture now asks for four times the cap, so the charge is
+    # capped rather than coincidentally exact, and this control fails it at a
+    # marker of its own rather than sharing `region-refusal-uncharged`'s.
+    # Found by the review session's (name, edit, marker) audit against run logs.
+    @{ Name = 'region-cap-charges-more-than-it-returns'; File = 'src/scripting/world.rs'
+       Test = 'a_refused_region_is_charged_for_what_it_could_have_returned'
+       Marker = 'all 64 refusals must fit under the ceiling'
+       Edits = @(@{ F = '        let charged = ids.min(u64::from(MAX_REGION_CELLS));'
+                    R = '        let charged = ids.min(u64::from(MAX_REGION_CELLS) * 2);' }) }
+
     @{ Name = 'region-refusal-uncharged'; File = 'src/scripting/world.rs'
        Test = 'a_refused_region_is_charged_for_what_it_could_have_returned'
        Marker = '64 refused requests must exhaust the region output ceiling'
@@ -197,12 +306,33 @@ $controls = @(
                 let result = self
                     .kernel
                     .borrow()
-                    .tiles_region(column, row, columns, rows);
+                    .tiles_region(&map, column, row, columns, rows);
                 let ids = kernel_result(budget, result)?;
                 self.region_output(budget, ids.len() as u64)?;
 '@ -replace "`r`n", "`n" }) }
 
     # --- The aggregate tile-work ceiling -------------------------------------
+    #
+    # **`callback-work-unenforced` and `work-limit-catchable` share their
+    # evidence, and each name claims more than the shared evidence shows.** They
+    # are genuinely different rules - whether the ceiling is enforced at all, and
+    # whether its refusal latches - but in this fixture they produce identical
+    # observable outcomes: under either patch `init()` returns `Ok`, the `pcall`
+    # swallows, `unreachable` is logged, and `expect_err` fires before anything
+    # downstream can tell the two apart. Both detect; neither *isolates* the rule
+    # its name asserts.
+    #
+    # Recorded rather than fixed, because separating them needs a fixture where
+    # the ceiling is enforced and the classification is wrong - a different
+    # fixture, not another assertion - and the pair's verdict is real either way.
+    # Found by the review session auditing whether any two controls share a
+    # verdict, which is a question the harness's own summary cannot ask: it
+    # reports that each control detected, never that two detected the same thing.
+    #
+    # `call-budget-is-the-whole-ceiling` and `set-tile-budgeted-against-the-ceiling`
+    # also share a marker, and that pair is fine - it is the shared-helper and
+    # call-site pair working as designed, sharing a marker only because
+    # `set_tile`'s assertion happens to come first.
 
     @{ Name = 'callback-work-unenforced'; File = 'src/kernel.rs'
        Test = 'the_aggregate_tile_work_ceiling_latches_outside_pcall'
@@ -210,6 +340,26 @@ $controls = @(
        Edits = @(@{ F = "        if self.callback_work > MAX_CALLBACK_WORK {`n            return Err(CollisionError::Work.into());`n        }"
                     R = '' }) }
 
+    # **These two are the same rule and take different patch shapes, and which
+    # shape is available is a property of the match rather than of the rule.**
+    # Deletion works for an arm whose variant a *broader pattern later* also
+    # covers, and dies for an arm that is the only cover for its variant - the
+    # difference between an arm that changes a classification and an arm that
+    # *is* one. That predicts which controls break the next time someone adds or
+    # removes a grouping, which "the match is exhaustive now" does not.
+    #
+    # `Collision(Work)` can be deleted because `| Err(KernelError::Collision(_))`
+    # follows it in the catchable arm and picks the variant up. **So arm order is
+    # load-bearing for this control as well as for the behaviour**: move the
+    # broad arm above the specific one and the rule changes and the control stops
+    # compiling, in either order of discovery.
+    #
+    # `ColliderLimit` has no such sibling, so deleting it is `E0004`. It is
+    # reclassified instead, which tests the same thing - the arm is what puts the
+    # variant on the latching side. That control was silently dead from the
+    # moment Phase 2 made the match exhaustive until this phase ran the harness;
+    # my first account of that said deletion had died for *every* arm at once,
+    # which the control immediately above falsifies. Found by the review session.
     @{ Name = 'work-limit-catchable'; File = 'src/scripting/world.rs'
        Test = 'the_aggregate_tile_work_ceiling_latches_outside_pcall'
        Marker = 'the aggregate tile-work ceiling must refuse the 64th install, uncatchably'
@@ -219,7 +369,8 @@ $controls = @(
     @{ Name = 'collider-limit-catchable'; File = 'src/scripting/world.rs'
        Test = 'the_live_collider_limit_latches_outside_pcall'
        Marker = 'the collider limit must refuse the 1025th attachment, uncatchably'
-       Edits = @(@{ F = '        Err(KernelError::ColliderLimit) => Some("collider limit exceeded"),'; R = '' }) }
+       Edits = @(@{ F = '        Err(KernelError::ColliderLimit) => Some("collider limit exceeded"),'
+                    R = '        Err(KernelError::ColliderLimit) => None,' }) }
 
     @{ Name = 'callback-work-never-reset'; File = 'src/scripting/world.rs'
        Test = 'tile_work_accounting_starts_over_in_every_callback'
@@ -245,14 +396,20 @@ $controls = @(
     @{ Name = 'set-position-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
        Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
        Marker = 'set_position must be budgeted against what the callback has left'
-       Edits = @(@{ F = "            let map = self.tilemap.as_ref().ok_or(KernelError::NoTileMap)?;`n            let mut work = Self::remaining_work(self.callback_work);"
-                    R = "            let map = self.tilemap.as_ref().ok_or(KernelError::NoTileMap)?;`n            let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
+       # Re-earned: M2-R2 made `set_position` resolve the body's *member* map,
+       # so the line above the budget is the membership lookup rather than
+       # M1's `self.tilemap`. Same rule, same fixture, same marker.
+       Edits = @(@{ F = "                .expect(`"a member map cannot be removed while it has members`");`n            let mut work = Self::remaining_work(self.callback_work);"
+                    R = "                .expect(`"a member map cannot be removed while it has members`");`n            let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
 
     @{ Name = 'attach-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
        Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
        Marker = 'set_tile_collider must be budgeted against what the callback has left'
-       Edits = @(@{ F = "            .expect(`"every entity has a position`");`n        let mut work = Self::remaining_work(self.callback_work);"
-                    R = "            .expect(`"every entity has a position`");`n        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
+       # Re-earned: Phase 2 put the map lookup and the extent check between the
+       # position read and the budget, so the anchor moves to the line that is
+       # actually above it now.
+       Edits = @(@{ F = "        placement.collider.check(&map.info())?;`n        let mut work = Self::remaining_work(self.callback_work);"
+                    R = "        placement.collider.check(&map.info())?;`n        let mut work = WorkBudget::new(MAX_CALLBACK_WORK);" }) }
 
     @{ Name = 'install-budgeted-against-the-ceiling'; File = 'src/kernel.rs'
        Test = 'every_entry_point_is_budgeted_against_what_the_callback_has_left'; Target = $kernelTests
@@ -276,8 +433,11 @@ $controls = @(
     @{ Name = 'attach-charges-after-refusing'; File = 'src/kernel.rs'
        Test = 'every_entry_point_charges_the_work_it_performed_before_refusing'; Target = $kernelTests
        Marker = 'a refused attachment is charged for the cells it checked'
-       Edits = @(@{ F = "        self.callback_work = self.callback_work.saturating_add(work.used());`n        placement?;"
-                    R = "        placement?;`n        self.callback_work = self.callback_work.saturating_add(work.used());" }) }
+       # Re-earned: Phase 2 renamed the deferred result from `placement` to
+       # `legal`. The swap is the same one - charge after refusing instead of
+       # before - and the marker has not moved.
+       Edits = @(@{ F = "        self.callback_work = self.callback_work.saturating_add(work.used());`n        legal?;"
+                    R = "        legal?;`n        self.callback_work = self.callback_work.saturating_add(work.used());" }) }
 
     @{ Name = 'install-charges-after-refusing'; File = 'src/kernel.rs'
        Test = 'every_entry_point_charges_the_work_it_performed_before_refusing'; Target = $kernelTests
@@ -307,7 +467,15 @@ $controls = @(
     @{ Name = 'conversion-skips-the-deadline'; File = 'src/scripting/tilemap.rs'
        Test = 'scripting::world::tests::a_description_copy_stops_at_the_deadline_without_installing_a_map'
        Target = $unitTests
-       Marker = 'the copy stopped at a batch boundary rather than publishing a map'
+       # The marker follows the assertion's reworded message. It used to read
+       # "the copy stopped at a batch boundary rather than publishing a map",
+       # which claimed a property that assertion does not test - it checks
+       # `is_none()`, so what it witnesses is that no map was published. The
+       # boundary claim lives on the assertion below it, which exists because
+       # that property was once unasserted. Same rule, same fixture, same
+       # assertion; only the message is honest now. Found by the review session
+       # comparing declared markers against panic sites in the run logs.
+       Marker = 'a refused copy must publish no map'
        Edits = @(@{ F = "            budget.check()?;`n            charge(CONVERSION_BATCH.min(expected - seen) as u64)?;"
                     R = "            charge(CONVERSION_BATCH.min(expected - seen) as u64)?;" }) }
 
@@ -420,14 +588,55 @@ try {
         # rule that two files now enforce jointly can be removed from both.
         $patched = @{}
         foreach ($file in $controlSources) { $patched[$file] = $controlOriginals[$file] }
+        # Two ways an anchor can fail to name the site the control claims, and
+        # until now only the first was refused.
+        #
+        # **Stale**: the anchor matches nothing, so the control proves nothing.
+        # Caught since M1, and it is what found four controls that Phase 2 had
+        # silently broken.
+        #
+        # That gate exists for slow decay, and it turns out to catch *fresh*
+        # drift identically and for free: rewording one assertion's message
+        # here refused its control on the next run, within a minute of the edit.
+        # Worth saying because the gate reads as being about rot, so the next
+        # person to change an assertion message will not expect it to fire - and
+        # when it does, the control is stale rather than the code, exactly as the
+        # message says. The same is true of `Marker`, which is checked against
+        # the run output rather than against the source and so cannot be audited
+        # by reading at all.
+        #
+        # **Ambiguous**: the anchor matches more than once, and `String.Replace`
+        # rewrites *every* occurrence - so the control patches sites it does not
+        # name. `transfer-ignores-its-destination` did exactly this: its
+        # `map: map.clone(),` also matched inside a `#[cfg(test)]` helper four
+        # hundred lines away, at deeper indentation, because a 16-space anchor is
+        # a substring of a 20-space line. It detected anyway, and only for a
+        # reason outside itself - that module is not compiled for an integration
+        # target, so the corrupted second site was never seen. Point the same
+        # control at `--lib` and it stops compiling, at which point the harness
+        # discards the run as proving nothing.
+        #
+        # A verdict that depends on where the collateral damage happens to land
+        # is not a verdict about the rule. Requiring exactly one occurrence turns
+        # "this control patches the site I named" from a hope into a gate, and it
+        # is the same shape as the staleness refusal one clause wider. Found by
+        # the review session, which scanned all 43 anchors; this was the only one
+        # that tripped it.
         $missing = $false
+        $ambiguous = $null
         foreach ($edit in $control.Edits) {
             $file = if ($edit.File) { $edit.File } else { $control.File }
             if (-not $patched[$file].Contains($edit.F)) { $missing = $true; break }
+            $occurrences = ([regex]::Matches($patched[$file], [regex]::Escape($edit.F))).Count
+            if ($occurrences -ne 1) { $ambiguous = "$occurrences occurrences in $file"; break }
             $patched[$file] = $patched[$file].Replace($edit.F, $edit.R)
         }
         if ($missing) {
             $controlFailures += "$($control.Name): anchor no longer matches $($control.File); the control is stale, not the code"
+            continue
+        }
+        if ($ambiguous) {
+            $controlFailures += "$($control.Name): anchor is ambiguous - $ambiguous; the patch would rewrite sites the control does not name"
             continue
         }
 

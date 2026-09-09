@@ -118,6 +118,16 @@ pub enum KernelError {
     Collision(CollisionError),
     /// An operation that requires no attached collider found one (T6).
     CollidersAttached,
+    /// A transfer of a body that has no collider to transfer (M2-5).
+    ///
+    /// The refusal `tile_collider` cannot supply: it answers `Ok(None)` there,
+    /// which is right for a read and useless for a move. Transfer is the only
+    /// caller, because it is the only operation that carries a box forward
+    /// instead of receiving one - attaching to a body with no collider is
+    /// ordinary attachment and not this. The review session priced this variant
+    /// as the real cost of choosing a separate call over an optional-field
+    /// placement table, against my estimate of two surfaces to keep in step.
+    NoCollider,
     ColliderLimit,
     /// The integration scratch could not be reserved.
     Capacity,
@@ -150,6 +160,7 @@ impl fmt::Display for KernelError {
             Self::CollidersAttached => {
                 f.write_str("the map cannot be cleared while a collider is attached")
             }
+            Self::NoCollider => f.write_str("the entity has no collider to transfer"),
             Self::ColliderLimit => f.write_str("collider limit exceeded"),
             Self::Capacity => f.write_str("could not reserve collision scratch"),
             Self::UnpairedCollider => {
@@ -889,6 +900,47 @@ impl Kernel {
             self.colliders += 1;
         }
         Ok(())
+    }
+
+    /// Move a body to another map, keeping the box it already has (M2-5).
+    ///
+    /// One call, so the change of membership and the change of position happen
+    /// together or not at all: [`Self::set_tile_collider`] validates both
+    /// handles, then the extents against the destination's tile size, then the
+    /// placement, and writes nothing until all three pass.
+    ///
+    /// **The box is read here rather than supplied by the caller, and that is
+    /// the whole reason this is a separate call.** The alternative M2-5 left
+    /// open was one placement table carrying an optional position, which makes
+    /// every transfer restate the geometry: a script would either hard-code it
+    /// twice or read it back and re-serialise it, and a single wrong field
+    /// silently resizes the body instead of refusing. Worse than it sounds,
+    /// because a mis-sized box lands in a solid cell only *sometimes* - it
+    /// refuses intermittently, which reads as a flaky engine rather than a bug
+    /// in the caller. Fetching the value from the place that already owns it
+    /// removes the second copy rather than policing it, which is the same move
+    /// as writing the collider and its membership as one bundle. The argument
+    /// is the review session's.
+    ///
+    /// `None` keeps the body where it is, which only reaches a legal placement
+    /// when the two maps overlap; a disjoint destination needs the position.
+    pub fn transfer_collider(
+        &mut self,
+        entity: &EntityHandle,
+        map: &TileMapHandle,
+        position: Option<Position>,
+    ) -> Result<(), KernelError> {
+        let Some((_, collider)) = self.tile_collider(entity)? else {
+            return Err(KernelError::NoCollider);
+        };
+        self.set_tile_collider(
+            entity,
+            Some(ColliderPlacement {
+                map: map.clone(),
+                collider,
+                position,
+            }),
+        )
     }
 
     /// An entity's collider and the map it is a member of, or `None` when it
